@@ -11,10 +11,12 @@ repository contains no game data, keys or executable, and nothing here decrypts 
 ```
 shell/                       our runtime (C++17, MSVC)
   image.hpp / image.cpp      PE64 image mapper — parses the original exe and maps it flat
+  imports.hpp / imports.cpp  import table reader — the libraries and functions the image imports
   hosting.hpp / hosting.cpp  flat hosting model — one GPU backing over the game's flat VA space,
                              uniform heap_base shift, real pages bound on demand
-  tests/                     unit tests (test_hosting, test_image; no game data)
-  CMakeLists.txt             build definition (whiwhi_shell + tests, CTest)
+  tools/list_imports.cpp     prints an image's imported libraries and function counts
+  tests/                     unit tests (test_hosting, test_image, test_imports; no game data)
+  CMakeLists.txt             build definition (whiwhi_shell + tools + tests, CTest)
   build.cmd                  build + test helper
 docs/
   exe-map/MAP.md             outward map of the original exe: memory model, GPU-address channels
