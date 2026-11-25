@@ -68,14 +68,21 @@ void describe_tls(const Image& image, const std::vector<std::uint8_t>& flat) {
     const std::uint64_t data_end = rd64(flat, at + 8);
     const std::uint64_t callbacks = rd64(flat, at + 24);
     const std::uint32_t zero_fill = rd32(flat, at + 32);
+    // Alignment is stored as a section-alignment code: 0 = none asked, n = 2^(n-1) bytes.
+    const unsigned alignment_code = (rd32(flat, at + 36) >> 20) & 0xF;
     std::size_t callback_count = 0;
     if (callbacks >= base) {
         for (std::uint64_t c = callbacks - base; fits(flat, c, 8) && rd64(flat, c) != 0; c += 8) {
             ++callback_count;
         }
     }
-    std::printf("thread-local storage: %llu bytes of initial data, %u bytes zero-filled, %zu callbacks\n",
+    std::printf("thread-local storage: %llu bytes of initial data, %u bytes zero-filled, %zu callbacks",
                 static_cast<unsigned long long>(data_end - data_begin), zero_fill, callback_count);
+    if (alignment_code) {
+        std::printf(", aligned to %u bytes\n", 1u << (alignment_code - 1));
+    } else {
+        std::printf(", no alignment asked\n");
+    }
 }
 
 } // namespace
