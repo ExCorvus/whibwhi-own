@@ -89,7 +89,7 @@ Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no de
 
 - BVH ray-tracing rehydration implemented (rebuild from element geometry via the XDXR builder; BOX16; size-guarded). Boot 36 verifying. See docs/reports/bvh-rehydrate-report.md.
 
-- Shell footing refined (ExCorvus): the shell GUIDES the game � it is the active host driving frame cadence, memory and liveness, not a passive reverse-and-check harness. The shell leads; the game follows.
+- Shell footing refined (ExCorvus): the shell GUIDES the game - it is the active host driving frame cadence, memory and liveness, not a passive reverse-and-check harness. The shell leads; the game follows.
 
 - Boot 36: BVH ray-tracing rehydration WORKS (rebuilt by the layer's builder); watchdog armed satisfied; frames render brighter. Remaining: a hole-crossing READ descriptor in committed placed RAM (the contiguous coverage must be lazy/on-demand to avoid over-import).
 
@@ -116,6 +116,7 @@ Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no de
 - The graphics library is only 3 imported entry points, but the whole graphics interface is reached through them,
   so that number understates the work.
 - Progress is measured against this list (what the executable itself declares it needs), not by how far a run gets.
+
 ## 2026-11-26 - what the original executable asks of a loader, and what connects on a PC (measured)
 
 - Loader facts read from the file (shell/tools/describe_image.cpp): 176.4 MiB in memory in 10 sections; it has a
@@ -133,3 +134,29 @@ Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no de
 - Every import that is not connected points at a stub that names the function if the game calls it.
 - Not done yet: thread-local storage for the placed image, and starting it.
 - The game folder listing was identical before and after (nothing written).
+
+## 2026-11-26 - thread-local storage for the placed image (measured)
+
+- The original executable asks for 5,248 bytes of initial thread-local data per thread, no zero-filled bytes,
+  16-byte alignment, and has 2 thread-storage callbacks (shell/tools/describe_image.cpp).
+- Windows gives thread-local storage only to libraries its own loader loaded, not to an image the shell placed.
+  The shell therefore ships a small library of its own, whiwhi_tls.dll (shell/thread_block.*), whose thread-local
+  section is one empty 64 KiB block, and lends that block to the image: the loader writes the library's storage
+  index where the image's code reads it, and every thread gets the image's initial data at the start of its
+  block. One loaded image can hold the block at a time.
+- Measured on Windows build 26300 while building it:
+  - A library that has a thread-local storage directory but imports nothing gets no storage: Windows ignores the
+    directory and leaves the index unwritten. With a single import it gets an index and a block per thread. The
+    library keeps one import for this reason and reports "no index" instead of using another library's block.
+  - Windows honours the alignment the directory declares. Over 60 threads, with 64 bytes declared all 60 blocks
+    were 64-byte aligned; with 16 declared only 3 to 6 of 60 happened to be. The library declares 64.
+- Tested with a synthetic image (shell/tests/test_thread_storage.cpp) whose own machine code reads its
+  thread-local data the way compiled code does: correct on the loading thread, on threads started afterwards, on
+  a thread that was already running (after it asks for the data), and with the image moved from its preferred
+  address. Threads do not see each other's changes. The callbacks are not called until the image is started,
+  then once for the start and for every thread that starts or ends. An image asking for more bytes or more
+  alignment than the block has is refused with a reason.
+- On the original executable (loaded without starting it, shell/tools/connect_imports.cpp): 5,248 bytes per thread
+  in storage index 1; the 2 callbacks were not called. Imports unchanged at 520 of 587. The game folder listing was
+  identical before and after.
+- Not done yet: the console-only libraries, and starting the image.
