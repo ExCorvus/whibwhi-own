@@ -1,9 +1,11 @@
-// Loads a PE64 image without starting it and reports, per imported library, how many imports connect to a
-// library on this PC and which the shell would have to provide itself.
+// Loads a PE64 image without starting it and reports where it was placed, whether it got thread-local storage
+// and, per imported library, how many imports connect to a library on this PC and which the shell would have
+// to provide itself.
 // Usage: connect_imports <image file> [folder with the image's own libraries] [--names]
 #include "host_libraries.hpp"
 #include "image.hpp"
 #include "loader.hpp"
+#include "thread_block.h"
 
 #include <cctype>
 #include <cstdio>
@@ -70,6 +72,12 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(loaded.base)),
                 loaded.delta ? "moved from the preferred base" : "the preferred base", loaded.size,
                 loaded.relocations_applied, loaded.unwind_entries);
+    if (loaded.thread_storage) {
+        std::printf("thread-local storage: %zu bytes per thread in storage index %lu, %zu callbacks (not called)\n",
+                    loaded.thread_storage_bytes, whiwhi_thread_block_index(), loaded.thread_callbacks);
+    } else {
+        std::printf("thread-local storage: the image has none\n");
+    }
 
     std::map<std::string, std::vector<const UnprovidedImport*>> unprovided_by_library;
     for (const UnprovidedImport& u : *loaded.unprovided) {
