@@ -116,3 +116,20 @@ Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no de
 - The graphics library is only 3 imported entry points, but the whole graphics interface is reached through them,
   so that number understates the work.
 - Progress is measured against this list (what the executable itself declares it needs), not by how far a run gets.
+## 2026-11-26 - what the original executable asks of a loader, and what connects on a PC (measured)
+
+- Loader facts read from the file (shell/tools/describe_image.cpp): 176.4 MiB in memory in 10 sections; it has a
+  preferred address and is also movable (598,282 relocation entries, all 64-bit); 299,257 exception-table entries;
+  thread-local storage of 5,248 bytes with 2 callbacks; no delay-load imports; no control-flow guard.
+- Our loader (shell/loader.*) places it without starting it: it lands at its preferred address, so none of the
+  relocations are needed; all 299,257 exception-table entries register.
+- Connecting imports to the same-named libraries on the PC and in the game folder (shell/host_libraries.*, run
+  through shell/tools/connect_imports.cpp): 520 of 587 functions connect. 67 do not, in 9 libraries: the 7
+  console-only libraries (37 functions) plus two libraries that ship with the game but do not load on a PC,
+  Bink2Scarlett.dll (23) and XboxBvhBuilder.dll (7).
+- Why those two do not load: each depends on console-only libraries itself. Bink2Scarlett.dll needs xmem.dll;
+  XboxBvhBuilder.dll needs xmem.dll and d3d12_xs.dll. Once the shell provides those two as real libraries, both
+  should load unchanged (expected, not yet shown).
+- Every import that is not connected points at a stub that names the function if the game calls it.
+- Not done yet: thread-local storage for the placed image, and starting it.
+- The game folder listing was identical before and after (nothing written).
