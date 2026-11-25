@@ -1,6 +1,8 @@
 # NOTICE — origin and required credit
 
-**This project and its approach originated with ExCorvus (Codeberg: [ExCorvus](https://codeberg.org/excorvus)).**
+Copyright (C) 2026 ExCorvus.
+
+**This project and its approach originated with [ExCorvus](https://github.com/ExCorvus).**
 
 The reverse-engineering findings, the memory/rendering model, and the porting approach documented here
 (`FINDINGS.md`, `docs/exe-map/`, `ATTRIBUTION.md`) are her original work, developed with an AI coding agent
