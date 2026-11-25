@@ -1,7 +1,7 @@
 # whiwhi
 
 A shell that hosts the original GTA VI executable (Xbox Series 1.0.2.1) on a PC GPU. Original work by ExCorvus
-([ExCorvus](https://codeberg.org/excorvus)).
+([ExCorvus](https://github.com/ExCorvus)).
 
 The original game files are the source; the runtime here is our own code. You need your own copy of the game — this
 repository contains no game data, keys or executable, and nothing here decrypts or bypasses any protection.
@@ -47,5 +47,6 @@ Builds `whiwhi_shell` and runs the tests via CTest. No game data or GPU needed.
 
 ## License
 
-GPLv3-or-later for our own code — see [LICENSE](LICENSE). Grand Theft Auto and related names are trademarks of
-their owners; this project is not affiliated with or endorsed by them.
+Copyright (C) 2026 ExCorvus. Licensed under the GNU General Public License, version 3 or later — see
+[LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). Grand Theft Auto and related names are trademarks of their owners;
+this project is not affiliated with or endorsed by them.
