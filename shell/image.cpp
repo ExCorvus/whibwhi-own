@@ -59,6 +59,10 @@ bool Image::parse(const std::uint8_t* data, std::size_t size) {
     section_alignment_ = rd32(opt + 32);
     size_of_image_ = rd32(opt + 56);
     size_of_headers_ = rd32(opt + 60);
+    subsystem_ = rd16(opt + 68);
+    dll_characteristics_ = rd16(opt + 70);
+    stack_reserve_ = rd64(opt + 72);
+    stack_commit_ = rd64(opt + 80);
 
     // Data directories: NumberOfRvaAndSizes at opt+108, the array at opt+112 (8 bytes each).
     const std::uint32_t num_dirs = rd32(opt + 108);
@@ -102,13 +106,20 @@ bool Image::map(std::vector<std::uint8_t>& out) const {
         return false;
     }
     out.assign(size_of_image_, 0);
+    return map_into(out.data(), out.size());
+}
+
+bool Image::map_into(std::uint8_t* out, std::size_t out_size) const {
+    if (!data_ || size_of_image_ == 0 || out_size < size_of_image_) {
+        return false;
+    }
     // Headers flat at 0.
     const std::uint32_t hdr = size_of_headers_ < size_of_image_ ? size_of_headers_ : size_of_image_;
     if (hdr > size_) {
         return false;
     }
-    std::memcpy(out.data(), data_, hdr);
-    // Each section's raw bytes at its own RVA — the game's image layout, preserved.
+    std::memcpy(out, data_, hdr);
+    // Each section's raw bytes at its own RVA: the image's layout, preserved.
     for (const Section& s : sections_) {
         if (s.raw_size == 0) {
             continue;
@@ -119,7 +130,7 @@ bool Image::map(std::vector<std::uint8_t>& out) const {
         if (static_cast<std::uint64_t>(s.virtual_address) + s.raw_size > size_of_image_) {
             return false;
         }
-        std::memcpy(out.data() + s.virtual_address, data_ + s.raw_ptr, s.raw_size);
+        std::memcpy(out + s.virtual_address, data_ + s.raw_ptr, s.raw_size);
     }
     return true;
 }
