@@ -7,9 +7,14 @@ The runtime core.
 - `imports.hpp` / `imports.cpp` — import table reader. Lists every library the mapped image imports and, per
   function, its name or ordinal and the address-table slot the loader fills.
 - `loader.hpp` / `loader.cpp` — image loader. Places the image at its preferred address (or elsewhere, applying
-  its relocations), connects each import through a resolver, sets every section's page protection and registers
-  the exception table. An import nothing provides gets a stub that names the function if it is called. The loader
-  does not start the image and does not yet set up its thread-local storage.
+  its relocations), connects each import through a resolver, gives the image thread-local storage, sets every
+  section's page protection and registers the exception table. An import nothing provides gets a stub that names
+  the function if it is called. The loader does not start the image.
+- `thread_block.h` / `thread_block.cpp` — `whiwhi_tls.dll`, a small library built without the C runtime whose
+  thread-local section is one empty 64 KiB block. Windows gives thread-local storage only to libraries it loaded
+  itself, so the loader lends this library's storage index and per-thread blocks to the image: each thread gets
+  the image's initial data, and once the image is started its thread-storage callbacks are called for every
+  thread that starts or ends. One loaded image can hold the block at a time.
 - `host_libraries.hpp` / `host_libraries.cpp` — resolver that connects an import to the same-named library on
   the PC (or in a folder added to the search), and records which libraries do not load.
 - `hosting.hpp` / `hosting.cpp` — flat hosting model. One contiguous GPU backing over the game's flat VA space;
@@ -19,7 +24,7 @@ The runtime core.
   - `describe_image <image file>` prints what the image asks of a loader: base, sections, data directories,
     relocations, thread-local storage.
   - `connect_imports <image file> [library folder] [--names]` loads the image without starting it and reports
-    which imports connect and which are not provided.
+    where it was placed, its thread-local storage, and which imports connect and which are not provided.
 - `tests/` — unit tests (no game data).
 
 ## Build + test
@@ -28,5 +33,5 @@ The runtime core.
 build.cmd
 ```
 
-MSVC + the bundled CMake/Ninja. Builds `whiwhi_shell` and the tools, and runs `test_hosting`, `test_image`,
-`test_imports` and `test_loader` via CTest. No GPU needed.
+MSVC + the bundled CMake/Ninja. Builds `whiwhi_shell`, `whiwhi_tls.dll` and the tools, and runs `test_hosting`,
+`test_image`, `test_imports`, `test_loader` and `test_thread_storage` via CTest. No GPU needed.
