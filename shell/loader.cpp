@@ -1,6 +1,8 @@
 // Image loader implementation. See loader.hpp.
 #include "loader.hpp"
 
+#include "thread_block.h"
+
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -18,6 +20,7 @@ constexpr std::uint32_t kSectionRead = 0x40000000;
 constexpr std::uint32_t kSectionWrite = 0x80000000;
 constexpr std::size_t kStubSize = 24;
 constexpr std::size_t kUnwindEntrySize = 12;  // RUNTIME_FUNCTION on x64
+constexpr std::size_t kStorageDirectorySize = 40;  // IMAGE_TLS_DIRECTORY64
 constexpr unsigned kRelocationPadding = 0;    // IMAGE_REL_BASED_ABSOLUTE
 constexpr unsigned kRelocation64 = 10;        // IMAGE_REL_BASED_DIR64
 
@@ -139,6 +142,119 @@ bool protect_sections(const Image& image, std::uint8_t* base, std::size_t size, 
     return true;
 }
 
+std::uint64_t rd64(const std::uint8_t* p) {
+    std::uint64_t v;
+    std::memcpy(&v, p, 8);
+    return v;
+}
+
+// Whether the address range lies inside the loaded image; gives its offset from the image's base.
+bool inside(const LoadedImage& loaded, std::uint64_t address, std::uint64_t bytes, std::uint64_t& offset) {
+    const auto begin = reinterpret_cast<std::uint64_t>(loaded.base);
+    if (address < begin) {
+        return false;
+    }
+    offset = address - begin;
+    return offset <= loaded.size && bytes <= loaded.size - offset;
+}
+
+// The directory's addresses are absolute and were moved with the image if it was relocated.
+bool connect_thread_storage(const Image& image, LoadedImage& out, std::string& reason) {
+    const std::uint32_t dir_rva = image.data_directory_rva(Image::kTlsDirectory);
+    if (dir_rva == 0) {
+        return true;
+    }
+    if (static_cast<std::uint64_t>(dir_rva) + kStorageDirectorySize > out.size) {
+        reason = "thread-local storage directory outside the image";
+        return false;
+    }
+    const std::uint8_t* dir = out.base + dir_rva;
+    const std::uint64_t data_begin = rd64(dir);
+    const std::uint64_t data_end = rd64(dir + 8);
+    const std::uint64_t index_address = rd64(dir + 16);
+    const std::uint64_t callbacks_address = rd64(dir + 24);
+    const std::uint32_t zero_fill = rd32(dir + 32);
+    const std::uint32_t characteristics = rd32(dir + 36);
+
+    if (data_end < data_begin) {
+        reason = "malformed thread-local storage directory";
+        return false;
+    }
+    const std::uint64_t initial_bytes = data_end - data_begin;
+    std::uint64_t data_offset = 0;
+    std::uint64_t index_offset = 0;
+    std::uint64_t callbacks_offset = 0;
+    if (!inside(out, data_begin, initial_bytes, data_offset)) {
+        reason = "thread-local initial data outside the image";
+        return false;
+    }
+    if (!inside(out, index_address, 4, index_offset)) {
+        reason = "thread-local storage index outside the image";
+        return false;
+    }
+    std::size_t callback_count = 0;
+    if (callbacks_address != 0) {
+        if (!inside(out, callbacks_address, 8, callbacks_offset)) {
+            reason = "thread-storage callback list outside the image";
+            return false;
+        }
+        for (std::uint64_t at = callbacks_offset;; at += 8) {
+            if (at + 8 > out.size) {
+                reason = "thread-storage callback list is not terminated";
+                return false;
+            }
+            if (rd64(out.base + at) == 0) {
+                break;
+            }
+            ++callback_count;
+        }
+    }
+
+    const std::uint64_t total_bytes = initial_bytes + zero_fill;
+    if (total_bytes > WHIWHI_THREAD_BLOCK_BYTES) {
+        reason = "the image needs " + std::to_string(total_bytes) +
+                 " bytes of thread-local storage per thread; the shell's block holds " +
+                 std::to_string(WHIWHI_THREAD_BLOCK_BYTES);
+        return false;
+    }
+    // Alignment is stored as a section-alignment code: 0 = none asked, n = 2^(n-1) bytes.
+    const unsigned alignment_code = (characteristics >> 20) & 0xF;
+    const std::uint64_t alignment = alignment_code ? (1ULL << (alignment_code - 1)) : 1;
+    if (alignment > WHIWHI_THREAD_BLOCK_ALIGNMENT) {
+        reason = "the image asks for thread-local storage aligned to " + std::to_string(alignment) +
+                 " bytes; the shell's block is aligned to " + std::to_string(WHIWHI_THREAD_BLOCK_ALIGNMENT);
+        return false;
+    }
+
+    if (whiwhi_thread_block_index() == WHIWHI_THREAD_BLOCK_NO_INDEX) {
+        reason = "Windows gave whiwhi_tls.dll no thread-local storage block";
+        return false;
+    }
+
+    WhiwhiThreadImage lent{};
+    lent.initial_data = out.base + data_offset;
+    lent.initial_bytes = initial_bytes;
+    lent.image_base = out.base;
+    lent.callbacks =
+        callbacks_address ? reinterpret_cast<const WhiwhiThreadCallback*>(out.base + callbacks_offset) : nullptr;
+    if (!whiwhi_thread_block_claim(&lent)) {
+        reason = "another loaded image holds the shell's thread-local storage block";
+        return false;
+    }
+    out.thread_storage = true;
+    if (reinterpret_cast<std::uint64_t>(whiwhi_thread_block()) % alignment != 0) {
+        reason = "Windows did not align the thread-local storage block to " + std::to_string(alignment) + " bytes";
+        return false;
+    }
+
+    // Compiled thread-local accesses read the storage index from here.
+    const std::uint32_t index = whiwhi_thread_block_index();
+    std::memcpy(out.base + index_offset, &index, 4);
+    out.thread_storage_bytes = static_cast<std::size_t>(total_bytes);
+    out.thread_callbacks = callback_count;
+    return true;
+}
+
 } // namespace
 
 void set_unprovided_handler(UnprovidedHandler handler) {
@@ -238,6 +354,13 @@ bool load_image(const Image& image, const ImportResolver& resolve, LoadedImage& 
 
     {
         std::string why;
+        if (!connect_thread_storage(image, out, why)) {
+            return fail(why);
+        }
+    }
+
+    {
+        std::string why;
         if (!protect_sections(image, base, size, why)) {
             return fail(why);
         }
@@ -261,7 +384,20 @@ bool load_image(const Image& image, const ImportResolver& resolve, LoadedImage& 
     return true;
 }
 
+void prepare_thread_storage() {
+    whiwhi_thread_block_prepare();
+}
+
+void start_thread_callbacks(const LoadedImage& loaded) {
+    if (loaded.thread_storage) {
+        whiwhi_thread_block_start();
+    }
+}
+
 void unload_image(LoadedImage& loaded) {
+    if (loaded.thread_storage) {
+        whiwhi_thread_block_release();
+    }
     if (loaded.function_table) {
         RtlDeleteFunctionTable(static_cast<PRUNTIME_FUNCTION>(loaded.function_table));
     }
