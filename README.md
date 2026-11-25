@@ -12,16 +12,18 @@ repository contains no game data, keys or executable, and nothing here decrypts 
 shell/                       our runtime (C++17, MSVC)
   image.hpp / image.cpp      PE64 image mapper — parses the original exe and maps it flat
   imports.hpp / imports.cpp  import table reader — the libraries and functions the image imports
-  loader.hpp / loader.cpp    image loader — places the image in memory, connects its imports, sets page
-                             protections, registers its exception table; does not start it
+  loader.hpp / loader.cpp    image loader — places the image in memory, connects its imports, gives it
+                             thread-local storage, sets page protections, registers its exception table;
+                             does not start it
+  thread_block.h / .cpp      whiwhi_tls.dll — the per-thread storage block the loader lends to the image
   host_libraries.hpp / .cpp  connects an import to the same-named library on the PC, when there is one
   hosting.hpp / hosting.cpp  flat hosting model — one GPU backing over the game's flat VA space,
                              uniform heap_base shift, real pages bound on demand
   tools/list_imports.cpp     prints an image's imported libraries and function counts
   tools/describe_image.cpp   prints what an image asks of a loader (sections, relocations, thread-local storage)
   tools/connect_imports.cpp  loads an image without starting it and reports which imports connect
-  tests/                     unit tests (hosting, image, imports, loader; no game data)
-  CMakeLists.txt             build definition (whiwhi_shell + tools + tests, CTest)
+  tests/                     unit tests (hosting, image, imports, loader, thread storage; no game data)
+  CMakeLists.txt             build definition (whiwhi_shell + whiwhi_tls.dll + tools + tests, CTest)
   build.cmd                  build + test helper
 docs/
   exe-map/MAP.md             outward map of the original exe: memory model, GPU-address channels
@@ -43,7 +45,7 @@ LICENSE                      GPLv3-or-later (our own code)
 shell\build.cmd
 ```
 
-Builds `whiwhi_shell` and runs the tests via CTest. No game data or GPU needed.
+Builds `whiwhi_shell`, `whiwhi_tls.dll` and the tools, and runs the tests via CTest. No game data or GPU needed.
 
 ## License
 
