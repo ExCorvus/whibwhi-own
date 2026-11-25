@@ -104,3 +104,15 @@ Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no de
   (hosting.*) + our own tests. Builds and both tests pass (shell\build.cmd). The flat-out model resolves hole-crossing
   spans directly (the boot-36 fix) — no piecemeal import, no heap conversion.
 - Our own no-game-data gate (scripts/check_no_game_data.py) replaces the upstream one.
+
+## 2026-11-26 - what the original executable imports (measured)
+
+- The import table of the original executable lists 68 libraries and 587 functions, 24 of them by ordinal; it has
+  no delay-load imports. Two independent readers agree on these numbers: our import table reader
+  (shell/imports.*, run through shell/tools/list_imports.cpp) and a separate script.
+- Seven of the libraries exist only on the console and are not shipped with the game: xmem.dll (12 functions),
+  AcpHal.dll (9), xapu.dll (5), chad.dll (5), d3d12_xs.dll (3), xg_xs.dll (2), XCRDAPI.dll (1) - 37 functions in
+  all. These are what the shell has to provide itself. chad.dll and XCRDAPI.dll are not yet identified.
+- The graphics library is only 3 imported entry points, but the whole graphics interface is reached through them,
+  so that number understates the work.
+- Progress is measured against this list (what the executable itself declares it needs), not by how far a run gets.
