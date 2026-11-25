@@ -35,4 +35,4 @@ All upstream source was removed from the project; the only source now is our own
 tree is referenced prior art outside the project, never vendored or built here. The port is our own shell based on
 the original exe — no heap conversion.
 
-— the reconstruction effort (original work: [ExCorvus](https://codeberg.org/excorvus))
+— the reconstruction effort (original work: [ExCorvus](https://github.com/ExCorvus))
