@@ -1152,3 +1152,20 @@ provided". Buffer views made, for example 182,452,224 bytes (format 39), 6,144 a
 second with first element 3,072 after the shift), 2,048 bytes of one 2,048-byte structure. Open: one buffer of
 2,048-byte structures lies 0x6200 bytes after a 64 KiB boundary, not a whole number of structures, so no view was
 made for it (the PC places buffers only on 64 KiB boundaries).
+
+## 2026-11-26 - which memory the descriptor heaps lie in, and what vkd3d-proton needs around a heap (game test 21:54)
+
+The graphics library now logs, when a descriptor heap is made, what Windows reports for the page at the heap's
+address and which of the memory library's regions hold it. Game test 2026-11-26 21:54: PASS, alive after 60 s,
+the copy's folder unchanged. The large shader-visible heap (1,245,184 descriptors of 32 bytes) lies in **mapped**
+memory (Windows type MEM_MAPPED), inside no single region of the memory library. The other heaps lie in private
+memory from XMemAlloc. Windows reports writes to memory (GetWriteWatch) only for private memory that was reserved
+for it, so it cannot report the program's writes into the large heap.
+
+Measured in vkd3d-proton 71cae09 and on this PC: the build here runs the VK_EXT_descriptor_heap path ("VK_EXT_descriptor_heap
+enabled (32 / 16 size)"). For a shader-visible resource heap it keeps a 64-byte guard area in front of the first
+descriptor (the heap's CPU start is its memory + 64; the log's PC heap addresses end in 0x40) and, behind the last
+descriptor, one null descriptor and 4,096 descriptors for its own internal work, all in the same memory, and it
+writes into them. The program's heap memory is exactly the size it asked for, and the memory around it is the
+program's, so vkd3d-proton cannot use that memory as its heap as it is. ExCorvus chose to mirror the program's heap
+into vkd3d-proton's heap at the border instead (no vkd3d-proton change for this).
