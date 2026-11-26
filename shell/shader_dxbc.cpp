@@ -128,6 +128,8 @@ std::uint32_t operand_dwords(const Operand& operand) {
             return 4;
         case OperandFile::kResource:
         case OperandFile::kSampler:
+            // A run-time index adds the operand that names the temporary: its token and its register number.
+            return operand.relative_index ? 5 : 3;
         case OperandFile::kUnorderedAccess:
             return 3;
         case OperandFile::kNull:
@@ -314,6 +316,32 @@ Operand constant_buffer_source(std::uint32_t id, std::uint32_t reg, std::uint32_
     return o;
 }
 
+Operand constant_buffer_scalar(std::uint32_t id, std::uint32_t reg, std::uint32_t element,
+                               std::uint8_t component) {
+    Operand o = constant_buffer_source(id, reg, element);
+    o.select_one = true;
+    o.select_component = component;
+    return o;
+}
+
+Operand sampler_source_indexed(std::uint32_t id, std::uint32_t array_index, std::uint32_t temp,
+                               std::uint8_t component) {
+    Operand o = sampler_source(id, array_index);
+    o.relative_index = true;
+    o.relative_temp = temp;
+    o.relative_component = component;
+    return o;
+}
+
+Operand resource_source_indexed(std::uint32_t id, std::uint32_t array_index, std::uint32_t temp,
+                                std::uint8_t component) {
+    Operand o = resource_source(id, array_index);
+    o.relative_index = true;
+    o.relative_temp = temp;
+    o.relative_component = component;
+    return o;
+}
+
 Operand null_operand() {
     Operand o;
     o.file = OperandFile::kNull;
@@ -453,29 +481,39 @@ void DxbcBuilder::push_operand(const Operand& operand) {
             break;
         }
         case OperandFile::kConstantBuffer: {
-            // Three indices: logical id, register, element. Four-component identity swizzle.
-            const std::uint32_t token = (3u << 20) | (type << 12) | (1u << 2) | 2u |
-                                        (static_cast<std::uint32_t>(kSwizzleXYZW) << 4);
-            instructions_.push_back(token);
+            // Three indices: logical id, register, element. A swizzle, or one selected component.
+            const std::uint32_t selection =
+                operand.select_one ? (2u << 2) | (static_cast<std::uint32_t>(operand.select_component & 3u) << 4)
+                                   : (1u << 2) | swizzle_bits;
+            instructions_.push_back((3u << 20) | (type << 12) | 2u | selection);
             instructions_.push_back(operand.index0);
             instructions_.push_back(operand.index1);
             instructions_.push_back(operand.index2);
             break;
         }
-        case OperandFile::kResource: {
-            // Two indices: logical id, index into the declared register range.
-            const std::uint32_t token = (2u << 20) | (type << 12) | (1u << 2) | 2u |
-                                        (static_cast<std::uint32_t>(kSwizzleXYZW) << 4);
+        case OperandFile::kResource:
+        case OperandFile::kSampler: {
+            // Two indices: logical id, index into the declared register range. A resource has the four-component
+            // swizzle; a sampler carries no vector data, so zero components. The way index n is given sits in
+            // three bits at 22 + 3n of the token: 0 = a number, 3 = a number plus the value of a register
+            // component, which follows the number as an operand of its own (read in the PC graphics library's
+            // shader reader, dxbc-spirv dxbc_parser.h, IndexType).
+            std::uint32_t token = (2u << 20) | (type << 12);
+            if (operand.file == OperandFile::kResource) {
+                token |= (1u << 2) | 2u | swizzle_bits;
+            }
+            if (operand.relative_index) {
+                token |= 3u << (22 + 3 * 1);
+            }
             instructions_.push_back(token);
             instructions_.push_back(operand.index0);
             instructions_.push_back(operand.index1);
-            break;
-        }
-        case OperandFile::kSampler: {
-            // Two indices; samplers carry no vector data, so zero components.
-            instructions_.push_back((2u << 20) | (type << 12));
-            instructions_.push_back(operand.index0);
-            instructions_.push_back(operand.index1);
+            if (operand.relative_index) {
+                instructions_.push_back((1u << 20) | (static_cast<std::uint32_t>(OperandFile::kTemp) << 12) |
+                                        (2u << 2) | 2u |
+                                        (static_cast<std::uint32_t>(operand.relative_component & 3u) << 4));
+                instructions_.push_back(operand.relative_temp);
+            }
             break;
         }
         case OperandFile::kUnorderedAccess: {
@@ -692,13 +730,18 @@ void DxbcBuilder::emit(Opcode opcode, std::initializer_list<Operand> operands) {
 
 void DxbcBuilder::emit(Opcode opcode, const InstructionFlags& flags,
                        std::initializer_list<Operand> operands) {
+    emit(opcode, flags, operands.begin(), operands.size());
+}
+
+void DxbcBuilder::emit(Opcode opcode, const InstructionFlags& flags, const Operand* operands,
+                       std::size_t count) {
     std::uint32_t length = 1;
-    for (const Operand& operand : operands) {
-        length += operand_dwords(operand);
+    for (std::size_t i = 0; i < count; ++i) {
+        length += operand_dwords(operands[i]);
     }
     push_opcode_token(opcode, flags, length);
-    for (const Operand& operand : operands) {
-        push_operand(operand);
+    for (std::size_t i = 0; i < count; ++i) {
+        push_operand(operands[i]);
     }
 }
 
