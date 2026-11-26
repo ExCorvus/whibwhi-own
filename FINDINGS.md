@@ -290,6 +290,10 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
   InitializeApiImpl / InitializeApiImplEx / InitializeApiImplEx2 / QueryApiImpl / UninitializeApiImpl. It is not
   on PC. Our skeleton (shell/xgameruntime.*) answers initialize/uninitialize with success (local-only runtime)
   and QueryApiImpl with E_NOTIMPL; covered in test_gfx_stubs.
+- **The packaging probe.** fn 0x55e286c reads HKLM\Software\Microsoft\GamingServices!ForceUseLocalServices
+  (DWORD). Non-zero => the game uses the app-dir DLL search (mode 0xa00) and finds our xgameruntime.dll beside
+  the tool; zero => it searches System32 only (mode 0x800) and the load fails (boot b29). Setting that value to
+  1 is the standard PC-GDK local-services switch; it is an external registry write, so it needs ExCorvus's word.
 
 ## 2026-11-26 - boots b12-b18: how far the image gets in our shell, and the current boundary (measured)
 
