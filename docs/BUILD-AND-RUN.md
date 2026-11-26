@@ -41,19 +41,22 @@ ctest --test-dir shell\build --output-on-failure
 
 ## Run the shell against the game
 
-The game looks for `xgameruntime.dll` in the folder of the running program and reads its own files from there,
-so the shell is run from a folder that holds both our programs and the game's files. Build that folder without
-touching the game folder:
-
-1. Make an empty work folder and copy `shell\build\*.exe` and `shell\build\*.dll` into it.
-2. For every file in the game folder, make a hard link of the same name in the work folder
-   (`mklink /H <work>\<name> <game folder>\<name>`); for every subfolder, a junction (`mklink /J ...`). Skip a
-   name that already exists in the work folder.
-3. Run from the work folder:
+Run `boot_image.exe` from the build folder (`shell\build`), where the shell's own libraries sit beside it. Give
+it the game's executable and the game folder:
 
 ```
+cd shell\build
 boot_image.exe "C:\XboxGames\GTA6.Xbox.v1.0.2.1\game_scarlett_master.exe" "C:\XboxGames\GTA6.Xbox.v1.0.2.1" --seconds 120
 ```
+
+Nothing has to be copied or linked. The game looks for `xgameruntime.dll` in the folder of the running program
+(ours is there), and it asks for its package files on drive `G:\`, where the console mounts them; the shell
+answers `G:\` from the game folder you named. That drive is read-only inside the shell: a call that would
+create, change or delete something on it is refused and never reaches Windows.
+
+Do not put the game's own copies of the Microsoft C++ runtime (`msvcp140*.dll`, `vcruntime140*.dll`,
+`concrt140.dll`, `vccorlib140.dll`, `vcomp140.dll`) beside `boot_image.exe`. They are older than the compiler
+the shell is built with, and the shell's libraries fault with them; the PC's installed runtime serves both.
 
 The game also reads the registry value `ForceUseLocalServices` (a DWORD) under
 `HKLM\Software\Microsoft\GamingServices`; with it set to 1 the game searches the program's folder for
@@ -75,9 +78,12 @@ The other tools:
 
 Environment variables read by the tools and libraries:
 
-- `WHIWHI_GAME_DIR` — the folder console-style file paths are mapped onto (default the XboxGames install path).
-- `WHIWHI_PEB_GAME=1` — make the process report the game executable as its main program file (not needed when
-  running from a work folder as above).
+- `WHIWHI_FILE_TRACE=1` — log every file call of the game that names a path, with what Windows answered.
+- `WHIWHI_GAME_DIR` — the folder the storage library maps `G:\` onto. `boot_image` sets it to the game folder
+  it was given; only set it yourself when using the storage library without `boot_image`.
+- `WHIWHI_PEB_GAME=1` — make the process report the game executable as its main program file (diagnostics; not
+  needed for a normal run).
+- `VKD3D_SHADER_CACHE_PATH` — vkd3d's on-disk shader cache. The shell sets it to `0` (off) unless you set it.
 - `WHIWHI_WATCH=<address inside the image, hex>` — stop when one byte at that address is written (diagnostics).
 - `WHIWHI_XMEM_TRACE=1` — log every call to the memory library.
 
