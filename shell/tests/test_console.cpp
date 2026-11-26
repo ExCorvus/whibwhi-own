@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <string>
 
 using namespace whiwhi::shell;
 
@@ -63,6 +64,70 @@ int main() {
     CHECK(free_function && free_function(block, 0, MEM_RELEASE));
     MEMORY_BASIC_INFORMATION info{};
     CHECK(VirtualQuery(block, &info, sizeof(info)) && info.State == MEM_FREE);
+
+    // The package drive. A made-up folder with one file stands for the package; the image's file functions
+    // answer G:\ from it, and nothing under G:\ can be created, changed or deleted.
+    wchar_t temp[MAX_PATH] = {};
+    CHECK(GetTempPathW(MAX_PATH, temp) > 0);
+    const std::wstring folder = std::wstring(temp) + L"whiwhi_console_test";
+    CreateDirectoryW(folder.c_str(), nullptr);
+    const std::wstring file = folder + L"\\one.bin";
+    HANDLE made = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    CHECK(made != INVALID_HANDLE_VALUE);
+    DWORD count = 0;
+    CHECK(WriteFile(made, "abcd", 4, &count, nullptr) && count == 4);
+    CloseHandle(made);
+    set_package_root(folder + L"\\");
+
+    const auto attributes = reinterpret_cast<DWORD(WINAPI*)(LPCWSTR)>(
+        resolve_console_import(host, "api-ms-win-core-file-l1-1-0.dll", named("GetFileAttributesW")));
+    const auto attributes_a = reinterpret_cast<DWORD(WINAPI*)(LPCSTR)>(
+        resolve_console_import(host, "api-ms-win-core-file-l1-1-0.dll", named("GetFileAttributesA")));
+    const auto create = reinterpret_cast<HANDLE(WINAPI*)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD,
+                                                        HANDLE)>(
+        resolve_console_import(host, "api-ms-win-core-file-l1-1-0.dll", named("CreateFileW")));
+    const auto remove = reinterpret_cast<BOOL(WINAPI*)(LPCWSTR)>(
+        resolve_console_import(host, "api-ms-win-core-file-l1-1-0.dll", named("DeleteFileW")));
+    const auto make_folder = reinterpret_cast<BOOL(WINAPI*)(LPCWSTR, LPSECURITY_ATTRIBUTES)>(
+        resolve_console_import(host, "api-ms-win-core-file-l1-1-0.dll", named("CreateDirectoryW")));
+    const auto move = reinterpret_cast<BOOL(WINAPI*)(LPCWSTR, LPCWSTR, DWORD)>(
+        resolve_console_import(host, "api-ms-win-core-file-l2-1-0.dll", named("MoveFileExW")));
+    CHECK(attributes && attributes_a && create && remove && make_folder && move);
+    if (attributes && attributes_a && create && remove && make_folder && move) {
+        // Reading: the file is found under G:\, in either spelling, and its bytes are the file's.
+        CHECK(attributes(L"G:\\one.bin") != INVALID_FILE_ATTRIBUTES);
+        CHECK(attributes(L"g:/one.bin") != INVALID_FILE_ATTRIBUTES);
+        CHECK(attributes_a("G:\\one.bin") != INVALID_FILE_ATTRIBUTES);
+        CHECK(attributes(L"G:\\") != INVALID_FILE_ATTRIBUTES);
+        CHECK(attributes(L"G:\\absent.bin") == INVALID_FILE_ATTRIBUTES);
+        HANDLE opened = create(L"G:\\one.bin", GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        CHECK(opened != INVALID_HANDLE_VALUE);
+        if (opened != INVALID_HANDLE_VALUE) {
+            char bytes[4] = {};
+            CHECK(ReadFile(opened, bytes, 4, &count, nullptr) && count == 4 && bytes[0] == 'a' && bytes[3] == 'd');
+            CloseHandle(opened);
+        }
+        // Changing: every way of changing the package is refused, and the folder is as it was.
+        SetLastError(0);
+        CHECK(create(L"G:\\one.bin", GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr) ==
+              INVALID_HANDLE_VALUE);
+        CHECK(GetLastError() == ERROR_ACCESS_DENIED);
+        CHECK(create(L"G:\\new.bin", GENERIC_READ, 0, nullptr, CREATE_ALWAYS, 0, nullptr) == INVALID_HANDLE_VALUE);
+        CHECK(create(L"G:\\one.bin", GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_FLAG_DELETE_ON_CLOSE, nullptr) ==
+              INVALID_HANDLE_VALUE);
+        CHECK(!remove(L"G:\\one.bin"));
+        CHECK(!make_folder(L"G:\\sub", nullptr));
+        CHECK(!move(L"G:\\one.bin", (folder + L"\\moved.bin").c_str(), 0));
+        CHECK(!move(file.c_str(), L"G:\\two.bin", 0));
+        CHECK(GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES);
+        CHECK(GetFileAttributesW((folder + L"\\new.bin").c_str()) == INVALID_FILE_ATTRIBUTES);
+        CHECK(GetFileAttributesW((folder + L"\\sub").c_str()) == INVALID_FILE_ATTRIBUTES);
+        CHECK(GetFileAttributesW((folder + L"\\two.bin").c_str()) == INVALID_FILE_ATTRIBUTES);
+        // A path that is not on the package drive goes to Windows unchanged.
+        CHECK(attributes(file.c_str()) != INVALID_FILE_ATTRIBUTES);
+    }
+    DeleteFileW(file.c_str());
+    RemoveDirectoryW(folder.c_str());
 
     if (failures == 0) {
         std::printf("test_console: all checks passed\n");
