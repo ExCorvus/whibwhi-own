@@ -539,10 +539,20 @@ bool entry_is_mappable(std::uint64_t entry) {
 void* map_pages(void* address, unsigned long long count, const unsigned long long* entries) {
     State& s = state();
     const std::uint64_t at = address_of(address);
-    Region* region = (at % kPage) == 0 ? find_region(at) : nullptr;
-    if (!region || region->kind != WHIWHI_XMEM_PAGES || count > (region->base + region->bytes - at) / kPage) {
+    // The run may cross from one range for pages into the next one that lies directly behind it (an image maps
+    // one run over two neighbouring pieces of a split placeholder range); every step must be in such a range.
+    bool inside = (at % kPage) == 0;
+    for (std::uint64_t i = 0; inside && i < count;) {
+        const Region* region = find_region(at + i * kPage);
+        if (!region || region->kind != WHIWHI_XMEM_PAGES) {
+            inside = false;
+            break;
+        }
+        i += (region->base + region->bytes - (at + i * kPage)) / kPage;
+    }
+    if (!inside) {
         ++s.stats.refused;
-        note("XMemMapPhysicalPages(address %p, %llu pages) is not inside one range for pages", address, count);
+        note("XMemMapPhysicalPages(address %p, %llu pages) is not inside ranges for pages", address, count);
         SetLastError(ERROR_INVALID_ADDRESS);
         return nullptr;
     }
@@ -555,10 +565,11 @@ void* map_pages(void* address, unsigned long long count, const unsigned long lon
             return nullptr;
         }
     }
-    const std::uint64_t first = (at - region->base) / kPage;
     for (std::uint64_t i = 0; i < count; ++i) {
+        const std::uint64_t step_at = at + i * kPage;
+        Region* region = find_region(step_at);
         const auto number = static_cast<std::uint32_t>(entries ? entries[i] >> 4 : 0);
-        if (!set_step(*region, first + i, number)) {
+        if (!set_step(*region, (step_at - region->base) / kPage, number)) {
             return nullptr;
         }
     }
