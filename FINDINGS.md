@@ -1307,3 +1307,14 @@ Read from the installation's XboxBvhBuilder.dll (read-only; numbers only, tools 
   made for.
 - Not changed: nothing. The step this points to, taking the console compiler's switch as the lane count the
   shader requires, is for ExCorvus to decide.
+## 2026-11-27 - the lane count taken from the console compiler's switch (game test 00:04)
+
+- vkd3d-proton's shader converter (dxil-spirv, in ExCorvus/dxil-spirv, not yet committed there) now reads the
+  console compiler's options that every builder shader carries (`xbox.compiler.options`). When a shader has no lane
+  count of its own (no WaveSize tag), it asks for 32 lanes where the options hold `__XBOX_ENABLE_WAVE32` and 64
+  where they do not. Her card offers both (vulkaninfo: subgroup size 32 to 64, size control for compute).
+- Game test 00:04 (visible, the copy's folder unchanged): FAIL, the same stop as 23:13 and 23:50. The first shader
+  the builder hands over (5,136 bytes) is refused at a console memory function,
+  `xbox.global_store_dwordx4_with_cache`, which the converter does not know. The run ends before its report.
+- So this run cannot show whether the lane count is taken: the converter stops before the shader is finished.
+  Not shown either way; left as it stands.
