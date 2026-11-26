@@ -39,7 +39,13 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
   `docs/SHADER-OPCODES.md`. A pair that is not listed has no name here.
 - `shader_isa.hpp` / `shader_isa.cpp` — the instruction reader: format, opcode and length come from the
   walk, and the fields of every format (registers, constants, offsets, flags) are read from the public
-  encoding of this GPU generation. Tried on hand-built words only so far, not on the game's programs.
+  encoding of this GPU generation. Run in memory on the game's own programs: it decodes every program the
+  walk can read (1,302 of 1,302 precompiled programs and 581 of 581 container programs in one run).
+- `shader_program.hpp` / `shader_program.cpp` — finds the console's compiled program inside a shader
+  container and unpacks it in memory: the directory in the container's 'DXIL' part, the zlib-packed block,
+  and the module inside it whose header names where the code is. Refuses anything laid out differently.
+- `shader_shape.hpp` / `shader_shape.cpp` — what a decoded program expects and uses: registers read
+  before they are written, what it exports, and where each image, sampler and buffer descriptor comes from.
 - `shader_translate.hpp` / `shader_translate.cpp` — translates a console shader to SPIR-V, kept in memory. Today
   it handles straight-line compute shaders of a handful of instructions and refuses everything else.
 - `spirv.hpp` / `spirv.cpp` — our own small SPIR-V writer.
@@ -84,8 +90,8 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 
 ## Tests
 
-`tests/` holds 19 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
-shader_container, shader_walk, shader_names, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
+`tests/` holds 21 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
+shader_container, shader_program, shader_walk, shader_names, shader_shape, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
 game files, no GPU.
 
 ## Build and test
