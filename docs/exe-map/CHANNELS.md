@@ -1,11 +1,11 @@
 # Every channel that can hand a memory / GPU address to the GPU
 
-Read from the original executable's own calls (see MAP.md). The shell answers all of them through one model:
-the game's memory is host memory on the PC, and the shell shows it to the GPU when graphics calls name it. What
+Read from the original executable's own calls (see MAP.md). The weave answers all of them through one model:
+the game's memory is host memory on the PC, and the weave shows it to the GPU when graphics calls name it. What
 is banned everywhere: sparse buffers with `VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT` (it crashes the
 AMD driver / whole system) and off-thread async pipeline builds.
 
-## A. System memory (the image's xmem.dll calls, answered by shell/xmem.*)
+## A. System memory (the image's xmem.dll calls, answered by weave/xmem.*)
 
 | # | channel | what it produces | who reads it |
 |---|---------|------------------|--------------|
@@ -14,7 +14,7 @@ AMD driver / whole system) and off-thread async pipeline builds.
 | 3 | XMemAllocatePhysicalPages + XMemMapPhysicalPages / Scatter | linear pool + re-mappable windows | CPU view by the CPU; pool by the GPU |
 | 4 | XMemTransferMemory | moves working set | indirect |
 
-## B. Console graphics (the device/queue vtable calls, answered by shell/d3d12_xs.*)
+## B. Console graphics (the device/queue vtable calls, answered by weave/d3d12_xs.*)
 
 | # | channel | what it produces | who reads it |
 |---|---------|------------------|--------------|
@@ -26,10 +26,10 @@ AMD driver / whole system) and off-thread async pipeline builds.
 | 11 | device slot 148 AllocateUploadMemory | upload arena | the GPU |
 | 12 | device slots 78-81 frame events, queue slots 30/32 PresentX | frame cadence and present | the display |
 
-## How the shell covers them
+## How the weave covers them
 
 - The memory library keeps every region record with its type, protect (graphics bits included) and attributes,
   and can enumerate them (`whiwhi_xmem_regions`): that registry is where the GPU side plugs in.
-- The graphics library wraps a real PC D3D12 device; the console-only vtable slots are answered by the shell
+- The graphics library wraps a real PC D3D12 device; the console-only vtable slots are answered by the weave
   (logged the first time each is called), so a boot shows exactly which channels the game uses.
 - No sparse capture/replay anywhere, no async pipeline builds: the two paths that crash this driver.
