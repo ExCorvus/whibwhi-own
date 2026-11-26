@@ -9,9 +9,9 @@ The image imports **9 functions from `AcpHal.dll`** and **5 from `xapu.dll`** (1
 They are the console's audio stack: `AcpHal` is the hardware/driver side (APU heap, the shape contexts the DSP
 reads, CPU ↔ APU address translation), `xapu` is the command/result channel to the DSP.
 
-Our answer (`shell/acp_hal.*`, `shell/xapu.*`, built as `AcpHal.dll` / `xapu.dll`) is described in §9: the
-APU memory is real, the audio device opens the PC's sound output, the command channel decodes Opus with libopus,
-and the one command whose meaning is unknown is accepted under a stated exception. §6 is the earlier skeleton.
+Our answer today is a skeleton pair (`shell/acp_hal.*`, `shell/xapu.*`, built as `AcpHal.dll` / `xapu.dll`):
+every name exists, every one answers "not provided", and says so once on stderr. Nothing is faked, because the
+image acts on success — see §6 for what a fake success would cost.
 
 ## 0. Where the two libraries sit in the boot
 
@@ -127,11 +127,6 @@ interface pointer and the image calls its vtable directly:
 **I** Slot 0 is a start with two sizes, slot `[0x10]` a command submit, slots `[8]`/`[0x28]` stop/settle. This
 is the console audio driver's own object; its definition is not in the image, so the opcodes and the magics
 cannot be given meanings from our side.
-
-**Correction (2026-11-26):** the image zeroes `0x9ae98c8` itself at `0x43aec56`, before the create, and the
-spin below runs only while the word is *negative*, so with nothing writing it the start-up passes straight
-through. A scan of `.text` for references to `0x9ae98b8`/`0x9ae98c0`/`0x9ae98c8` finds only the start-up and the
-shutdown functions. The "hang for ever" reading below was wrong.
 
 **V** After the create and slot-0 call, the image spins on the dword at `0x9ae98c8` while it is negative,
 `Sleep(10)` between tries (`0x43aedda`..`0x43aedfa`), and spins while it is *positive* on the way down
@@ -313,33 +308,3 @@ note and then the image's break.
 - `shell/tests/test_acpxapu.cpp` → CTest `acpxapu`.
 - `shell/CMakeLists.txt`: the two libraries, the test, and dependencies so `connect_imports` and `boot_image`
   build them beside themselves (the shell resolves an import by loading the library file of that name).
-
-## 9. What the libraries do now (2026-11-26, boots b145-b148)
-
-**I** What the channel carries is Opus. The submit (fn 0x4f20ad0) names 0x3c0 = 960 samples, one 20 ms Opus
-frame at 48 kHz; each stream's output area is 0x1e00 bytes (960 x 2 channels x 4 bytes); the output size the
-command names is the channel count x 0xf00 (960 x 4 bytes); the packet is the game's bytes after a 2-byte
-header. The open command's +0x18 is the channel count (1 at one of its two callers, a 16-bit field of the sound
-record at the other). The decoder factory fn 0x4ee95f0 picks this channel for codec number 0xb.
-
-Command layout read for the submit (opcode 3): `+0x04` stream, `+0x1c` a float from the sound record (**I** the
-sample rate), `+0x24` 960, `+0x28` packet bytes, `+0x2c` packet address (8 bytes), `+0x34` output bytes,
-`+0x38` output address (8 bytes).
-
-| part | answer |
-| --- | --- |
-| `XApuConnect` | loads `opus.dll` (libopus, built separately, NOTICE.md) and hands out a client; without it, "not provided" as before |
-| opcode 1 (open) | a libopus decoder at 48 kHz with the given channel count (1 or 2); result type 1 |
-| opcode 3 (submit) | `opus_decode_float` of the packet into the output, at most the 960 samples named; result type 3 with the bytes written in `+0x34` (**I** 32-bit float samples, from the sizes) |
-| opcode 2 (close) / 5 (reset) | the decoder is freed / reset; result type 2 / 5 |
-| a command that cannot be done | said on stderr, no result |
-| `XApuGetResultCount` / `XApuDequeueResult` | the results of work done, in order; 0x60 bytes written per result |
-| `AcpHalCreate` | an object with the methods the image calls |
-| device slot 0 (start) | opens and starts the PC's default sound output (WASAPI, shared mode); its answer is the PC's |
-| device slot 1 (stop) / slot 5 (release) | stops / closes the output |
-| device slot 2, command 2 with `0xf0f0f0f0` | **accepted without being carried out**: its meaning is in the console's driver and cannot be read from the image; the start-up checks its answer. Rule-4 exception granted by ExCorvus on 2026-11-26; said on stderr at every call |
-| device slot 2, any other command | refused (`E_NOTIMPL`) |
-
-Not built yet: anything that plays sound. The decoded samples go back to the game; how the game hands its final
-mix to the console's hardware (the shape contexts, XMA through decoder type 5) is not read yet. In boot b148
-no Opus stream was opened within the 40 seconds.
