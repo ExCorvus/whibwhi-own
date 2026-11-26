@@ -37,6 +37,7 @@
 #include "shader_flow.hpp"       // blocks, branches and loops of a decoded program
 #include "shader_isa.hpp"        // the console instruction reader, used to say what a shader's code part holds
 #include "shader_names.hpp"      // public names of the instructions identified so far
+#include "shader_pc.hpp"         // the pass that writes a PC shader for a console program
 #include "shader_program.hpp"    // the packed program inside a shader container, unpacked in memory
 #include "shader_shape.hpp"      // what a decoded program expects to be set, and where its descriptors come from
 #include "shader_walk.hpp"       // instruction lengths, to walk a whole program and count its instructions
@@ -2736,6 +2737,7 @@ struct PackedCensus {
     std::map<std::string, unsigned long long> opening;      // "<kind>: <a statement about how the program begins>"
     std::map<std::string, unsigned long long> flow;         // "<kind>: <what the control-flow pass made of it>"
     std::map<std::string, unsigned long long> io;           // "<kind>: <inputs and outputs against the signature parts>"
+    std::map<std::string, unsigned long long> pc;           // "<kind>: <what the PC shader pass made of the program>"
     std::map<std::string, unsigned long long> binding;      // "<kind>: <the first table against a root signature>"
     // The tables of each container looked at, kept so that a pipeline request naming the container together with
     // a root signature can be compared with that root signature (numbers the shell derived, not the block).
@@ -2809,6 +2811,7 @@ void log_packed_census(const char* when) {
     const auto opening = c.opening;
     const auto flow = c.flow;
     const auto io = c.io;
+    const auto pc = c.pc;
     const auto binding = c.binding;
     const unsigned long long pairs_compared = c.pairs_compared;
     unsigned long long layouts = 0, layouts_shared = 0, most_tables = 0, tables_in_all = 0;
@@ -2845,6 +2848,7 @@ void log_packed_census(const char* when) {
     log_packed_counted("how programs begin", opening, 80);
     log_packed_counted("control flow", flow, 80);
     log_packed_counted("inputs and outputs", io, 160);
+    log_packed_counted("PC shader", pc, 240);
     logf("packed programs (%s): %llu distinct pair(s) of a root signature and a container were named together by "
          "pipeline requests and compared\n",
          when, pairs_compared);
@@ -3612,6 +3616,104 @@ void interface_statements(const std::uint8_t* container, std::uint32_t bytes,
     }
 }
 
+// What the pass that writes a PC shader for a console program (shader_pc.*) makes of each pixel and vertex
+// program: written, or the reason it gives for not writing it. The written container is thrown away here; nothing
+// is given to the device yet. Beside the pass's own (first) reason, every instruction of the program that the
+// pass does not cover is counted once per program, so that the count says what is missing most.
+void pc_statements(const std::uint8_t* container, std::uint32_t bytes, const whiwhi::shell::DecodedShader& decoded,
+                   const whiwhi::shell::ModuleTables& tables, unsigned kind, std::vector<std::string>& say) {
+    using namespace whiwhi::shell;
+    if (kind != 0 && kind != 1) {
+        return;
+    }
+    const ShaderContainer parts = read_shader_container(container, bytes);
+    const Signature in = signature_of(parts, container, bytes, "ISG1");
+    const Signature out = signature_of(parts, container, bytes, "OSG1");
+    DeclaredResources declared;
+    const ShaderChunk* validation = parts.ok() ? chunk_named(parts, "PSV0") : nullptr;
+    if (validation && static_cast<std::uint64_t>(validation->offset) + 8 + validation->size <= bytes) {
+        declared = read_declared_resources(container + validation->offset + 8, validation->size);
+    }
+    PcShaderInput input;
+    input.stage = kind == 0 ? PcStage::kPixel : PcStage::kVertex;
+    input.program = &decoded;
+    input.tables = &tables;
+    input.inputs = &in;
+    input.outputs = &out;
+    input.declared = &declared;
+    PcShader shader;
+    try {
+        shader = write_pc_shader(input);
+    } catch (...) {
+        say.push_back("NOT written: the pass failed in a way it should not");
+        return;
+    }
+    if (shader.ok) {
+        std::set<std::string> kinds;
+        for (const PcBinding& binding : shader.bindings) {
+            kinds.insert(pc_binding_kind_name(binding.kind));
+        }
+        std::string uses;
+        for (const std::string& name : kinds) {
+            uses += (uses.empty() ? "" : ", ") + name;
+        }
+        say.push_back("written");
+        say.push_back(uses.empty() ? "written, declares no resource" : "written, declares: " + uses);
+    } else {
+        // A reason about control flow may name a position; positions are cut so that equal reasons count together.
+        std::string reason = shader.reason.substr(0, 150);
+        if (reason.rfind("control flow:", 0) == 0) {
+            std::string cut;
+            for (std::size_t i = 0; i < reason.size();) {
+                if (reason[i] == '0' && i + 1 < reason.size() && reason[i + 1] == 'x') {
+                    i += 2;
+                    while (i < reason.size() && std::isxdigit(static_cast<unsigned char>(reason[i]))) {
+                        ++i;
+                    }
+                    cut += '#';
+                } else {
+                    cut += reason[i++];
+                }
+            }
+            reason = cut;
+        }
+        say.push_back("NOT written");
+        say.push_back("refused: " + reason);
+    }
+
+    std::size_t count = 0;
+    const PcCovered* covered = pc_covered_instructions(&count);
+    std::set<std::pair<unsigned, unsigned>> missing;
+    for (const Instruction& i : decoded.instructions) {
+        const unsigned opcode = i.opcode;
+        if (i.format == WalkFormat::kSopp && (opcode == 1 || opcode == 2 || (opcode >= 4 && opcode <= 9))) {
+            continue;  // the end word and the branches: the control-flow pass's
+        }
+        if ((i.format == WalkFormat::kVopc || (i.format == WalkFormat::kVop3 && opcode < 0x100)) &&
+            (opcode <= 15 || (opcode >= 128 && opcode <= 135) || (opcode >= 192 && opcode <= 199))) {
+            continue;  // the float, signed and unsigned compares
+        }
+        bool found = false;
+        for (std::size_t k = 0; k < count && !found; ++k) {
+            found = covered[k].format == i.format && covered[k].opcode == opcode;
+        }
+        if (!found) {
+            missing.insert({static_cast<unsigned>(i.format), opcode});
+        }
+    }
+    for (const auto& pair : missing) {
+        const WalkFormat format = static_cast<WalkFormat>(pair.first);
+        const char* name = instruction_name(format, pair.second);
+        char text[120];
+        std::snprintf(text, sizeof(text), "holds an instruction the pass does not cover: %s %u%s%s",
+                      walk_format_name(format), pair.second, name ? " " : "", name ? name : "");
+        say.push_back(text);
+    }
+    if (missing.empty()) {
+        say.push_back(shader.ok ? "every instruction is covered" : "every instruction is covered, and it is NOT written");
+    }
+}
+
 // The first table of a module against a root signature the image names together with the module's container in
 // a pipeline request. What is checked (it was read off a handful of pairs first; here every pair is asked):
 //   - the root parameters take scalar registers in their order, starting at s8 (s4 in a compute program): a
@@ -4137,13 +4239,14 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
         same = g_programs.word_sums.count(sum) != 0;
         ReleaseSRWLockShared(&g_programs.lock);
     }
-    std::vector<std::string> table_says, opening_says, flow_says, io_says;
+    std::vector<std::string> table_says, opening_says, flow_says, io_says, pc_says;
     whiwhi::shell::ModuleTables kept_tables;
     if (module && lands && decoded_ok) {
         table_statements(container, bytes, block, found, shape, table_says);
         kept_tables = whiwhi::shell::read_module_tables(block.data(), size, found);
         opening_statements(container, bytes, decoded, kept_tables, kind, shape, opening_says);
         interface_statements(container, bytes, decoded, kind, shape, io_says);
+        pc_statements(container, bytes, decoded, kept_tables, kind, pc_says);
         // What the control-flow pass makes of the program: its blocks, its loops, and whether its flow can be
         // written as nested ifs and loops. Counts and the pass's own reasons only.
         // A reason may name a position or a block number; those are replaced by '#' so that equal reasons count
@@ -4265,6 +4368,9 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
     }
     for (const std::string& statement : io_says) {
         bounded(g_packed.io, std::string(kind_name) + ": " + statement);
+    }
+    for (const std::string& statement : pc_says) {
+        bounded(g_packed.pc, std::string(kind_name) + ": " + statement);
     }
     if (g_packed.kept.size() < 262144) {
         PackedCensus::Kept& kept = g_packed.kept[key];
