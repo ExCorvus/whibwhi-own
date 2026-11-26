@@ -321,6 +321,12 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
   ApuMapVirtualAddress/ApuMapApuAddress are the identity map (refused above 4 GiB, logged). AcpHalCreate still
   answers E_NOTIMPL - the audio device itself is the one thing a PC cannot fake. The pool-trap path does not call
   AcpHal (its call sites are the separate audio bring-up fn 0x43ad8b0), so this does not move the boot boundary.
+- vkd3d-proton (D3D12 on Vulkan, LGPL-2.1, ExCorvus-approved with notices) was cloned to E:\third_party\vkd3d-proton
+  and built with MSVC/meson (needed widl from the MSYS2 mingw-w64 tools; meson wants LC_ALL=C on this German-locale
+  machine). Its d3d12.dll/d3d12core.dll are deployed beside the tools as d3d12_vk.dll/d3d12core.dll, and d3d12_xs
+  now prefers them by explicit path, falling back to the system d3d12.dll. This is what will let the shell import
+  the game's own memory into the GPU zero-copy once the boot gets past start-up. NOT vendored into the repo; the
+  build recipe and license notice are in docs/BUILD-AND-RUN.md and NOTICE.md.
 
 ## 2026-11-26 - booting the image in the shell; what the runs showed (measured)
 
