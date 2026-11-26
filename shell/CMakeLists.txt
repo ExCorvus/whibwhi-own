@@ -74,6 +74,18 @@ add_executable(boot_image tools/boot_image.cpp)
 target_link_libraries(boot_image PRIVATE whiwhi_shell)
 add_dependencies(boot_image xmem d3d12_xs AcpHal xapu chad xcrdapi xg_xs XboxBvhBuilder)
 
+# Proves the GPU reads a plain host buffer zero-copy (VK_EXT_external_memory_host). Needs the Vulkan SDK.
+if(EXISTS "C:/VulkanSDK")
+    file(GLOB _vk_inc "C:/VulkanSDK/*/Include")
+    list(GET _vk_inc 0 _vk_inc0)
+    file(GLOB _vk_lib "C:/VulkanSDK/*/Lib")
+    list(GET _vk_lib 0 _vk_lib0)
+    add_executable(vkhost_probe tools/vkhost_probe.cpp)
+    target_include_directories(vkhost_probe PRIVATE "${_vk_inc0}")
+    target_link_directories(vkhost_probe PRIVATE "${_vk_lib0}")
+    target_link_libraries(vkhost_probe PRIVATE vulkan-1)
+endif()
+
 enable_testing()
 
 add_executable(test_hosting tests/test_hosting.cpp)
