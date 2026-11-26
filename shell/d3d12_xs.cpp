@@ -33,6 +33,7 @@
 // signature, and the console-only methods above slot 43). See docs/exe-map/GRAPHICS-CALLS.md.
 #include "d3d12_xs.h"
 #include "shader_container.hpp"  // names and sizes of the chunks of a shader container
+#include "shader_emit_flow.hpp"
 #include "shader_flow.hpp"       // blocks, branches and loops of a decoded program
 #include "shader_isa.hpp"        // the console instruction reader, used to say what a shader's code part holds
 #include "shader_names.hpp"      // public names of the instructions identified so far
@@ -2734,6 +2735,7 @@ struct PackedCensus {
     std::map<std::string, unsigned long long> tables;       // "<kind>: <a statement about the module's two tables>"
     std::map<std::string, unsigned long long> opening;      // "<kind>: <a statement about how the program begins>"
     std::map<std::string, unsigned long long> flow;         // "<kind>: <what the control-flow pass made of it>"
+    std::map<std::string, unsigned long long> io;           // "<kind>: <inputs and outputs against the signature parts>"
     std::map<std::string, unsigned long long> binding;      // "<kind>: <the first table against a root signature>"
     // The tables of each container looked at, kept so that a pipeline request naming the container together with
     // a root signature can be compared with that root signature (numbers the shell derived, not the block).
@@ -2806,6 +2808,7 @@ void log_packed_census(const char* when) {
     const auto tables = c.tables;
     const auto opening = c.opening;
     const auto flow = c.flow;
+    const auto io = c.io;
     const auto binding = c.binding;
     const unsigned long long pairs_compared = c.pairs_compared;
     unsigned long long layouts = 0, layouts_shared = 0, most_tables = 0, tables_in_all = 0;
@@ -2841,6 +2844,7 @@ void log_packed_census(const char* when) {
     log_packed_counted("tables", tables, 200);
     log_packed_counted("how programs begin", opening, 80);
     log_packed_counted("control flow", flow, 80);
+    log_packed_counted("inputs and outputs", io, 160);
     logf("packed programs (%s): %llu distinct pair(s) of a root signature and a container were named together by "
          "pipeline requests and compared\n",
          when, pairs_compared);
@@ -3222,6 +3226,358 @@ void opening_statements(const std::uint8_t* container, std::uint32_t bytes,
                       !tables.found ? "was not read" : fixed_entries ? "has fixed-sampler entries"
                                                                      : "has no fixed-sampler entry");
         say.push_back(text);
+    }
+}
+
+// A program's inputs and outputs against what its container declares in the public signature parts ('ISG1' the
+// inputs, 'OSG1' the outputs). A translator has to give every declared input to the program in the register the
+// program reads it from, and take every output from the place the program exports it to; these statements ask,
+// for every program, whether the simple links hold:
+//   pixel:  the attribute number of an interpolation instruction against the registers of the input elements
+//           that are not system values; the channel against the element's mask; the colour export targets
+//           against the registers of the render-target outputs;
+//   vertex: the vector registers read before written, from v4 up (the program calls through s4 first), against
+//           the number of components the input elements have; the parameter export targets against the output
+//           elements that are not the position.
+// Each statement is counted once per program and holds counts and register numbers only.
+const whiwhi::shell::ShaderChunk* chunk_named(const whiwhi::shell::ShaderContainer& parts, const char* name) {
+    for (const whiwhi::shell::ShaderChunk& chunk : parts.chunks) {
+        if (std::strcmp(chunk.name, name) == 0) {
+            return &chunk;
+        }
+    }
+    return nullptr;
+}
+
+whiwhi::shell::Signature signature_of(const whiwhi::shell::ShaderContainer& parts, const std::uint8_t* container,
+                                      std::uint32_t bytes, const char* name) {
+    whiwhi::shell::Signature none;
+    const whiwhi::shell::ShaderChunk* chunk = parts.ok() ? chunk_named(parts, name) : nullptr;
+    if (!chunk) {
+        none.reason = "the container has no such part";
+        return none;
+    }
+    if (static_cast<std::uint64_t>(chunk->offset) + 8 + chunk->size > bytes) {
+        none.reason = "the part does not fit in the container";
+        return none;
+    }
+    return whiwhi::shell::read_signature(name, container + chunk->offset + 8, chunk->size);
+}
+
+unsigned bits_set(unsigned value) {
+    unsigned n = 0;
+    for (; value; value &= value - 1) {
+        ++n;
+    }
+    return n;
+}
+
+void interface_statements(const std::uint8_t* container, std::uint32_t bytes,
+                          const whiwhi::shell::DecodedShader& decoded, unsigned kind,
+                          const whiwhi::shell::ProgramShape& shape, std::vector<std::string>& say) {
+    using namespace whiwhi::shell;
+    char text[260];
+    const std::vector<Instruction>& code = decoded.instructions;
+
+    // Sampler descriptors loaded from memory: at which 16-byte place of what the register points at.
+    for (const ResourceReference& ref : shape.resources) {
+        if (ref.use != ResourceUse::kSampler || ref.origin.level != RegisterOrigin::kLoaded) {
+            continue;
+        }
+        if (ref.origin.offset1 % 16 != 0) {
+            say.push_back("a sampler descriptor is loaded at an offset that is not a multiple of 16");
+        } else if (ref.origin.offset1 / 16 > 255) {
+            say.push_back("a sampler descriptor is loaded past 16-byte place 255");
+        } else {
+            std::snprintf(text, sizeof(text), "a sampler descriptor is loaded at 16-byte place %u",
+                          ref.origin.offset1 / 16);
+            say.push_back(text);
+        }
+    }
+
+    if (kind != 0 && kind != 1) {
+        return;
+    }
+    const ShaderContainer parts = read_shader_container(container, bytes);
+    const Signature in = signature_of(parts, container, bytes, "ISG1");
+    const Signature out = signature_of(parts, container, bytes, "OSG1");
+    if (!in.found) {
+        say.push_back("the input signature was not read: " + in.reason);
+    }
+    if (!out.found) {
+        say.push_back("the output signature was not read: " + out.reason);
+    }
+
+    // The exports the program makes.
+    std::uint64_t targets = 0;
+    unsigned exports = 0, compressed = 0, with_valid_mask = 0, done = 0;
+    bool done_is_last = false;
+    for (const Instruction& i : code) {
+        if (i.format != WalkFormat::kExp) {
+            continue;
+        }
+        ++exports;
+        targets |= 1ull << (i.exp.tgt & 63);
+        compressed += i.exp.compr;
+        with_valid_mask += i.exp.vm;
+        done += i.exp.done;
+        done_is_last = i.exp.done;
+    }
+    if (exports) {
+        std::snprintf(text, sizeof(text), "exports: %s compressed; %s the valid-mask flag; the done flag is on %s",
+                      compressed == 0 ? "none" : compressed == exports ? "all" : "some",
+                      with_valid_mask == 0 ? "none has" : with_valid_mask == exports ? "all have" : "some have",
+                      done == 1 && done_is_last ? "the last export only" : done == 0 ? "none" : "another export");
+        say.push_back(text);
+    }
+
+    if (kind == 0 && in.found) {  // pixel: interpolation against the input elements
+        std::uint64_t ordinary = 0;         // registers of input elements that are not system values
+        unsigned mask_of[64] = {};          // the components those elements take, by register
+        std::string system_values;
+        for (const SignatureElement& e : in.elements) {
+            if (e.system_value == 0 && e.shader_register < 64) {
+                ordinary |= 1ull << e.shader_register;
+                mask_of[e.shader_register] |= e.mask;
+            } else if (e.system_value != 0) {
+                std::snprintf(text, sizeof(text), " %u", e.system_value);
+                if (system_values.find(text) == std::string::npos) {
+                    system_values += text;
+                }
+            }
+        }
+        say.push_back(system_values.empty() ? "input elements: no system value"
+                                            : "input elements: system value(s)" + system_values);
+        std::uint64_t attributes = 0;
+        unsigned channels_of[64] = {};
+        unsigned interpolations = 0;
+        for (const Instruction& i : code) {
+            if (i.format == WalkFormat::kVintrp && i.opcode <= 2 && i.vintrp.attr < 64) {
+                ++interpolations;
+                attributes |= 1ull << i.vintrp.attr;
+                channels_of[i.vintrp.attr] |= 1u << (i.vintrp.attrchan & 3);
+            }
+        }
+        if (!interpolations) {
+            say.push_back(ordinary ? "does not interpolate, though the container declares ordinary input elements"
+                                   : "does not interpolate, and the container declares no ordinary input element");
+        } else {
+            const bool are_registers = (attributes & ~ordinary) == 0;
+            // The other reading: attribute n is the n-th ordinary register in rising order.
+            unsigned ordinal_register[64] = {};
+            unsigned ordinary_count = 0;
+            for (unsigned r = 0; r < 64; ++r) {
+                if (ordinary >> r & 1) {
+                    ordinal_register[ordinary_count++] = r;
+                }
+            }
+            bool are_ordinals = true, channels_by_register = true, channels_by_ordinal = true;
+            for (unsigned a = 0; a < 64; ++a) {
+                if (!(attributes >> a & 1)) {
+                    continue;
+                }
+                if (a >= ordinary_count) {
+                    are_ordinals = false;
+                    channels_by_ordinal = false;
+                } else if (channels_of[a] & ~mask_of[ordinal_register[a]]) {
+                    channels_by_ordinal = false;
+                }
+                if (!(ordinary >> a & 1) || (channels_of[a] & ~mask_of[a])) {
+                    channels_by_register = false;
+                }
+            }
+            std::snprintf(text, sizeof(text),
+                          "interpolated attribute numbers: %s registers of ordinary input elements (channels %s the "
+                          "element's mask); %s positions among those registers in rising order (channels %s)",
+                          are_registers ? "all are" : "NOT all are", channels_by_register ? "inside" : "NOT all inside",
+                          are_ordinals ? "all are" : "NOT all are", channels_by_ordinal ? "inside" : "NOT all inside");
+            say.push_back(text);
+            say.push_back((ordinary & ~attributes) == 0 ? "every ordinary input register is interpolated"
+                                                        : "some ordinary input register is never interpolated");
+        }
+    }
+
+    if (kind == 0 && out.found) {  // pixel: colour exports against the render-target outputs
+        std::uint64_t target_registers = 0;
+        std::string target_values;
+        bool depth_declared = false;
+        for (const SignatureElement& e : out.elements) {
+            if (_stricmp(e.name.c_str(), "SV_Target") == 0 && e.shader_register < 8) {
+                target_registers |= 1ull << e.shader_register;
+                std::snprintf(text, sizeof(text), " %u", e.system_value);
+                if (target_values.find(text) == std::string::npos) {
+                    target_values += text;
+                }
+            } else if (_strnicmp(e.name.c_str(), "SV_Depth", 8) == 0) {
+                depth_declared = true;
+            }
+        }
+        const std::uint64_t colour = targets & 0xFF;
+        std::snprintf(text, sizeof(text),
+                      "colour export targets: %s registers of render-target outputs; %s render-target output is "
+                      "exported; depth %s",
+                      (colour & ~target_registers) == 0 ? "all are" : "NOT all are",
+                      (target_registers & ~colour) == 0 ? "every" : "NOT every",
+                      depth_declared == ((targets >> 8 & 1) != 0) ? (depth_declared ? "declared and exported"
+                                                                                    : "neither declared nor exported")
+                      : depth_declared ? "declared but NOT exported" : "exported but NOT declared");
+        say.push_back(text);
+        if (!target_values.empty()) {
+            say.push_back("render-target output elements carry system value(s)" + target_values);
+        }
+    }
+
+    if (kind == 1 && in.found) {  // vertex: the vector registers read from v4 up against the input elements
+        unsigned elements = 0, mask_components = 0, read_components = 0;
+        std::uint64_t registers = 0;
+        for (const SignatureElement& e : in.elements) {
+            ++elements;
+            mask_components += bits_set(e.mask);
+            read_components += bits_set(e.use_mask);
+            if (e.shader_register < 64) {
+                registers |= 1ull << e.shader_register;
+            }
+        }
+        // Two ways the ordinary elements could be laid over the vector registers from v4 up, taken in the order
+        // of their registers: one register for each component in an element's mask, or four for each element.
+        // Under either, the registers the program reads should be those of the components the shader reads.
+        std::vector<const SignatureElement*> ordered;
+        std::string system_values;
+        for (const SignatureElement& e : in.elements) {
+            if (e.system_value == 0) {
+                ordered.push_back(&e);
+            } else {
+                std::snprintf(text, sizeof(text), " %u", e.system_value);
+                if (system_values.find(text) == std::string::npos) {
+                    system_values += text;
+                }
+            }
+        }
+        std::sort(ordered.begin(), ordered.end(), [](const SignatureElement* a, const SignatureElement* b) {
+            return a->shader_register < b->shader_register;
+        });
+        std::bitset<256> by_mask, by_four, from_four_up = shape.vector_inputs, below = shape.vector_inputs;
+        unsigned next = 4, next_four = 4;
+        for (const SignatureElement* e : ordered) {
+            for (unsigned c = 0; c < 4; ++c) {
+                if (e->mask >> c & 1) {
+                    if ((e->use_mask >> c & 1) && next < 256) {
+                        by_mask[next] = true;
+                    }
+                    ++next;
+                }
+                if ((e->use_mask >> c & 1) && next_four + c < 256) {
+                    by_four[next_four + c] = true;
+                }
+            }
+            next_four += 4;
+        }
+        for (unsigned v = 0; v < 4; ++v) {
+            from_four_up[v] = false;
+        }
+        for (unsigned v = 4; v < 256; ++v) {
+            below[v] = false;
+        }
+        std::snprintf(text, sizeof(text),
+                      "vertex inputs: the vector registers read before written from v4 up are %s the components the "
+                      "shader reads when each mask component of each ordinary element takes one register in order; %s "
+                      "when each element takes four%s",
+                      from_four_up == by_mask ? "exactly" : (from_four_up & ~by_mask).none() ? "a part of" : "NOT",
+                      from_four_up == by_four ? "exactly" : (from_four_up & ~by_four).none() ? "a part of" : "NOT",
+                      mask_components == read_components ? "" : " (the shader does not read every mask component)");
+        say.push_back(text);
+        if (from_four_up != by_mask && from_four_up != by_four) {
+            std::snprintf(text, sizeof(text),
+                          "vertex inputs, neither reading holds: %u ordinary element(s), %u mask component(s), %u "
+                          "read, %zu register(s) read from v4 up, the highest v%u",
+                          static_cast<unsigned>(ordered.size()), mask_components, read_components, from_four_up.count(),
+                          [&from_four_up] {
+                              unsigned top = 0;
+                              for (unsigned v = 4; v < 256; ++v) {
+                                  top = from_four_up[v] ? v : top;
+                              }
+                              return top;
+                          }());
+            say.push_back(text);
+        }
+        say.push_back(system_values.empty() ? "vertex inputs: no system value"
+                                            : "vertex inputs: system value(s)" + system_values);
+        say.push_back("vertex inputs: vector registers below v4 read before written: " + register_set_text(below));
+        say.push_back(registers == (elements >= 64 ? ~0ull : (1ull << elements) - 1)
+                          ? "vertex inputs: the elements' registers are 0, 1, 2, ... one each"
+                          : "vertex inputs: the elements' registers are NOT 0, 1, 2, ... one each");
+    }
+
+    if (kind == 1 && out.found) {  // vertex: parameter exports against the output elements
+        std::uint64_t ordinary = 0, all_registers = 0;
+        bool position_declared = false;
+        unsigned position_register = 0;
+        for (const SignatureElement& e : out.elements) {
+            if (e.shader_register >= 64) {
+                continue;
+            }
+            all_registers |= 1ull << e.shader_register;
+            if (_stricmp(e.name.c_str(), "SV_Position") == 0) {
+                position_declared = true;
+                position_register = e.shader_register;
+            } else {
+                ordinary |= 1ull << e.shader_register;
+            }
+        }
+        const std::uint64_t parameters = targets >> 32;  // bit k = an export to parameter target 32 + k
+        unsigned ordinary_count = 0, ordinal_of[64] = {};
+        for (unsigned r = 0; r < 64; ++r) {
+            if (ordinary >> r & 1) {
+                ordinal_of[r] = ordinary_count++;
+            }
+        }
+        std::uint64_t as_ordinals = 0;  // the parameter numbers the ordinary registers would have by position
+        for (unsigned r = 0; r < 64; ++r) {
+            if (ordinary >> r & 1) {
+                as_ordinals |= 1ull << ordinal_of[r];
+            }
+        }
+        std::snprintf(text, sizeof(text),
+                      "parameter exports: %s the registers of the ordinary output elements; %s those elements' "
+                      "positions counted from 0; position %s (targets 12 to 15 exported: 0x%x)",
+                      parameters == ordinary ? "exactly" : (parameters & ~ordinary) == 0 ? "a part of" : "NOT",
+                      parameters == as_ordinals ? "exactly" : (parameters & ~as_ordinals) == 0 ? "a part of" : "NOT",
+                      !position_declared ? "is not declared"
+                      : position_register == 0 ? "is declared at register 0" : "is declared at a later register",
+                      static_cast<unsigned>(targets >> 12 & 0xF));
+        say.push_back(text);
+        if (parameters != as_ordinals) {
+            unsigned exported = 0, highest = 0;
+            for (unsigned k = 0; k < 32; ++k) {
+                if (parameters >> k & 1) {
+                    ++exported;
+                    highest = k;
+                }
+            }
+            std::string values;
+            for (const SignatureElement& e : out.elements) {
+                std::snprintf(text, sizeof(text), " %u", e.system_value);
+                if (e.system_value != 0 && values.find(text) == std::string::npos) {
+                    values += text;
+                }
+            }
+            std::snprintf(text, sizeof(text),
+                          "parameter exports, not the positions: %u parameter(s) exported, the highest %u, for %u "
+                          "ordinary output register(s) of %zu element(s); output system value(s)%s",
+                          exported, highest, ordinary_count, out.elements.size(),
+                          values.empty() ? " none" : values.c_str());
+            say.push_back(text);
+        }
+    }
+
+    if (kind == 0) {  // pixel: what arrives in vector registers
+        bool position = false;
+        for (const SignatureElement& e : in.elements) {
+            position = position || e.system_value == 1;
+        }
+        say.push_back(std::string("vector registers read before written, ") +
+                      (!in.found ? "inputs not read" : position ? "position declared" : "no position declared") + ": " +
+                      register_set_text(shape.vector_inputs));
     }
 }
 
@@ -3750,12 +4106,13 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
         same = g_programs.word_sums.count(sum) != 0;
         ReleaseSRWLockShared(&g_programs.lock);
     }
-    std::vector<std::string> table_says, opening_says, flow_says;
+    std::vector<std::string> table_says, opening_says, flow_says, io_says;
     whiwhi::shell::ModuleTables kept_tables;
     if (module && lands && decoded_ok) {
         table_statements(container, bytes, block, found, shape, table_says);
         kept_tables = whiwhi::shell::read_module_tables(block.data(), size, found);
         opening_statements(container, bytes, decoded, kept_tables, kind, shape, opening_says);
+        interface_statements(container, bytes, decoded, kind, shape, io_says);
         // What the control-flow pass makes of the program: its blocks, its loops, and whether its flow can be
         // written as nested ifs and loops. Counts and the pass's own reasons only.
         // A reason may name a position or a block number; those are replaced by '#' so that equal reasons count
@@ -3793,6 +4150,20 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
             const whiwhi::shell::FlowStructure tree = whiwhi::shell::structure_of(graph);
             flow_says.push_back(tree.ok ? "structured as nested ifs and loops"
                                         : "not structured: " + without_numbers(tree.reason));
+            // The same graph as a list of items a shader language can run (shader_emit_flow.*): nested where the
+            // tree reaches, one loop around a choice of the next block where it does not.
+            const whiwhi::shell::StructuredFlow items = whiwhi::shell::structured_of(graph);
+            if (!items.ok) {
+                flow_says.push_back("as items: NOT written: " + without_numbers(items.reason));
+            } else if (!items.needs_next) {
+                flow_says.push_back("as items: nested, no helper variable");
+            } else {
+                const std::size_t in_loop = items.dispatch_blocks;
+                flow_says.push_back(std::string("as items: a choice loop over ") +
+                                    (in_loop == blocks ? "all blocks" : "a part of the blocks") + " (" +
+                                    (in_loop <= 4 ? "up to 4" : in_loop <= 16 ? "5 to 16" : in_loop <= 64
+                                     ? "17 to 64" : "more than 64") + " blocks in the loop)");
+            }
         }
     }
 
@@ -3860,6 +4231,9 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
     }
     for (const std::string& statement : flow_says) {
         bounded(g_packed.flow, std::string(kind_name) + ": " + statement);
+    }
+    for (const std::string& statement : io_says) {
+        bounded(g_packed.io, std::string(kind_name) + ": " + statement);
     }
     if (g_packed.kept.size() < 262144) {
         PackedCensus::Kept& kept = g_packed.kept[key];
@@ -4578,6 +4952,53 @@ static_assert(sizeof(ConsoleSamplerDescription) == 0x54, "the console sampler de
 
 std::atomic<unsigned long long> g_samplers_made{0}, g_samplers_refused{0};
 
+// Where the image made its samplers: the destinations, so that the report can say which 16-byte places of the
+// sampler heap hold one (the programs load sampler descriptors by place; see interface_statements).
+SRWLOCK g_sampler_places_lock = SRWLOCK_INIT;
+std::set<unsigned long long> g_sampler_places;
+
+void log_sampler_places() {
+    AcquireSRWLockShared(&g_sampler_places_lock);
+    const std::set<unsigned long long> places = g_sampler_places;
+    ReleaseSRWLockShared(&g_sampler_places_lock);
+    if (places.empty()) {
+        return;
+    }
+    // Runs of places 16 bytes apart, counted from the lowest destination.
+    const unsigned long long lowest = *places.begin();
+    std::string text;
+    unsigned long long run_first = 0, run_last = 0;
+    bool open = false, uneven = false;
+    const auto close = [&] {
+        char piece[48];
+        if (run_first == run_last) {
+            std::snprintf(piece, sizeof(piece), " %llu", run_first);
+        } else {
+            std::snprintf(piece, sizeof(piece), " %llu-%llu", run_first, run_last);
+        }
+        if (text.size() < 400) {
+            text += piece;
+        }
+    };
+    for (const unsigned long long destination : places) {
+        const unsigned long long offset = destination - lowest;
+        uneven = uneven || (offset % 16) != 0;
+        const unsigned long long place = offset / 16;
+        if (open && place == run_last + 1) {
+            run_last = place;
+            continue;
+        }
+        if (open) {
+            close();
+        }
+        run_first = run_last = place;
+        open = true;
+    }
+    close();
+    logf("samplers: the image made samplers at %zu destination(s); in 16-byte places counted from the lowest:%s%s\n",
+         places.size(), text.c_str(), uneven ? " (some destinations are NOT a multiple of 16 bytes apart)" : "");
+}
+
 // The public sampler description for a console one; false with a reason when it is not one the image's code
 // can have built.
 bool public_sampler(const ConsoleSamplerDescription& c, D3D12_SAMPLER_DESC& out, const char*& why) {
@@ -4684,6 +5105,11 @@ HRESULT __stdcall w_device_slot61(Wrap* self, const ConsoleSamplerDescription* d
     D3D12_CPU_DESCRIPTOR_HANDLE handle{};
     handle.ptr = static_cast<SIZE_T>(pc_handle);
     static_cast<ID3D12Device*>(self->pc)->CreateSampler(&pc_desc, handle);
+    AcquireSRWLockExclusive(&g_sampler_places_lock);
+    if (g_sampler_places.size() < 4096) {
+        g_sampler_places.insert(destination);
+    }
+    ReleaseSRWLockExclusive(&g_sampler_places_lock);
     const unsigned long long made = g_samplers_made.fetch_add(1) + 1;
     if (few(shown, 6) || (made >= 64 && (made & (made - 1)) == 0)) {
         logf("device slot 61: sampler #%llu made at 0x%llx (PC position 0x%llx): filter 0x%x, address %u %u %u, "
@@ -6901,6 +7327,7 @@ unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
     log_program_census("whole run");
     log_packed_census("whole run");
     log_address_outcomes();
+    log_sampler_places();
     return written;
 }
 
