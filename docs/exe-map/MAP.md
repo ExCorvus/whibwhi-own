@@ -10,8 +10,7 @@ Tool: `tools\exe_map.py` (function bounds from the image's own exception table).
 - 299,257 functions in the exception table, 92.35 MB of code, median function 117 bytes, largest 129,632 bytes.
 - 587 imported functions, 825,108 direct call references between functions.
 - Entry point RVA 0x56a1ec8.
-- xmem.dll: 12 imports, 57 call sites in 21 functions (`xmem-by-function.txt`). Same counts as the upstream note
-  `docs/xmem_exe_calls.md`, found independently.
+- xmem.dll: 12 imports, 57 call sites in 21 functions (`xmem-by-function.txt`).
 
 ## 1. Memory: the two 24 GiB views and the page pool
 
@@ -111,26 +110,10 @@ rdx = pool size in bytes.
 - **I** So the faithful reproduction is: one GPU-visible pool, plus a GPU view whose page P reads pool page Q exactly
   as the slot-31 batches say. Nothing has to be searched or converted per descriptor.
 
-### 1.5 What our layer does with this today (read in `E:\Leonida\upmain`, 698285ea7)
-- **V** `d3d12_xs_device.cpp:1764-1810` (slot 31) hands every range to `xmem.cpp:1034-1082 copy_page_mappings`,
-  which maps the pool page into OUR PROCESS at the GPU-view address and also at the paired CPU-view address
-  (`title_gpu_views::to_cpu`). That is a CPU-side mapping only.
-- **V** Nothing in that path tells Vulkan. The GPU sees a page of the GPU view only when a later graphics call
-  happens to name memory there and the layer makes a mirror, an import or a window for that one piece.
-- **V** Deviation: for kind 2 (GPU-only) the layer also maps the page in the CPU view, which the game does not.
-- **V (boot upmain5, 12:19, recorder `title_view_pages.h`)** What the game did in one boot up to the fault:
-  slot 31 = 366 calls, 18,107 batches, 48,795 map ranges (all kind 1, one page each) and 1,403 unmap ranges
-  (kind 2); 44,906 GPU-view pages mapped (2,806 MiB), spread over the whole 24 GiB view; 21,945 of them GPU-only;
-  Scatter = 346 calls, 34,093 CPU-view pages mapped. Pages in use by this count: 56,038; the game's own free counter
-  (0x71bfce0, peeked) says 43,738 free of 99,776 = 56,038 in use. The record matches the game exactly.
-- **V** The fault address of that boot (0x2630416c000) lies OUTSIDE both views. But the layer's shaders compute
-  `heap_base + address`, and fault - heap_base (0x2033c0000) = 0x26100dac000, which is INSIDE the GPU view
-  (view page 0x435e4). The same subtraction puts boot 4's fault inside that boot's GPU view too.
-- **I** So the shader was given a raw GPU-view address, exactly as the game wrote it, and the layer's `heap_base +`
-  turned it into nonsense. The layer had left 117,895 descriptor-heap slots "not settled" (no mirror, import or
-  window for the memory they name); of the 200 it lists, 102 name addresses inside the GPU view.
-- **U** Whether view page 0x435e4 itself was mapped by the game at that moment (the dump looked up the raw fault
-  address, not fault - heap_base). The next boot looks up both.
+### 1.5 Hosting
+
+The hosting model is the project's own (shell/), written from this map; the running log of what it does and
+measures is in `../../FINDINGS.md`. Everything in sections 1.1-1.4 is what the executable itself does.
 
 ### 1.6 Who else touches these tables (`refs-page-tables.txt`)
 - **V** View page table 0x71bfb08: 53 references in 14 functions (fn 0x555b0f0 set-up 11, fn 0x221b7d0 7,
@@ -161,33 +144,20 @@ pool index (jump table 0x674c270). The pool {base,size} is recorded in the first
 |---|---|---|---|---|
 | 0 | 0x183 / 0x22004 | 0x221a4f0(0, size) then 0x1cff250(0x71c1560) | (case 0, not yet read) | — |
 | 1, 2 | 0x183 / 0x22004 | 0x1d14170(obj 0x74438b0 / 0x7444b30, base, size) | **0x1f67770** | free-list / buddy, inline headers |
-| 4 | 0x283 / **0x2404 = READWRITE\|NOCACHE** | 0x5b1a7d0(0x71c2808, size, base, 0x20000, 0x71c28b0) | **0x554f680** | UNIT allocator, 0x20000 units |
+| 4 | 0x283 / **0x2404 = PAGE_GRAPHICS_READWRITE (0x2000) | PAGE_WRITECOMBINE (0x400) | READWRITE** | 0x5b1a7d0(0x71c2808, size, base, 0x20000, 0x71c28b0) | **0x554f680** | UNIT allocator, 0x20000 units |
 
 - **0x1f67770 (case 1/2):** base aligned up to 32 = the first header; first free byte = header + 0x10; an
   order-indexed free-list bucket array of 0x1200 bytes at obj+0x30; remaining size at obj+0x1230/0x1240/0x1248;
   inline 16-byte headers {next-free low32, size low32, flags}. The WHOLE pool is committed at set-up; free
   blocks stay committed. **I** a V# spanning a free block here still reads committed memory — NOT a hole source.
-- **0x554f680 (case 4, NOCACHE — the hole-crossing READ fault's home):** a UNIT allocator. The 0x20000 argument
+- **0x554f680 (case 4, write-combining graphics pool):** a UNIT allocator. The 0x20000 argument
   is the unit COUNT (131072); unit size = pool size / 131072. A 20-byte-per-unit state table lives in .data at
   0x71c28b0 (0x1000 header + 0x20000 × 0x14 entries; [0x71c28b0+0x1024] = pool size); each entry's low 26 bits
   = unit index, high 6 bits = state. Pool base at 0x71c2808+0x30; unit count at sub-alloc+0x18; size at +0x28;
-  sub-alloc+0x30 = 0xffffffff (free head sentinel). **I** the allocator commits/uses units on demand, so a V#
-  whose span crosses a not-yet-committed unit reads a reserved hole → the boot-36 READ fault (given
-  0x245e4032000, fault 0x247e73f2000, own region ~0x3e000).
-- **The hosting question (next):** the game asks `0x20003000` (commit+reserve) for the whole pool. If our xmem
-  shim faithfully commits the whole pool, there are no holes and ONE host import covers every V# in it; if the
-  shim only reserves (or commits piecemeal), the holes are OUR translation's, not the game's. Read
-  `runtime/shims/xmem.cpp` XMemVirtualAlloc against these flags, and the NOCACHE alloc/free vtable (0x61883a0)
-  to see exactly when the game commits a unit. Faithful hosting = provide the commit state the game asked for;
-  trap-1 = forcing a span to resolve regardless of the game's own commit state.
-- **Our shim's translation (V, runtime/shims/xmem.cpp):** kXmemLargePages=0x20000000, kXmem64kPages=0x20400000,
-  pageModeMask=0x20400000. Fixed pools (type 0x20003000) → large-page mode, host_type=MEM_COMMIT|MEM_RESERVE →
-  VirtualAlloc2 commits the WHOLE pool (2 MiB pages, lines 631/641). Streaming views (type 0x20402000) → 64 KiB
-  mode, host_type=MEM_RESERVE only → reserve-only placeholder windows filled by physical-page maps. host_protect
-  strips the graphics bits (0x7F800) but KEEPS PAGE_NOCACHE: host_protect(0x2404)=0x404 (the fault's protect).
-  **The boot-36 fault address 0x245e4032000 is NOT 2 MiB-aligned and its own region is ~0x3e000 — so it is NOT in
-  a large-page fixed pool.** It is a small-page NOCACHE allocation (another XMemVirtualAlloc/XMemAlloc site; see
-  xmem-by-function.txt). The holes are NOT from the shim failing to commit the fixed pools.
+  sub-alloc+0x30 = 0xffffffff (free head sentinel).
+- The protect values are named in the public Windows SDK header winnt.h: 0x400 is PAGE_WRITECOMBINE and 0x2000 is
+  PAGE_GRAPHICS_READWRITE; the earlier note calling 0x400 "NOCACHE" was wrong (PAGE_NOCACHE is 0x200).
+- Our library answers these calls (shell/xmem.*); how it maps the flag combinations onto Windows is written there.
 
 ## 2. How the game stops itself
 
@@ -196,20 +166,16 @@ pool index (jump table 0x674c270). The pool {base,size} is recorded in the first
   filter, reads working-set statistics (kind 0x20000001), and if more than 100 MiB is free allocates 0x80 bytes,
   fills them from 0xa943838..0xa9438b7, calls the device (vtable +0x190, slot 50) and another object (0x75df048,
   vtable +0x420 with argument 3), frees the block. Then `int3` at 0x2474606.
-- **V** Boots upmain1, upmain2 and upmain4 all ended with a breakpoint at exactly this `int3` (game+0x2474606).
-  So those boots ended in the game's own fatal-error routine, entered through fn 0x4e9b660.
 - **V** fn 0x4e9b660 (47 bytes, `funcs\04e9b660.txt`) is a result check: it takes a 32-bit result code, returns it
   unchanged, and calls the fatal stop ONLY when the code is negative and equals one of four values:
   0x887A0005, 0x887A0006, 0x887A0007, 0x887A0020 (index = code - 0x887A0005, bit mask 0x8000007 over 28 bits).
   **I** by the public DXGI names: device removed, device hung, device reset, driver internal error.
 - **V** 51 call sites in 31 functions pass it the result of a graphics call (fn 0x2478440 alone 11 times).
-- **I** So the breakpoint that ended boots 1, 2 and 4 is not a cause of its own. It is the game reacting to "the
-  graphics device is gone", which our layer reports after the Vulkan device is lost. Which of the 51 sites fired
-  does not matter: every one of them means the same thing. The GPU page fault is the cause.
+- **I** So a breakpoint at the fatal stop means the game reacted to "the graphics device is gone" (or another
+  listed error). Which of the 51 sites fired does not matter: every one of them means the same thing.
 
-### 2.2 fn 0x2215a60 — the hang watchdog (937 bytes) — see FACTS.md, verified 10:15
-- **V** fn 0x2215ea0 (71 bytes) is its caller on the stack in boot upmain3 (return address 0x2215eca).
-- **V** The next functions in the image are memory functions: fn 0x2215fd0 (XMemIsToolsMemAvailable,
+### 2.2 fn 0x2215a60 — the hang watchdog (937 bytes) — see section 4 below
+- The next functions in the image are memory functions: fn 0x2215fd0 (XMemIsToolsMemAvailable,
   XMemGetWorkingSetStatistics x2, XMemTransferMemory), fn 0x2216390 (XMemVirtualAlloc), fn 0x22163d0
   (XMemAllocatePhysicalPages), fn 0x2216940 (XMemMapPhysicalPages). **I** the watchdog sits in the same source
   module as the game's low-level system/memory code. **U** whether they share state.
@@ -223,7 +189,7 @@ pool index (jump table 0x674c270). The pool {base,size} is recorded in the first
 - fn 0x4e9b660 and its 31 callers — every reason the game stops itself.
 - device slot 74 (+0x250) and slot 50 (+0x190): what our layer answers there.
 
-## 4. The watchdog as the frame loop's liveness relay (2026-11-25, branch work/cand-watchdog-relay)
+## 4. The watchdog as the frame loop's liveness relay (read from the image)
 
 Read to answer ExCorvus's hypothesis ("the watchdog is the relay for the frame-pacer system; rendering, pipeline timing
 and the fps cap are ONE system"). The answer the image gives: the watchdog does **not** drive or gate the frame-event
@@ -291,8 +257,6 @@ gap, and OUR layer's long blocks are what it sees. Everything below is from `fun
   loops { fn 0x22159f0 (progress), fn 0x1474e00, fn 0x9d8ec0, fn 0x54f5080, `Sleep(fn 0x258b010())`, fn 0x1f8ae00
   (continue?) }, then clears the flag and restores the handler. 23 functions call it — the game modes that run the
   loop. **I** its `Sleep` is a frame-time sleep, so this is the loop where the cap and the progress report meet.
-- The measured fire (boot upmain3, t=179.83 s) faulted at image+0x23cf683 with return address 0x2215c35 — i.e. inside
-  the **installed callback**, not at the watchdog's own `movl $0, 0`. **V** (title_watchdog.h's comment).
 
 ### 4.6 Who reports progress (V)
 - fn 0x22159f0 is the whole reporter: `QueryPerformanceCounter` and one store into 0x71b6338. 18 bytes, no lock,
@@ -316,40 +280,18 @@ gap, and OUR layer's long blocks are what it sees. Everything below is from `fun
 - **U:** which of the vtable call sites of slots 78-81 belong to the real frame loop (the capability probes obscure
   it). Not needed for the relay; a dedicated chapter would need the call-graph up from each site.
 
-### 4.8 What our runtime does with it (V, this branch)
-- `runtime/src/watchdog_relay.h` holds the map facts, a `BlockingGuard` (an atomic depth) and the tested
-  `RelayPolicy` (report while a guard is open and for 1 s after). `runtime/src/title_watchdog_relay.h` runs one
-  background thread that reports **only** while a guard is open — by calling the title's own reporter fn 0x22159f0
-  (default), or by setting the kick byte (`LEONIDA_WATCHDOG_RELAY=kick`, the A/B), or never
-  (`LEONIDA_WATCHDOG_RELAY=0`). `LEONIDA_TITLE_WATCHDOG=0` keeps its old unconditional kicker and turns the relay off.
-- Guards are opened around the two PSO compiles in `shims/d3d12_vulkan_device.cpp` (`vkCreateComputePipelines`,
-  `vkCreateGraphicsPipelines`) — the measured 30 s+ block at world start. Any other long shim call can be guarded the
-  same way with one line.
-- The fire handler now logs the age of the title's own last progress report and what the relay did, so a boot says
-  whether the title stopped or our layer was holding it.
-- The frame-event path is untouched: nothing in the relay reads or writes a pacer, a token or a frame event, so
-  WaitFrameEventX/PresentX cadence is exactly as before (`frame_pacer` tests unchanged).
+### 4.8 What the shell does with it
 
-## 5. The boot-36 fault, decoded (V: gpu-map-upmain36.txt 951-960 + boot_upmain36 .err)
+The shell does not touch the watchdog: it stays armed and the game's own loop reports progress. The shell only
+avoids holding the title thread inside its own calls for longer than the budget (30 s unscoped, 300 s scoped),
+because a long block in shell code is exactly the gap the watchdog measures. The frame-event path (device slots
+78-81, queue PresentX) is answered by the shell's graphics library unchanged in cadence.
 
-- Device loss = `VK_ERROR_DEVICE_LOST from title staging upload` (texture format 43). Faulting GPU read = 0x247e73f2000.
-- Given page 0x245e4032000: committed, protect 0x404 (READWRITE|NOCACHE), MEM_PRIVATE (0x20000), in allocation
-  0x2455d200000 at +0x86e32000 (near its end; allocation spans 0x2455d200000..0x245e6900000, ~2.2 GiB). Its own
-  homogeneous VirtualQuery region is only 0x3e000 bytes.
-- "given has NO GPU copy or import among 3821 title ranges": the layer never exposed this page to the GPU.
-- Descriptor-heap mirror 0x2874cd00000 slots naming the page (119262/123902/123903/...) read back the SAME raw V# the
-  title wrote (base 0x245e4032040 / 0x245e4032cd0, num 0x5a7, fmt 0x1000b204) — "NOT rebased, waiting for a copy".
-  The layer rebases a V# only AFTER its memory is copied/imported into the arena; until then the V# stays raw.
-- The translated shader adds heap_base (0x2033c0000) to the raw V#: 0x2033c0000 + 0x245e4032000 = 0x247e73f2000 = the
-  fault. As a host address that is RESERVED (protect 0x0), far outside the 2048 MiB arena. A raw never-rebased V# + the
-  shader's heap_base addition = a read of unmapped memory = device lost.
-- fault-trace scanned 45 MiB of arena buffers: 0 name the given page, 0 hold the faulting device address — the fault
-  address is shader-computed (heap_base + raw V#), not stored in any arena descriptor.
-- Why never exposed: the piecewise 64 MiB committed import refuses a piece crossing a hole / non-cacheable refusal; the
-  given page sits in such a piece near the end of a large NOCACHE allocation, so its V#s wait forever. Meanwhile the
-  layer does enormous piecemeal work that never converges: 79408 texture fills = 15541 MiB, 18 refresh passes at
-  1.67 s/pass, 357575 KiB slot-133 shadow copies, 21894 slot-70 views awaiting readable memory, 19383 null views
-  ("no address"). This is trap-3 in action: copying/mirroring the game's memory piecemeal instead of exposing it.
+## 5. The graphics error path
+
+Device loss reaches the game only through fn 0x4e9b660 (section 2.1): a negative result from a graphics call
+with one of four codes calls the fatal stop. On a PC, the shell's graphics library answers those calls with the
+PC's own results, so the game's own error handling decides what happens.
 
 ## 6. The shell is the entire game, flat out (ExCorvus 2026-11-25 — the hosting-model footing)
 
