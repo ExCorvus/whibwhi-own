@@ -23,6 +23,15 @@ add_library(d3d12_xs SHARED d3d12_xs.cpp)
 target_compile_definitions(d3d12_xs PRIVATE WHIWHI_D3D12_XS_BUILD)
 target_link_libraries(d3d12_xs PRIVATE onecore)
 
+# The console's texture-computer library and ray-tracing builder library, as honest skeletons.
+add_library(xg_xs SHARED xg_xs.cpp)
+target_compile_definitions(xg_xs PRIVATE WHIWHI_XG_XS_BUILD)
+target_link_libraries(xg_xs PRIVATE onecore)
+
+add_library(XboxBvhBuilder SHARED xbox_bvh_builder.cpp)
+target_compile_definitions(XboxBvhBuilder PRIVATE WHIWHI_XBOX_BVH_BUILDER_BUILD)
+target_link_libraries(XboxBvhBuilder PRIVATE onecore)
+
 # The console's audio libraries, provided as skeletons: every imported name exists, every one of them answers
 # "not provided" (a negative HRESULT, a 0 count, a null address) and says so once on stderr. No device is faked.
 add_library(AcpHal SHARED acp_hal.cpp)
@@ -59,11 +68,11 @@ target_link_libraries(describe_image PRIVATE whiwhi_shell)
 
 add_executable(connect_imports tools/connect_imports.cpp)
 target_link_libraries(connect_imports PRIVATE whiwhi_shell)
-add_dependencies(connect_imports xmem d3d12_xs AcpHal xapu)
+add_dependencies(connect_imports xmem d3d12_xs AcpHal xapu chad xcrdapi xg_xs XboxBvhBuilder)
 
 add_executable(boot_image tools/boot_image.cpp)
 target_link_libraries(boot_image PRIVATE whiwhi_shell)
-add_dependencies(boot_image xmem d3d12_xs AcpHal xapu)
+add_dependencies(boot_image xmem d3d12_xs AcpHal xapu chad xcrdapi xg_xs XboxBvhBuilder)
 
 enable_testing()
 
@@ -118,3 +127,7 @@ add_test(NAME chad COMMAND test_chad $<TARGET_FILE:chad>)
 add_executable(test_xcrdapi tests/test_xcrdapi.cpp)
 add_dependencies(test_xcrdapi xcrdapi)
 add_test(NAME xcrdapi COMMAND test_xcrdapi)
+
+add_executable(test_gfx_stubs tests/test_gfx_stubs.cpp)
+add_dependencies(test_gfx_stubs xg_xs XboxBvhBuilder xmem)
+add_test(NAME gfx_stubs COMMAND test_gfx_stubs)
