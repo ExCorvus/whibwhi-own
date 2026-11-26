@@ -6,7 +6,7 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 
 ## Current state (2026-11-26)
 
-- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 27 tests pass.
+- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 28 tests pass.
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
@@ -22,12 +22,14 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 - **What is on screen:** the game's own window (it titles it "Americas") shows a black picture. That is what the
   game's commands leave in its display surface today: it clears the surface, and every draw is held, because
   no pipeline state exists (the game's shaders are not translated yet). The shell draws nothing of its own.
-- **Where it stops:** about 13 seconds into a run the game starts its audio. It asks the audio library for the
-  audio device (AcpHalCreate); the shell answers "not provided", because a PC has no console audio processor;
-  the game's audio start-up has no path for that failure and stops at its own breakpoint (image+0x43ad94e).
-  Going further needs either a real audio path behind that object, or a decision by ExCorvus to accept a silent
-  device as a stated exception to rule 4. It is not decided and nothing was built for it. This is the only
-  stop left at that point (boot b80); the game has no switch of its own for running without audio hardware.
+- **Audio, a stated exception (boot b141):** ExCorvus granted a silent audio host (2026-11-26): the shell hosts
+  every AcpHal/xapu call from the outside so the game runs on, with no sound; the real audio path comes later.
+  The APU memory side is real (a heap below 4 GiB, a shape-context array, an identity address map); AcpHalCreate
+  hands out a device object whose vtable answers success and does nothing; the xapu channel takes commands in and
+  synthesises the result events the game's own per-stream state machine waits for. With it the game runs past its
+  audio start-up: boot b141 ran the full 40 s and presented 8 frames, where before it stopped itself at about 13 s
+  at its own breakpoint (image+0x43ad94e). The audio playback feed has not been exercised yet. This hosts the
+  driver's interface, not sound (docs/console-libs/acp-xapu.md).
 - **Textures:** a texture's bytes in the game's memory are in the shell's own untiled layout (xg_xs.h); the
   device tells the game that size when asked. A texture the game places at an address of its own memory is a
   real texture in the PC device's memory - its pixels are not at that address. Nothing copies a texture's bytes
@@ -59,15 +61,15 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   threads (tens of thousands in the first seconds); three come from the thread that created the device.
   Details: docs/SHADER-TRANSLATOR.md sections 13, 15 and 16, docs/exe-map/SHADER-PATH.md sections 10 to 12.
 - **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
-  slots 57, 62, 67 and 86; each request is read and counted, and none can be made (written shaders are not
-  given to the device yet, and no PC root signature is built for them), so every draw is held. The
+  slots 57, 62, 67 and 86; each request is read, its shaders are translated and a PC root signature is built
+  (49,533 whole requests prepared in boot b137), but none is given to the device yet, so every draw is held. The
   command-list methods at slots 70, 71, 72, 74, 75, 126, 131, 132, 142 and 146 (what they are is not known).
   The primitive topology number 0x11 (not a PC topology). Views made from raw descriptor words (device slot 70).
   Reading or writing a texture the game keeps at its own address (its Map is refused).
   Device slot 81 (a per-frame query; the game tolerates the refusal). The queue's page-mapping call (slot 31)
   is recorded but nothing reads the record. The game runtime library answers every interface query with "no
   such interface", except the system interface, where one method is answered: the sandbox name. The audio
-  device and the ray-tracing builder are skeletons that answer failure. PC command
+  device is a silent host (the stated exception above); the ray-tracing builder is a skeleton that answers failure. PC command
   allocators are never reset, so memory grows while a run lasts.
 - **Answers that are less than the full work** are listed in the entry "answers that say yes" below, and in the
   newest entries; each one is a place to look first when the game behaves wrongly later.
@@ -1362,3 +1364,24 @@ The game folder was unchanged after every run. 27 tests pass.
   and typing work rather than being quick fixes.
 - Nothing written has been given to the graphics device; no PC root signature exists; nothing of the game's
   picture is drawn. 27 tests pass.
+
+## 2026-11-26 - a silent audio host lets the game run past its audio start-up (boot b141; measured)
+
+ExCorvus granted the stated exception (rule 4): host every audio call from the outside with no sound, and fix the
+real audio paths after the fact. Built in shell/acp_hal.* and shell/xapu.*:
+
+- The APU memory side was already real: a committed heap below 4 GiB (so the 32-bit APU addresses are the identity
+  map), a bump allocator, a real zeroed shape-context array.
+- AcpHalCreate now hands out a device object whose vtable slots (0x00 start, 0x08 stop, 0x10 command, 0x28 settle)
+  all answer success and do nothing. The image zeroes its async status word before the start and spins while it is
+  negative; nothing here sets it negative, so the spin leaves at once.
+- xapu: XApuConnect opens a silent channel; XApuEnqueueCommand takes each command in and synthesises the result
+  event the image's own per-stream state machine waits for (opcode 1 -> event 1 "opened", 2 -> event 2 "closed",
+  3 -> event 3 "buffer consumed" carrying the byte count from command+0x24, 5 -> event 5 "reset");
+  XApuGetResultCount / XApuDequeueResult hand them back.
+
+Measured (boot b141, normal priority, game folder unchanged): the game runs past its audio start-up - the full 40 s
+and 8 presented frames, where before it stopped itself at about 13 s at image+0x43ad94e. No exception, no watchdog.
+The audio playback feed (ApuMapVirtualAddress, XApuEnqueueCommand) has not been called yet. The picture is still the
+cleared surface: the next unhosted calls are the graphics ones (device slot 70 views, command-list slots 71/74/75/
+126/131/132/142/146, slot 81), and no pipeline is given to the device yet. 28 tests pass.
