@@ -1,0 +1,226 @@
+# The shader path: how the game's shader bytes reach the device
+
+This file records what the original executable's own code does between "the renderer wants a pipeline" and "the
+device is called with shader bytes". It was read from the image's code with the private map (function bodies, call
+sites, data references); nothing here is a disassembly listing. RVAs are image-relative (image base 0x140000000).
+
+Marks: **V** = read in the listing, **I** = inferred from what was read, **U** = not established.
+
+The purpose is to say what our `d3d12_xs` wrapper will actually be handed, and what header fields the game itself
+has already validated by then, so the shader translator reads the same container the game reads.
+
+---
+
+## 1. The pipeline-creation calls on the device
+
+Every call below was found by scanning all functions in the image for `call qword ptr [reg + imm]` and keeping
+only the functions that also load the device pointer from one of its globals (0x8759d00, 0x75df048, and the
+copies at 0x75deff8..0x75df048 that the device-creation function fills with the same pointer). **Exactly one call
+site exists in the whole image for each of the five methods below** (V, by that method).
+
+| slot | call site | shape as the game calls it | description that is passed |
+|---|---|---|---|
+| 55 | 0x247a5c2 in fn 0x2479f40 | (device, desc, riid, out) | a large stack block (0xab8 bytes of frame); the fields were not read (U) |
+| 57 | 0x2477578 in fn 0x24774c0 | (device, desc, riid, out) | desc = request object + 0x40; the first qword (a size, I) is written immediately before the call |
+| 62 | 0x247fe66 in fn 0x247fd30 | (device, desc, **0, 0**, riid, out) | a 0x40-byte block: +0x00 root signature, +0x08 shader pointer, +0x10 shader length, +0x18 = 1, rest zero |
+| 67 | 0x24800d5 in fn 0x2480050 | (device, desc, riid, out) | desc = cache node + 0x18; the root signature pointer is stored into its first qword just before the call |
+| 101 | 0x24813ef in fn 0x24801b0 | (device, desc, riid, out) | `{UINT kind = 3; UINT count; const Entry*}` with `Entry = {UINT type; UINT unused; const void* payload}`, 16 bytes each |
+
+Notes that matter for the wrapper:
+
+- **Slot 62 has two extra arguments in the middle** (V): the call is
+  `(device, desc, 0, 0, riid, out)` — the identifier and the result are the 5th and 6th arguments, on the stack,
+  not the 3rd and 4th as on the PC's `CreateComputePipelineState`. A handler that assumes the public order reads
+  the wrong registers.
+- **Slot 62's description has the shape of `D3D12_COMPUTE_PIPELINE_STATE_DESC`** (V for the offsets, I for the
+  identification): +0x00 `pRootSignature`, +0x08/+0x10 `CS = {pShaderBytecode, Length}`, +0x18 `NodeMask = 1`,
+  +0x20 `CachedPSO` = null, +0x30 `Flags` = 0. The block is zeroed before the shader pair is written into it.
+- Slot 67 is tried **before** slot 62 and its result is used instead of slot 62 when it is non-zero (V). It is a
+  cache lookup: the key is the pipeline request's own +0x18 field, the table lives behind global 0x75ddb90, and
+  the stored value is a reference-counted object (a hit is AddRef'ed through vtable slot 1, V).
+- Slot 101's object is the **same device**: the device-creation function 0x2478440 writes the device pointer to
+  global 0x8759d00 and to the copies at 0x75deff8..0x75df048 including 0x75df018 (V). The console device therefore
+  has a *third* pipeline entry point above the public range.
+- Slots 55 and 57 are reached from fn 0x2479760 (the function that also builds a graphics state stream), so they
+  belong to the graphics side (I). Their descriptions were not read field by field (U).
+
+### 1.1 Slot 101: the pointer-array pipeline description (V for the layout)
+
+fn 0x24801b0 builds the description on the stack:
+
+```
+desc:  +0x00 UINT kind = 3
+       +0x04 UINT entry count
+       +0x08 const Entry* entries
+Entry: +0x00 UINT type
+       +0x04 (never written)
+       +0x08 const void* payload
+```
+
+Entry type numbers written, in the order the function fills them: **5** (the shader entry), then **0xB** repeated
+for each of N items, then **2, 7, 2, 7, 9, 7, 0xA, 1**. From 2 onwards these agree with the public
+`D3D12_PIPELINE_STATE_SUBOBJECT_TYPE` numbering (1 = vertex shader, 2 = pixel shader, 7 = stream output,
+9 = rasterizer, 10 = depth-stencil, 11 = input layout) (V for the numbers, I for the agreement). Type **5** is
+where the shader bytes sit, and its payload is not a `D3D12_SHADER_BYTECODE` but a four-field block:
+
+```
++0x00 const void* code            <- the shader container (see section 2)
++0x08 size_t      code_size
++0x10 UINT        name_count
++0x18 const wchar_t* names[]      (each entry is 0x18 bytes, only the name pointer is filled)
+```
+
+I read this as a **shader library**: one code blob plus a list of exported entry names (I). After the pipeline is
+created, the game queries the returned object for a second identifier (0x61e06e8) and resolves each name through
+that object (a call at vtable slot 3 per name) into a table it keeps (V). That matches the open question in
+`docs/SHADER-TRANSLATOR.md` §11 about multiple entry points: at least this path carries a name list.
+
+---
+
+## 2. Where the shader bytes come from: one function
+
+Every shader the game hands to the device comes out of **fn 0x86f8e0**, and that function has five callers in the
+whole image (V): 0xf9f650 and 0x247fd30 (compute, slot 62), 0x24801b0 (graphics, slot 101), 0x2476e20 (root
+signature only) and 0x86f090 (a second graphics stream builder that asks for five shader pairs in a row). Its
+contract (V):
+
+- arguments: `out_pair` (a `{const void* ptr; size_t size;}` to fill), a *shader record*, a second output pointer,
+  and an **index byte**;
+- the record holds a pointer table at +0x08 indexed by that byte (`ptr = record[index]`), the byte length for
+  index 0 at +0x20 and the byte length for the other indexes at +0x2c;
+- **that index is 0 in every call site in the image** (V). A stage is selected by passing a *different record*:
+  fn 0x86f090 calls the function five times, each with its own record, and writes the five results into a table of
+  `{ptr, size}` pairs 0x18 bytes apart (V). So the shell cannot read the shader's stage out of this call — it comes
+  from which record was passed, which is the renderer's business (U which record is which stage);
+- if that index's pointer is already set, it is returned as it is;
+- otherwise the bytes are **copied out of GPU-visible memory**: the record's +0x38 object gets two vtable calls
+  (slot 16, +0x80) to prepare, then slot 10 (+0x50) with the length, into a buffer the function allocates. That
+  call must return exactly the length; if it does not, the game executes `int3` (0x86f9c5, V). So a wrong answer
+  from our layer here is an immediate stop, not a silent short read;
+- then the **outer container check** (V): the word at +0 of the copied bytes must be 0xDCE7. If it is, the real
+  size is the dword at +0x08, a second buffer of that size is allocated and fn 0x51189f0 unpacks the blob into
+  it; the unpacked pointer and the dword at +0x08 become the `{ptr, size}` the caller receives. If the word is
+  **not** 0xDCE7 the copied bytes are used as they are (V) — that branch is the "already unpacked" case.
+
+The pointer that reaches the device is therefore the **unpacked** blob, and its first dword is what the root
+signature step checks: `DXBC` (section 4).
+
+---
+
+## 3. The outer container (the game's own packing)
+
+Header read by fn 0x51189f0 and fn 0x5118a30 (V):
+
+| offset | size | meaning |
+|---|---|---|
+| +0x00 | 2 | magic word **0xDCE7** (little-endian, so the bytes are E7 DC) |
+| +0x02 | 1 | method: **3** = stored, **0x0D** = compressed; nothing else is handled |
+| +0x03 | 1 | not read by these functions (U) |
+| +0x04 | 4 | container size in bytes, header included; the payload length is this value minus 0x0C |
+| +0x08 | 4 | unpacked size: the size the game allocates and later hands on as the shader length |
+| +0x0C | … | payload: the stored bytes (method 3) or the compressed stream (method 0x0D) |
+
+- method 3: `memcpy(destination, blob + 0x0C, size_at_+0x08)` (V);
+- method 0x0D: a decompressor at 0x25d6a0, given the payload and a 0x2D30-byte scratch buffer that fn 0x5118a20
+  returns for exactly this method (V);
+- any other method value: neither branch runs, and the caller still uses the fresh buffer (I). That case is a
+  hazard, not a path we should reproduce.
+
+Nothing in the game reads a checksum, a per-chunk table or a version number in this header. It is a two-word
+header and a payload.
+
+## 4. The inner container: `DXBC` (the game checks it)
+
+The unpacked blob is checked by **fn 0xfa09f0**, whose only job is to obtain the pipeline's root signature (V):
+
+- dword at +0x00 must be **`DXBC`** (0x43425844), otherwise the function returns `E_NOINTERFACE` (0x80004002) and
+  the caller treats the pipeline as failed;
+- dword at **+0x1C** = chunk count, must be non-zero;
+- the chunk offsets are the dwords at **+0x20 + 4·i** for i = 0 … count−1;
+- at each offset: `{char fourcc[4]; UINT size; payload[size]}`;
+- it looks for the fourcc **`PRIV`**; its payload must begin with the two bytes **0xDC, 0xE2**;
+- the dword at PRIV payload **+3** is used as the key of an in-process map of root signatures (V);
+- the root signature description starts at PRIV payload **+2** and runs to the end of the chunk; it is converted
+  to a D3D12 versioned description by fn 0x55ac630 and serialised through the imported
+  `D3D12SerializeVersionedRootSignature`, then created through device slot 16 (V). The description's own leading
+  bytes (read by 0x55ac630, V) are: byte at +0 = a count of 0x20-byte entries, word at +1 = a count, byte at +5 =
+  a count of 0x34-byte entries, entries from +6.
+
+So the container format as the game sees it is the public DXBC chunk layout, and the game reads exactly three
+things in it: the magic, the chunk count and the chunk offsets, and then one chunk (`PRIV`). The **total size at
++0x18, the 16 bytes at +0x04 and every other chunk are never read by the game**: a scan of every instruction in
+the image that compares an immediate with `DXBC` or `PRIV` finds only fn 0xfa09f0 (V for the scan and for that
+function; the 0x18/0x04 fields are named after the public container layout, I).
+
+Consequence (U, and it must stay open): **the fourcc of the chunk that holds the console instruction stream is not
+established by the game's code.** The image never looks at it — the console driver does. Any fourcc we wrote down
+for it would be a guess. The instruction bytes are in *some* chunk of that container, but which one is for the
+shell's translator to determine from a logged container header, not to assume now.
+
+What the game passes on as the shader length is the dword at the outer container's +0x08 (V), i.e. the length of
+this whole DXBC container, not the length of any chunk.
+
+---
+
+## 5. How the shader pair reaches each description
+
+- **Compute (slot 62)**: fn 0x247fd30 calls fn 0x86f8e0 for stage 0 into the two halves of the zeroed 0x40-byte
+  block (+0x08 pointer, +0x10 length), puts the root signature at +0 and 1 at +0x18, and calls (V). The pipeline
+  object is stored at request+0x120; on failure the root signature at request+0x118 is released (V).
+- **Graphics (slot 101)**: fn 0x24801b0 calls fn 0x86f8e0 for stage 0, copies the pair into the four-field shader
+  block (section 1.1) and puts that block in entry type 5 (V).
+- **Slots 55/57/67**: the shader pair is not visible in their own call sites; it is in the description the caller
+  built (U). Slot 67's first desc qword is the root signature; the rest of that node is written elsewhere (U).
+
+## 6. How many, and which comes first
+
+- One compute pipeline call site (slot 62), one graphics pipeline call site (slot 101), plus slot 55/57/67 whose
+  descriptions I could not read far enough to classify (U). All of them are single call sites (V, method above);
+  the counts are of *sites*, and a site runs many times.
+- **Both pipeline creations are jobs** (V): fn 0xf9f650 and fn 0x2480100 allocate a job object (fn 0xf9fbd0) whose
+  entry is 0x247fd00 → fn 0x247fd30 (compute) or 0x2480180 → fn 0x24801b0 (graphics), and submit it (fn 0xf9fbc0).
+  Job objects are how this engine runs work on its own worker threads (I).
+- During device start-up (fn 0x19f4df0, the chain that also calls `D3D12XboxCreateDevice`) the only pipeline work
+  reached is fn 0x1d65750 → fn 0x2476e20, which creates **root signatures** and fills the pipeline cache; it does
+  not call a pipeline method itself (V).
+- So the first pipeline state the shell is likely to see is the **compute** one from fn 0x247fd30 / slot 62, with
+  a `D3D12_COMPUTE_PIPELINE_STATE_DESC`-shaped description whose CS pair is a real shader container (I). The first
+  thing the translator would have to read is therefore a compute container, not a graphics one.
+
+## 7. What a run has to log to settle the rest (in memory only)
+
+These are the questions this reading could not close, each with the smallest measurement that closes it. All of it
+is logging of numbers and header fields in memory during a run — nothing is written to a file, per rule 2 and 5.
+
+1. **Which of the five methods fires first, and with which arguments.** Log, for each of slots 55/57/62/67/101, the
+   argument values and the first 64 bytes of the description as words. Settles: the desc layouts of 55/57/67, and
+   whether 62 really is tried after 67.
+2. **Which thread makes the first pipeline call.** Log `GetCurrentThreadId()` at the first pipeline call. Settles
+   whether the game builds pipelines off-thread (rule 7 is about what *we* do, but if the caller is already a
+   worker thread the shell must not move the work again, and ExCorvus must decide the answer).
+3. **What the pointer handed over really points at.** Log the first 16 bytes at the shader pointer and the length,
+   for the first pipeline. Expectation from this file: `DXBC` first (the unpacked form), and 0xDCE7 only if the
+   outer branch was skipped. Settles: whether our wrapper sees the packed or the unpacked container.
+4. **The chunk table of that container.** Log the dword at +0x1C and the chunk offsets at +0x20 (+ fourcc and size
+   of each chunk). Settles: which fourcc holds the instruction stream, and therefore what the translator's
+   "instruction stream at offset X, length Y" answer can be. That is the one fact this document cannot supply.
+5. **Which record belongs to which stage** for graphics pipelines. The index passed to fn 0x86f8e0 is 0 in every
+   call site, so the stage is not in that argument (section 2). Logging the *caller* function and the record
+   pointer for each of the five calls fn 0x86f090 makes settles the order; until then the shell must not infer a
+   stage from the call itself.
+
+## 8. What is in `shell/shader_container.*` because of this file
+
+`shader_container.hpp/.cpp` is a reader for the two headers above and nothing more. It reports:
+
+- which container it recognised (`DXBC`, the game's 0xDCE7 packing, or neither);
+- the declared sizes each header carries, and (for `DXBC`) the chunk table with each chunk's fourcc, offset and
+  length;
+- whether the `PRIV` chunk exists and its payload begins with 0xDC 0xE2 (the two bytes the game requires);
+- and explicitly **no instruction-stream offset**: this file does not establish one, so the reader never names one
+  and says why.
+
+It refuses, with a reason, on: a header shorter than its own declared fields, a declared container size larger
+than the bytes it was given, a chunk count that does not fit, a chunk offset inside the header, a chunk offset
+outside the buffer, and a chunk whose declared size runs past the end. Tests build these headers by hand; no game
+bytes are used anywhere.
