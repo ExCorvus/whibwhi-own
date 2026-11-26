@@ -52,10 +52,10 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   names in a request gives only the order and kind of the parameters: one root signature is named for many
   shaders (16 layouts for 926 pairs), so what a table holds has to be taken from each shader's own module.
   A translator from that hardware code is the way to a picture. Its first form exists: a pass
-  that writes a PC shader for a pixel or vertex program. It writes 415 of 505 pixel and 224 of 227 vertex
-  programs of a run (boot b130) and refuses the rest with a reason; compute programs are not handled. What
+  that writes a PC shader for a pixel or vertex program. It writes 479 of 505 pixel and 224 of 227 vertex
+  programs of a run (boot b133) and refuses the rest with a reason; compute programs are not handled. What
   it writes has been checked against a reference interpreter on made-up programs only and has not been given
-  to the graphics device (docs/SHADER-TRANSLATOR.md sections 26 and 27). Nearly every request comes from the game's worker
+  to the graphics device (docs/SHADER-TRANSLATOR.md sections 26 to 28). Nearly every request comes from the game's worker
   threads (tens of thousands in the first seconds); three come from the thread that created the device.
   Details: docs/SHADER-TRANSLATOR.md sections 13, 15 and 16, docs/exe-map/SHADER-PATH.md sections 10 to 12.
 - **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
@@ -1333,3 +1333,18 @@ nothing here.
   shell's side of start-up faster is the remedy; the watchdog stays as it is.
 
 The game folder was unchanged after every run. 27 tests pass.
+
+## 2026-11-26 - texel reads written: 479 of 505 pixel programs (boots b131-b133; measured)
+
+- The PC shader pass now writes the texel reads (`image_load`, `image_load_mip`) of the 64 pixel programs that
+  use the pixel position. The "address is not normalized" flag is accepted (the public compiler sets it on every
+  texel read); a read is written only when every use of the registers it fills takes them as floats (the pass
+  declares textures float). All 64 passed that check in boot b133.
+- Boot b133 (game folder unchanged): 479 of 505 pixel and 224 of 227 vertex programs written. The remaining
+  refusals are small and each understood from the private listings: 11 pixel copy the interpolation value into
+  another register before use, 6 move into the null register, 4 use `v_readfirstlane_b32` (a reader fault: its
+  result is scalar), 2 take a resource from the descriptor heap by number, 2 use a descriptor word as a number on
+  one path, 1 uses the interpolation move (a flat input); 3 vertex export a parameter their output list does not
+  declare. Details: docs/SHADER-TRANSLATOR.md section 28.
+- Nothing written has been given to the graphics device; no PC root signature exists; nothing of the game's
+  picture is drawn. 27 tests pass.
