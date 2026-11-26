@@ -1328,3 +1328,23 @@ Follow-up, game test 00:12 (visible, the copy's folder unchanged; FAIL about 5 s
   `xbox.global_load_dwordx3_with_cache` and `xbox.global_load_dwordx4_with_cache`; the converter does not know
   them yet, the device answers 0x80070057 and the builder throws. That is the new stop.
 - The lane count change is in the same converter; this run still cannot show whether it is taken.
+## 2026-11-27 - all builder shaders through the translator at once, and the next stop (game test 00:22)
+
+- A checker outside the repository (C:\Users\fabiq\AppData\Local\Temp\opencode\bvh_check) reads XboxBvhBuilder.dll
+  from the copy into memory, finds its 52 shader containers and passes each through dxil-spirv as vkd3d-proton does
+  (buffers by GPU address, root constants as push constants). Nothing of the file or of the translated code is
+  written anywhere. Before any change it agreed with the game test of 00:12 on both shaders that run reached
+  (the 5,136-byte one accepted, the 7,876-byte one refused for the 16-byte load).
+- Taught in the fork's dxil-spirv after that: the loads of 4, 8, 12 and 16 bytes and the constant load, the
+  12-byte store, atomic add and subtract, float atomic minimum and maximum, Min3 / Med3 / Max3 (float and
+  unsigned), BFI, V_ALIGNBYTE_B32, V_PK_MIN_F16 / V_PK_MAX_F16 and S_BCNT1_U64. The float atomic minimum and
+  maximum need VK_EXT_shader_atomic_float2, which vkd3d-proton did not turn on; the fork now turns it on when the
+  card has it (this card: shaderBufferFloat32AtomicMinMax = true).
+- Checker: 41 of 52 accepted. The 11 others stop at lane functions (LaneSwizzle 7, MakeUniform 3; held, they
+  depend on the lane count) and one typed load. "Accepted" says the translator understood a shader, not that the
+  shader computes what it should.
+- Game test 00:22 (run-20261127-002228; FAIL about 5 s in, the copy's folder unchanged): four builder pipelines are
+  made (5,136, 7,876, 5,504 and 18,748 bytes, all 0x0), the second of them the one that stopped the run of 00:12.
+  Then an access violation: execution at an address in ordinary memory (the bytes there look like a pointer, not
+  code), called from 0x7ffd2920ae8a. That address lies in none of the libraries whose load the log names; which
+  library it belongs to was not recorded. Not chased (it may be a binding symptom, rule of 2026-11-26).
