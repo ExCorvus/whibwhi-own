@@ -1,6 +1,8 @@
 // Console imports implementation. See console.hpp.
 #include "console.hpp"
 
+#include "offline.hpp"
+
 #include <cctype>
 #include <cstdint>
 #include <cstring>
@@ -377,11 +379,29 @@ void set_package_root(const std::wstring& folder) {
     g_file_trace = GetEnvironmentVariableA("WHIWHI_FILE_TRACE", v, sizeof(v)) > 0 && v[0] == '1';
 }
 
+// WSAStartup, by name or by its ordinal in the PC's socket library.
+bool is_socket_library_start(const std::string& lower_library, const ImportedFunction& fn) {
+    if (lower_library != "ws2_32.dll") {
+        return false;
+    }
+    return fn.by_ordinal ? fn.ordinal == 115 : fn.name == "WSAStartup";
+}
+
 void* resolve_console_import(HostLibraries& host, const std::string& library, const ImportedFunction& fn) {
+    const std::string name = lower(library);
+    // The network boundary (offline.hpp): every import that could open a socket, resolve a name or make an HTTP
+    // request is connected to a refusal instead of the real library. One exception, decided here: WSAStartup
+    // goes to the real library. It initialises the socket library inside this process and sends nothing, and
+    // the image stops in its own check when it fails; refusing it would say the system is not ready when it is.
+    // No socket can exist afterwards all the same, because creating one is refused.
+    if (!is_socket_library_start(name, fn)) {
+        if (void* refusal = offline_replacement(library, fn)) {
+            return refusal;
+        }
+    }
     if (fn.by_ordinal) {
         return host.resolve(library, fn);
     }
-    const std::string name = lower(library);
     if (fn.name == "VirtualFree" && (name.rfind("api-ms-win-core-memory-", 0) == 0 || is_kernel(name))) {
         ImportedFunction ours;
         ours.name = "whiwhi_xmem_virtual_free";
