@@ -10,6 +10,9 @@ repository; they are kept because the ideas were ExCorvus's, not because they de
 
 ## ExCorvus's ideas (the direction)
 
+0. **Where the idea came from.** ExCorvus got the idea for the shell by inspecting the game itself, the Xbox
+   Series build of GTA VI: its code is ordinary 64-bit code a PC processor runs as is, and what it lacks on a PC
+   is what surrounds it on the console. Everything below grew from that.
 1. **The watchdog ground truth.** The watchdog is a small parallel execution folded into the game executable,
    running alongside the game and checking against it (framerate, and the post-boot user environment variable).
    It stays armed; it is ground truth, not a thing to disable or probe.
@@ -69,5 +72,8 @@ In the earlier attempt (code not in this repository):
   address-conversion table — the page mapping is the whole mechanism.
 - In the earlier attempt, the crash at the start of the game world was a write through an address the GPU could
   not reach; the mesh draws were also dropped.
-- Sparse `DEVICE_ADDRESS_CAPTURE_REPLAY` and off-thread (async) pipeline builds destabilised the AMD driver; they
-  are banned. Ordinary (non-sparse) host imports are safe.
+- Sparse `DEVICE_ADDRESS_CAPTURE_REPLAY` buffers destabilised the AMD driver; they are banned. Ordinary
+  (non-sparse) host imports are safe.
+- Pipelines built on the threads that ask for them, side by side, are allowed (ExCorvus, 2026-11-26). The earlier
+  ban on that came from an instruction in the earlier attempt to build them one at a time, not from a measured
+  crash; the shell has built tens of thousands of pipelines this way without a fault (boots b163 and later).
