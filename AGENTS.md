@@ -12,7 +12,7 @@ the console-only libraries the game imports, and is meant to show the game's mem
 emulator: no console hardware is recreated.
 
 What works today, and where a run currently stops, is in the **Current state** block at the top of
-[FINDINGS.md](FINDINGS.md). Nothing has been drawn on screen yet.
+[FINDINGS.md](FINDINGS.md). The game presents frames to its window, but none of its picture is drawn yet.
 
 ## Rules
 
@@ -72,4 +72,4 @@ What works today, and where a run currently stops, is in the **Current state** b
 shell\build.cmd
 ```
 
-Builds the shell, the console libraries and the tools, and runs the 15 tests. No game files and no GPU are needed.
+Builds the shell, the console libraries and the tools, and runs the 17 tests. No game files and no GPU are needed.
