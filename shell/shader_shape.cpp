@@ -233,7 +233,11 @@ ProgramShape shape_of(const DecodedShader& decoded) {
                 if (ins.vintrp.attr > shape.highest_attribute) {
                     shape.highest_attribute = ins.vintrp.attr;
                 }
-                t.read_vector(ins.vintrp.vsrc);
+                // The two interpolation steps read a vector register; the parameter move's field is a
+                // selector (0, 1 or 2) and reads no register.
+                if (!ins.vintrp.vsrc_is_selector) {
+                    t.read_vector(ins.vintrp.vsrc);
+                }
                 t.write_vector(ins.vintrp.vdst);
                 break;
             }
