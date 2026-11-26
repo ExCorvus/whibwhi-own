@@ -98,16 +98,6 @@ typedef void (*WhiwhiXmemFreeRoutine)(void* pointer, unsigned long long attribut
 WHIWHI_XMEM_API void whiwhi_xmem_set_allocation_hooks(WhiwhiXmemAllocRoutine alloc,
                                                        WhiwhiXmemFreeRoutine free_routine);
 
-// A routine the library calls just before the memory at [base, base + bytes) stops being what it was: a mapped
-// page is unmapped or replaced by another, a range for pages, a committed region or an allocation is released,
-// or the image hands committed memory this library has no record of to VirtualFree (release or decommit).
-// It is for a user that has shown that memory to something outside the process (a GPU) and must stop relying
-// on what it showed. The routine is called with this library's lock held, so it must not call back into the
-// library. Null clears it. Memory that goes away without passing through this library (a C runtime heap giving
-// pages back, for one) is not seen.
-typedef void (*WhiwhiXmemChangeRoutine)(void* base, unsigned long long bytes);
-WHIWHI_XMEM_API void whiwhi_xmem_set_change_routine(WhiwhiXmemChangeRoutine routine);
-
 typedef struct WhiwhiXmemRegion {
     void* base;
     unsigned long long bytes;
