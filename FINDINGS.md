@@ -1062,3 +1062,22 @@ render-target clear reached the PC list, last frame token 122 (accepted run 116)
 Not changed (rare cases, written down): a view being made again while another thread overwrites the last note
 naming it could let its resource go during the remake; a held resource can outlive the program's use of its
 memory, which the program may reuse - using such a view would be the program's own late use.
+
+## 2026-11-26 - render-target and depth views in the heap memory the program was given; the notes dropped (game test 20:25)
+
+The notes of the two entries above were a layout of the shell's own, and they kept a second heap next to the
+memory the program was given, with machinery to keep the two in step. The program asks for none of that: it
+expects the 32 bytes at its own address to be the view. The notes and their four fixes are dropped (the graphics
+library is back to its state at commit 699 for them), and the views now live where the program expects them.
+
+The layers sit inside each other: the program calls its graphics library, which calls the PC library, which
+writes into the heap memory the memory library handed down for that heap. Measured in the PC library the user
+builds (vkd3d-proton 71cae09; read, nothing copied): a render-target or depth handle is a plain address; the view
+is a 32-byte record written at that address; copies of these heap types are a plain byte copy; the view itself
+belongs to its resource, so the record holds no count of its own. So for heap types 2 and 3 the graphics library
+now hands the program's own address down unchanged instead of moving it into a heap of its own. This is a
+measured fact of that PC library version, not something Direct3D 12 promises.
+
+Game test 2026-11-26 20:25: PASS, alive after 60 s, the copy's folder unchanged, no new missing answers, a
+render-target clear reached the PC list, last frame token 119. Measured in the run: 21 render-target and depth
+views made, all 21 found filled in the program's own heap memory, none empty.
