@@ -876,6 +876,44 @@ int XMemTransferMemory(unsigned long kind, unsigned long long bytes) {
     return 1;
 }
 
+unsigned long long XMemVirtualQuery(const void* address, void* buffer, unsigned long long length) {
+    Guard guard;
+    ++state().stats.calls_virtual_query;
+    try {
+        if (!address || !buffer || length < sizeof(MEMORY_BASIC_INFORMATION)) {
+            ++state().stats.refused;
+            return 0;
+        }
+        // Prefer our own region record (it carries the console protect/type bits); fall back to Windows.
+        const auto& regions = state().regions;
+        const auto it = regions.upper_bound(reinterpret_cast<std::uint64_t>(address));
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (it != regions.begin()) {
+            const Region& r = std::prev(it)->second;
+            if (reinterpret_cast<std::uint64_t>(address) >= r.base &&
+                reinterpret_cast<std::uint64_t>(address) < r.base + r.bytes) {
+                mbi.BaseAddress = reinterpret_cast<void*>(r.base);
+                mbi.AllocationBase = reinterpret_cast<void*>(r.base);
+                mbi.AllocationProtect = r.protect & 0xFF;
+                mbi.RegionSize = r.bytes - (reinterpret_cast<std::uint64_t>(address) - r.base);
+                mbi.State = (r.kind == WHIWHI_XMEM_PLACEHOLDER) ? MEM_RESERVE : MEM_COMMIT;
+                mbi.Protect = r.protect & 0xFF;
+                mbi.Type = MEM_PRIVATE;
+                std::memcpy(buffer, &mbi, sizeof(mbi));
+                return sizeof(mbi);
+            }
+        }
+        if (VirtualQuery(address, &mbi, sizeof(mbi)) == 0) {
+            return 0;
+        }
+        std::memcpy(buffer, &mbi, sizeof(mbi));
+        return sizeof(mbi);
+    } catch (...) {
+        ++state().stats.host_failures;
+        return 0;
+    }
+}
+
 int __stdcall whiwhi_xmem_virtual_free(void* address, unsigned long long size, unsigned long type) {
     Guard guard;
     ++state().stats.calls_virtual_free;
