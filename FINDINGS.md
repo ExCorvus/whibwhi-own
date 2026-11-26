@@ -10,14 +10,17 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
-- **Running:** the game's entry point is started. The furthest a run has got (boots b26/b27) is through the
-  game's memory start-up (two 24 GiB address ranges and its fixed pools) and into creating its file-read queues.
-- **Latest runs** (boots b43-b45, started from a staged folder): they stop earlier, with a read of address 0
-  inside the shell's own graphics library during the game's first graphics call. The cause is not established.
-- **Not built:** anything that draws. The graphics library hands the game a wrapped PC device, but the
-  console-only device functions answer "not implemented". The shader translator handles only straight-line
-  compute test shaders. The audio device, the ray-tracing builder and the texture layout library are skeletons
-  that answer failure.
+- **Running:** the game's entry point is started. The furthest run (boot b51) goes through the game's memory
+  start-up, loads the game runtime library, opens all of the game's package files (read-only, through the
+  package drive the shell answers), creates a real graphics device (Direct3D 12 on Vulkan, through vkd3d-proton,
+  on the RX 9070 XT), reads heap properties from it, creates its main command queue and a fence, and then stops
+  at the first console-only device function the shell does not provide: device slot 48, which the game uses to
+  create four more command queues. The game treats that failure as fatal, by its own check.
+- **Not built:** anything that draws. The console-only device functions (slot 48 onward: more queues, command
+  lists, pipeline states, views, frame events) answer "not implemented". The shader translator handles only
+  straight-line compute test shaders. The game runtime library answers every interface query with "no such
+  interface". The audio device, the ray-tracing builder and the texture layout library are skeletons that
+  answer failure.
 - **Proven separately:** the GPU in this machine can read ordinary host memory without a copy
   (`shell/tools/vkhost_probe.cpp`).
 - **Nothing has been drawn on screen.**
@@ -376,7 +379,9 @@ All 12 tests passed at that point.
   (fn 0x55e29dc) uses mode 2 (app-dir search, 0xa00) only when that file EXISTS next to the exe and the
   ForceUseLocalServices probe (fn 0x55e286c, HKLM GamingServices) is 1; otherwise mode 1 (System32-only, 0x800).
   On a real PC GDK install the game folder holds exe + xgameruntime.dll + the package files together.
-- Our answer: stage a work folder that looks like that install - copy our binaries (boot_image.exe + the console
+- Superseded by the entry for boots b46-b53: the links to the game's files are not needed, because the game asks
+  for its packages on drive G:\ and the shell answers that drive. What stays true is that xgameruntime.dll must
+  sit beside the running program. The answer at the time was: stage a work folder that looks like that install - copy our binaries (boot_image.exe + the console
   DLLs) into it and hard-link/junction every game-folder entry into it (game folder itself untouched, listing
   hash unchanged). Then GetModuleFileNameW(NULL) is the work exe, xgameruntime.dll is present beside it (mode 2),
   and the package reads resolve through the links. run_boot.ps1 does the staging; boot_image's PEB image-path
@@ -400,3 +405,47 @@ All 12 tests passed at that point.
   is not established.
 - boot_image writes its entry-point log lines without taking its log lock: with the lock, the line was lost and
   a run looked as if it had ended before the entry point.
+
+## 2026-11-26 - runtime version, the package drive, the device, and the next stop (measured, boots b46-b51)
+
+- **The null read of boots b43-b45 was the C++ runtime version.** The game folder ships the Microsoft C++ runtime
+  at version 14.29; the shell is built with compiler 14.52. The staged folder linked the game's copies beside the
+  shell's tools, so the shell's own libraries loaded a runtime older than they were built for and a lock in the
+  graphics library read address 0. The staged folder no longer links the game's runtime files (msvcp140*,
+  vcruntime140*, concrt140, vccorlib140, vcomp140); the PC's newer runtime serves the game and the shell. Boot b46
+  got past the call.
+- **The game runtime library takes three arguments for an interface query**: two identifiers, then the output
+  variable (rcx and rdx point at identifiers in the game's read-only data, r8 at the output; 161 call sites go
+  through fn 0x55de048). The shell's function took two and wrote through the second identifier. Fixed; it now
+  answers "no such interface" and logs each distinct pair once. A run asks for six pairs before the graphics
+  device; the game carries on after each refusal.
+- **The earlier note that the storage check at image+0x2237178 had been passed was wrong.** That run had failed
+  at an earlier step and never reached the check.
+- **What that check tests:** fn 0x2236e00 mounts the game's packages and then requires that at least one was
+  mounted. It first asks whether the file `appdata0.rpf` exists, and it asks for it as `G:\appdata0.rpf`
+  (measured with the new trace of the game's file calls, WHIWHI_FILE_TRACE=1). The console mounts the game's
+  package as drive G:. This PC has no such drive, so nothing was mounted.
+- **The package drive.** The shell now answers the game's file calls for `G:\` from the folder with the game's
+  files (shell/console.cpp; the storage library maps the same way). It is read-only by construction: a call that
+  would create, change or delete anything under `G:\` is refused inside the shell with "access denied" and never
+  reaches Windows. Tested with a made-up folder (shell/tests/test_console.cpp). In boot b50 the game opened
+  appdata0, common, movies, shaders, anim, data, levels, navmeshes, packs, textures, audio and script, all
+  through `G:\`. The game folder listing was identical before and after every run.
+- **The graphics device is created.** D3D12XboxCreateDevice is asked for the public interface identifier of
+  ID3D12Device11; the shell creates a real device through the vkd3d-proton build (Direct3D 12 on Vulkan) and
+  returns its wrapper. vkd3d's on-disk shader cache is turned off by the shell, so nothing is written to disk.
+- **Methods that return a structure use a different argument order.** At its three calls of device slot 26
+  (heap properties for heap types 1, 2 and 3) the game passes the place for the structure first and the device
+  second; a PC object takes the object first. The wrapper treated the first argument as the object and faulted
+  (boot b50). It now forwards these methods with the two swapped (device slots 25, 26, 43; descriptor heap 8, 9,
+  10; queue 18). Only slot 26 is measured; the others are given the same order by inference.
+- **Where boot b51 stops.** After the main queue (device slot 8, description {0, 0, 0, 1}) and a fence, the game
+  calls device slot 48 four times with a 16-byte description, the public identifier of ID3D12CommandQueue and an
+  output variable; the descriptions are {2, 0, 1, 0}, {2, 0, 2, 0}, {2, 0, 3, 0} and {2, 0, 0, 1}. On the PC's
+  device, slot 48 is a different function, so this is a console-only way of creating queues. The shell answers
+  "not implemented" and the game stops at its own check (image+0x2478826). What the third number means is not
+  known.
+- **No work folder is needed any more.** With the package drive answered by the shell, a run from the build
+  folder itself (only the shell's own programs and libraries beside boot_image.exe, no game files, no links)
+  reaches the same point (boots b52, b53). The run wrote nothing into that folder. docs/BUILD-AND-RUN.md
+  describes this way of running; the earlier staged folder with links to the game's files is superseded.
