@@ -83,6 +83,60 @@ int main() {
             CHECK(out == nullptr);
             CHECK(std::memcmp(&id, &before, sizeof(GUID)) == 0);
             CHECK(query(&id, &id, nullptr) == 0x80004002L);
+
+            // The system interface is provided, with one method answered: the sandbox name at offset 0x20.
+            static const GUID provider = {0xe349bd1a, 0xfc20, 0x4e40, {0xb9, 0x9c, 0x41, 0x78, 0xcc, 0x6b, 0x40, 0x9f}};
+            static const GUID system = {0x1861cf2e, 0xe18b, 0x4834, {0xa9, 0xf5, 0xb4, 0xa4, 0xe6, 0xef, 0xb4, 0xcf}};
+            void* object = nullptr;
+            CHECK(query(&provider, &system, &object) == 0);
+            CHECK(object != nullptr);
+            CHECK(query(&provider, &id, &out) == 0x80004002L);  // the provider with another interface: refused
+            CHECK(query(&provider, &system, nullptr) == 0x80004002L);
+            if (object) {
+                void** methods = *reinterpret_cast<void***>(object);
+                using Method = long(__stdcall*)(void*, void*, void*, void*);
+                const auto call = [&](int slot, void* a, void* b, void* c) {
+                    return reinterpret_cast<Method>(methods[slot])(object, a, b, c);
+                };
+                // What this PC stores, or the documented default.
+                char expected[64] = {};
+                DWORD bytes = sizeof(expected) - 1;
+                if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\XboxLive", "Sandbox", RRF_RT_REG_SZ,
+                                 nullptr, expected, &bytes) != ERROR_SUCCESS ||
+                    expected[0] == '\0') {
+                    std::strcpy(expected, "RETAIL");
+                }
+                char text[32];
+                std::memset(text, 0x55, sizeof(text));
+                unsigned long long used = 99;
+                CHECK(call(4, reinterpret_cast<void*>(sizeof(text)), text, &used) == 0);
+                CHECK(std::strcmp(text, expected) == 0);
+                CHECK(used == std::strlen(expected) + 1);
+                // No place for the size is fine; too little room and no buffer are refused and write nothing.
+                std::memset(text, 0x55, sizeof(text));
+                CHECK(call(4, reinterpret_cast<void*>(sizeof(text)), text, nullptr) == 0);
+                CHECK(std::strcmp(text, expected) == 0);
+                std::memset(text, 0x55, sizeof(text));
+                used = 99;
+                CHECK(call(4, reinterpret_cast<void*>(static_cast<size_t>(2)), text, &used) == 0x8007007AL);
+                CHECK(text[0] == 0x55 && used == 0);
+                CHECK(call(4, reinterpret_cast<void*>(sizeof(text)), nullptr, &used) == 0x80004003L);
+                // The two other methods the game calls on it, and any other position, are not provided.
+                CHECK(call(3, nullptr, nullptr, nullptr) == 0x80004001L);
+                CHECK(call(5, nullptr, nullptr, nullptr) == 0x80004001L);
+                CHECK(call(31, nullptr, nullptr, nullptr) == 0x80004001L);
+                // Asking the object for itself works; for anything else it refuses.
+                void* again = nullptr;
+                CHECK(reinterpret_cast<long(__stdcall*)(void*, const GUID*, void**)>(methods[0])(object, &system,
+                                                                                               &again) == 0);
+                CHECK(again == object);
+                CHECK(reinterpret_cast<long(__stdcall*)(void*, const GUID*, void**)>(methods[0])(object, &id,
+                                                                                               &again) ==
+                      0x80004002L);
+                CHECK(again == nullptr);
+                reinterpret_cast<unsigned long(__stdcall*)(void*)>(methods[2])(object);
+                reinterpret_cast<unsigned long(__stdcall*)(void*)>(methods[2])(object);
+            }
         }
     }
 
