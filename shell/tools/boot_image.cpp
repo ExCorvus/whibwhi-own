@@ -28,6 +28,12 @@ using namespace whiwhi::shell;
 
 namespace {
 
+// A thread-local variable in the shell's own executable makes Windows assign storage index 0 to this process's
+// main module, the way the console assigns it to the game. The loader then points entry 0 at the loaded image's
+// block (see thread_block.cpp), and the PC libraries keep their own entries. Non-zero initialised so the
+// linker keeps the storage directory; touched once here so it is not stripped.
+__declspec(thread) unsigned char whiwhi_tls_seat[16] = {1};
+
 std::mutex g_log;
 LoadedImage* g_loaded = nullptr;
 
@@ -46,19 +52,61 @@ std::uintptr_t on_unprovided(const UnprovidedImport& which) {
 
 LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
     const ULONG code = info->ExceptionRecord->ExceptionCode;
-    const std::uintptr_t at = reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
-    if (code != 0x80000003 && code != 0x80000004 && (code & 0xFFFF0000) != 0xC0000000) {
+    // Only the exceptions that end or mark a run: breakpoint, single step, access violation, in-page error,
+    // stack overflow, heap corruption, fail fast. (0xC0000135/0xC0000139 from the loader are handled by it.)
+    const bool interesting = code == 0x80000003 || code == 0x80000004 || code == 0xC0000005 || code == 0xC0000006 ||
+                             code == 0xC00000FD || code == 0xC0000374 || code == 0xC0000409;
+    if (!interesting) {
         return EXCEPTION_CONTINUE_SEARCH;  // the image handles these itself
     }
+    const std::uintptr_t at = reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+    const std::uintptr_t rip = info->ContextRecord->Rip;
+    const std::uintptr_t data = info->ExceptionRecord->NumberParameters > 1
+                                     ? static_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionInformation[1])
+                                     : 0;
+    const unsigned long rw = info->ExceptionRecord->NumberParameters > 0
+                                 ? static_cast<unsigned long>(info->ExceptionRecord->ExceptionInformation[0])
+                                 : 0;
     std::lock_guard<std::mutex> lock(g_log);
-    std::fprintf(stderr, "[boot] exception 0x%08lx at 0x%llx", code, static_cast<unsigned long long>(at));
+    std::fprintf(stderr, "[boot] exception 0x%08lx", code);
+    if (code == 0xC0000005) {
+        std::fprintf(stderr, " (%s at 0x%llx)", rw == 0 ? "read" : rw == 1 ? "write" : "exec", static_cast<unsigned long long>(data));
+    }
+    std::fprintf(stderr, " at 0x%llx, instruction 0x%llx", static_cast<unsigned long long>(at), static_cast<unsigned long long>(rip));
+    std::fprintf(stderr, ", rcx 0x%llx rdx 0x%llx rsp 0x%llx [rsp] 0x%llx",
+                 static_cast<unsigned long long>(info->ContextRecord->Rcx),
+                 static_cast<unsigned long long>(info->ContextRecord->Rdx),
+                 static_cast<unsigned long long>(info->ContextRecord->Rsp),
+                 static_cast<unsigned long long>(*reinterpret_cast<const std::uintptr_t*>(info->ContextRecord->Rsp)));
     if (g_loaded && g_loaded->base) {
         const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(g_loaded->base);
-        if (at >= base && at < base + g_loaded->size) {
-            std::fprintf(stderr, " (image+0x%llx)", static_cast<unsigned long long>(at - base));
+        if (rip >= base && rip < base + g_loaded->size) {
+            std::fprintf(stderr, " (instruction image+0x%llx)", static_cast<unsigned long long>(rip - base));
+        }
+        if (data >= base && data < base + g_loaded->size) {
+            std::fprintf(stderr, " (data image+0x%llx)", static_cast<unsigned long long>(data - base));
+        }
+        const std::uintptr_t ret = *reinterpret_cast<const std::uintptr_t*>(info->ContextRecord->Rsp);
+        if (ret >= base && ret < base + g_loaded->size) {
+            std::fprintf(stderr, " (return image+0x%llx)", static_cast<unsigned long long>(ret - base));
         }
     }
     std::fprintf(stderr, "\n");
+    // Poor-man's backtrace: scan the top of the faulting stack for return addresses into the image.
+    if (g_loaded && g_loaded->base) {
+        const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(g_loaded->base);
+        const std::uintptr_t* sp = reinterpret_cast<const std::uintptr_t*>(info->ContextRecord->Rsp);
+        std::fprintf(stderr, "[boot] stack scan (image return addresses):");
+        int found = 0;
+        for (int i = 0; i < 512 && found < 16; ++i) {
+            const std::uintptr_t v = sp[i];
+            if (v >= base + 0x1000 && v < base + g_loaded->size) {
+                std::fprintf(stderr, " +0x%llx", static_cast<unsigned long long>(v - base));
+                ++found;
+            }
+        }
+        std::fprintf(stderr, "\n");
+    }
     std::fflush(stderr);
     if (code == 0x80000003) {
         // The image's own breakpoint (its fatal stop, or the watchdog firing): logged; end the boot cleanly.
@@ -92,9 +140,15 @@ int main(int argc, char** argv) {
     const char* image_path = nullptr;
     const char* library_folder = nullptr;
     unsigned seconds = 120;
+    bool run_callbacks = true;
+    bool same_thread = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--seconds") == 0 && i + 1 < argc) {
             seconds = static_cast<unsigned>(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--no-callbacks") == 0) {
+            run_callbacks = false;
+        } else if (std::strcmp(argv[i], "--same-thread") == 0) {
+            same_thread = true;
         } else if (!image_path) {
             image_path = argv[i];
         } else if (!library_folder) {
@@ -102,10 +156,19 @@ int main(int argc, char** argv) {
         }
     }
     if (!image_path) {
-        std::printf("usage: boot_image <image file> [folder with the image's own libraries] [--seconds N]\n");
+        std::printf("usage: boot_image <image file> [folder with the image's own libraries] [--seconds N] "
+                    "[--no-callbacks] [--same-thread]\n");
         return 2;
     }
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // a crash must not lose the report
+    whiwhi_tls_seat[0] = 0;                       // keep the storage directory alive
+    {
+        char v[8] = {};
+        if (GetEnvironmentVariableA("WHIWHI_TLS_REDIRECT", v, sizeof(v)) > 0 && v[0] == '1') {
+            whiwhi_thread_block_set_redirect(1);
+        }
+    }
+    std::fprintf(stderr, "[boot] tool starting\n");
     std::ifstream file(image_path, std::ios::binary);
     if (!file) {
         std::printf("cannot open %s\n", image_path);
@@ -159,34 +222,47 @@ int main(int argc, char** argv) {
         std::printf("thread-local storage: %zu bytes per thread in storage index %lu, %zu callbacks\n",
                     loaded.thread_storage_bytes, whiwhi_thread_block_index(), loaded.thread_callbacks);
         prepare_thread_storage();
-        std::fprintf(stderr, "[boot] running the image's thread-storage callbacks\n");
-        std::fflush(stderr);
-        start_thread_callbacks(loaded);
-        std::fprintf(stderr, "[boot] thread-storage callbacks done\n");
-        std::fflush(stderr);
+        if (run_callbacks) {
+            std::fprintf(stderr, "[boot] running the image's thread-storage callbacks\n");
+            std::fflush(stderr);
+            start_thread_callbacks(loaded);
+            std::fprintf(stderr, "[boot] thread-storage callbacks done\n");
+            std::fflush(stderr);
+        } else {
+            std::fprintf(stderr, "[boot] skipping the image's thread-storage callbacks (--no-callbacks)\n");
+            std::fflush(stderr);
+        }
     }
 
     EntryContext ctx;
     ctx.entry = loaded.base + image.entry_point_rva();
-    HANDLE thread = CreateThread(nullptr, image.stack_reserve() ? image.stack_reserve() : 0x100000, &run_entry, &ctx, 0,
-                                 nullptr);
-    if (!thread) {
-        std::printf("could not start the entry thread\n");
-        unload_image(loaded);
-        return 1;
-    }
-    const DWORD wait = WaitForSingleObject(thread, static_cast<DWORD>(seconds) * 1000);
-    if (wait == WAIT_TIMEOUT) {
-        std::lock_guard<std::mutex> lock(g_log);
-        std::fprintf(stderr, "[boot] still running after %us - the image is alive; ending the boot\n", seconds);
+    if (same_thread) {
+        std::fprintf(stderr, "[boot] running the entry point on this thread (--same-thread)\n");
         std::fflush(stderr);
-        TerminateProcess(GetCurrentProcess(), 0);
+        run_entry(&ctx);
+        std::fprintf(stderr, "[boot] entry finished on this thread\n");
+        std::fflush(stderr);
+    } else {
+        HANDLE thread = CreateThread(nullptr, image.stack_reserve() ? image.stack_reserve() : 0x100000, &run_entry,
+                                     &ctx, 0, nullptr);
+        if (!thread) {
+            std::printf("could not start the entry thread\n");
+            unload_image(loaded);
+            return 1;
+        }
+        const DWORD wait = WaitForSingleObject(thread, static_cast<DWORD>(seconds) * 1000);
+        if (wait == WAIT_TIMEOUT) {
+            std::lock_guard<std::mutex> lock(g_log);
+            std::fprintf(stderr, "[boot] still running after %us - the image is alive; ending the boot\n", seconds);
+            std::fflush(stderr);
+            TerminateProcess(GetCurrentProcess(), 0);
+        }
+        DWORD code = 0;
+        GetExitCodeThread(thread, &code);
+        CloseHandle(thread);
+        std::fprintf(stderr, "[boot] entry thread finished with code %lu\n", code);
+        std::fflush(stderr);
     }
-    DWORD code = 0;
-    GetExitCodeThread(thread, &code);
-    CloseHandle(thread);
-    std::fprintf(stderr, "[boot] entry thread finished with code %lu\n", code);
-    std::fflush(stderr);
 
     if (const HMODULE memory = GetModuleHandleA("xmem.dll")) {
         const auto statistics =
