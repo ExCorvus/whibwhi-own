@@ -1264,4 +1264,11 @@ Follow-up, game tests 22:47 and 22:48 (both stop about 5 s in; the copy's folder
 - So the builder's shaders are DXIL with console functions in them, not plain PC shaders. On the console these
   functions are supplied by the console's shader compiler in its graphics library. What each function's arguments
   mean is not established; only the names and the types are read.
-- This corrects the earlier note (22:39) that the builder's shaders are "plain PC DXIL".
+- This corrects the earlier note (22:39) that the builder's shaders are "plain PC DXIL".- Follow-up (same day, the builder's 52 shaders read again): every `xbox.` function is called with one fixed first
+  number, an operation number like the one Microsoft's public shader functions take. These numbers are not
+  Microsoft's public operation numbers (bit-field insert is 23 here and 53 in Microsoft's list; the address loads,
+  stores and atomics are 355 to 369, beyond Microsoft's list): the console numbers them itself, and the names say
+  what they do. 64-bit lane masks are passed as pairs of 32-bit halves, which is what the shaders build with
+  `insertvalue`. Loads, stores and atomics take a 64-bit GPU address; the two "cache" inputs of every load and
+  store are left undefined at every call, so no cache setting is passed. Where these functions' code lives on the
+  console (the console's own graphics library) is not in any file of the installation that may be opened.
