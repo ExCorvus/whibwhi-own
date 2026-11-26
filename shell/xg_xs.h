@@ -96,13 +96,6 @@ WHIWHI_XG_XS_API int whiwhi_xg_layout(const WhiwhiXgDescription* description, vo
 // fills.
 WHIWHI_XG_XS_API unsigned long long whiwhi_xg_total_bytes(const WhiwhiXgDescription* description);
 
-// Whether this library has copied texture bytes into memory that starts at `address` (the object's copy method,
-// +0x40). If so, 1 with the description the bytes were laid out by and a number that grows with every copy into
-// that memory; else 0. It says only what this library wrote: the image may have changed the memory since by other
-// means, and memory freed by the image is not forgotten here.
-WHIWHI_XG_XS_API int whiwhi_xg_written_at(unsigned long long address, WhiwhiXgDescription* description,
-                                          unsigned long long* generation);
-
 #ifdef __cplusplus
 }
 #endif
