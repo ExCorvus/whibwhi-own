@@ -233,6 +233,30 @@ Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no de
   display actually supporting variable refresh). It changes the frame cadence the game's watchdog sees, so it is
   a deliberate later change with her sign-off, not something to fold into the current boot work.
 
+## 2026-11-26 - the remaining console libraries, mapped and stubbed (helper agents, reviewed and folded)
+
+Three helpers mapped the remaining console-only libraries from the exe's own call sites (docs/console-libs/,
+reports in the private candidates folder) and each shipped an honest skeleton DLL whose exports log once and
+answer "not provided" - never a faked success:
+
+- **AcpHal.dll (9) + xapu.dll (5)** - the audio hardware/APU libraries (shell/acp_hal.*, shell/xapu.*). The image
+  tests most of these with `js` (negative = failure), so the skeletons answer E_NOTIMPL there, 0 for the count
+  and bool returns, null for address returns. A boot that reaches audio bring-up stops at the image's own int3
+  (fn 0x43ad8b0's failure path) - the game's own error handling, not routed around. There is no PC equivalent of
+  the APU heap / shape contexts / 32-bit APU address window; real audio needs a DSP stand-in or stays unprovided.
+- **chad.dll (5)** - the audio co-processor command channel (shell/chad.*): 4096-byte command blocks in/out, one
+  handle per stream (shell/chad.*, docs/console-libs/chad.md).
+- **XCRDAPI.dll (1)** - DStorageGetFactory (shell/xcrdapi.*). Key finding: straight forwarding to the PC
+  dstorage.dll cannot be the final answer - the image asks for a console IID and a longer factory vtable
+  (CreateQueue at +0x50, SetStagingBufferSize 32 MiB at +0x40). Every read request's destination is a plain
+  unified VA in the CPU view / GPU view / page pool (the xmem-owned memory), so the PC answer is our own
+  factory/queue doing a plain file read into that address - no GPU resource, no staging copy. Stage 0 (forward
+  to PC dstorage.dll if installed) is in place; the PC has no dstorage.dll installed here, so the image int3s at
+  0x1d8e505 until the wrapper exists. Next step: the wrapper (OpenFile->CreateFileW, always-complete status
+  array, synchronous read into the destination).
+
+All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's gate, GitHub only).
+
 ## 2026-11-26 - booting the image in the shell; what the runs showed (measured)
 
 - shell/tools/boot_image.cpp (run by Temp\opencode\run_boot.ps1) loads the image, connects imports, optionally
