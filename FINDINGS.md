@@ -1223,3 +1223,21 @@ d3d12.dll's.
 - The two bits 0x1000000 and 0x2000000 are not among the PC's root signature flags. They are console additions to an
   otherwise public description. What they mean is not known: nothing in the executable or the builder reads them
   back; they are for the console's own graphics library.
+
+Follow-up, game tests 22:47 and 22:48 (both stop about 5 s in; the copy's folder unchanged):
+- The installation's builder carries the same two bits in the root signatures inside all 52 of its own shaders
+  (measured: every RTS0 part of the 52 shader containers in XboxBvhBuilder.dll has flags 0x3000000). The bits were
+  part of how those shaders were built, not something the builder adds on its own.
+- vkd3d-proton writes a root signature description with these flags unchanged and, when it is created, logs
+  "Ignoring root signature flags 0x3000000" (its source: unknown flags are noted, not refused). With the
+  serializer taken from the same library as the device (d3d12_vk.dll), the builder's root signature is created
+  (22:47). The next stop was device slot 62, which the shell did not provide.
+- Device slot 62 (public description D3D12_COMPUTE_PIPELINE_STATE_DESC, docs/exe-map/SHADER-PATH.md) now makes a
+  compute pipeline on the PC device when the shader is a plain PC shader (DXIL, no console part). At 22:48 the
+  PC device refuses the builder's first one (5,136 bytes) with E_FAIL; vkd3d-proton's shader converter
+  (dxil-spirv) logs "Unhandled instruction!". The builder throws that error.
+- Why (dxil-spirv source, and the builder's 52 shaders read by an own reader of their DXIL bitcode): dxil-spirv
+  reads every LLVM instruction kind these shaders use except one, `insertvalue` (record 27). Five of the 52 shaders
+  use it (13, 8, 16, 16 and 64 times); the refused one has 13. The newest dxil-spirv on GitHub (b540c8a, the same
+  commit vkd3d-proton uses) does not read it either.
+- Not changed: nothing of the builder; the shaders are given to the PC device as they are.
