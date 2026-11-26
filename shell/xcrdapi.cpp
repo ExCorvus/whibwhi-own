@@ -55,6 +55,10 @@ std::wstring game_folder() {
     return L"C:\\XboxGames\\GTA6.Xbox.v1.0.2.1";
 }
 
+bool path_exists(const wchar_t* p) {
+    return p && GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+}
+
 // Maps a console-style path onto the read-only game folder. The raw path is logged; the candidates are tried
 // in order and the first that exists wins.
 std::wstring map_path(const wchar_t* raw, bool& existed) {
@@ -63,7 +67,7 @@ std::wstring map_path(const wchar_t* raw, bool& existed) {
         return std::wstring();
     }
     std::wstring s = raw;
-    if (PathFileExistsW(s.c_str())) {
+    if (path_exists(s.c_str())) {
         existed = true;
         return s;
     }
@@ -79,12 +83,12 @@ std::wstring map_path(const wchar_t* raw, bool& existed) {
         }
     }
     std::wstring candidate = folder + L"\\" + stripped;
-    if (PathFileExistsW(candidate.c_str())) {
+    if (path_exists(candidate.c_str())) {
         existed = true;
         return candidate;
     }
     candidate = folder + L"\\" + s;
-    if (PathFileExistsW(candidate.c_str())) {
+    if (path_exists(candidate.c_str())) {
         existed = true;
         return candidate;
     }
@@ -94,8 +98,8 @@ std::wstring map_path(const wchar_t* raw, bool& existed) {
 // ---- COM objects ----------------------------------------------------------------------------------------
 
 struct Com {
+    void** vt;  // must be first: the COM vtable pointer is the object's first field
     std::atomic<long> refs{1};
-    void** vt;
 };
 
 template <typename T>
@@ -105,7 +109,7 @@ long qi_impl(T* self, const GUID* riid, void** pp, const GUID* own1, const GUID*
     }
     if (same_iid(riid, &kIUnknownIid) || (own1 && same_iid(riid, own1)) || (own2 && same_iid(riid, own2))) {
         *pp = self;
-        self->refs.fetch_add(1);
+        self->com.refs.fetch_add(1);
         return 0;
     }
     *pp = nullptr;
@@ -114,7 +118,7 @@ long qi_impl(T* self, const GUID* riid, void** pp, const GUID* own1, const GUID*
 
 template <typename T>
 unsigned long addref_impl(T* self) {
-    return static_cast<unsigned long>(self->refs.fetch_add(1) + 1);
+    return static_cast<unsigned long>(self->com.refs.fetch_add(1) + 1);
 }
 
 // ---- factory --------------------------------------------------------------------------------------------
