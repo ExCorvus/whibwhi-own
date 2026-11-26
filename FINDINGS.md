@@ -328,6 +328,16 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
   the game's own memory into the GPU zero-copy once the boot gets past start-up. NOT vendored into the repo; the
   build recipe and license notice are in docs/BUILD-AND-RUN.md and NOTICE.md.
 
+## 2026-11-26 - all 587 imports connect (measured)
+
+- Added the last console libraries as honest skeletons: xg_xs.dll (XGCreateTextureComputer, XGSuggestSwizzleMode -
+  the PC driver computes textures itself) and XboxBvhBuilder.dll (the seven mangled exports, aliased via
+  /export, each logging once and answering failure; the BVH builder is real work for later). xmem.dll gained
+  XMemVirtualQuery (answers from the region registry with the console protect/type bits, else VirtualQuery),
+  which the shipped XboxBvhBuilder.dll needs to even load. test_gfx_stubs covers all of it; 13/13 tests pass.
+- Boot with these: 68 libraries, **587 of 587 functions connected**. The boot boundary is unchanged (start-up
+  stops at the console-patched pool stub, see above).
+
 ## 2026-11-26 - booting the image in the shell; what the runs showed (measured)
 
 - shell/tools/boot_image.cpp (run by Temp\opencode\run_boot.ps1) loads the image, connects imports, optionally
