@@ -10,33 +10,43 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
-- **Running:** the game's entry point is started. The furthest run (boot b74) goes through the game's memory
+- **Running:** the game's entry point is started. The furthest run (boot b79) goes through the game's memory
   start-up, loads the game runtime library, opens all of the game's package files (read-only, through the
   package drive the shell answers), creates a real graphics device (Direct3D 12 on Vulkan, through vkd3d-proton,
   on the RX 9070 XT) and completes the game's graphics start-up. It then reads its whole shader package through
   the storage library (4,199 compressed pieces, each decoded by the shell's own zlib decoder into the game's
-  memory), creates its first textures and render targets, hands command lists to its threads, starts calling
-  command-list methods and submits its first lists to the queue.
-- **Where it stops:** the game asks a fence for the address of its completed value (fence method slot 12, a
-  console-only method). The shell answers "not provided", and the game uses that answer as an address (a read
-  at 0x80004001 at image+0x4fb0b03).
+  memory), creates its textures and render targets, hands command lists to its threads and records commands on
+  them (descriptor heaps, root signatures, descriptor tables, render targets, clears), submits the lists,
+  signals and waits on fences, and presents: the game's display surface (3840 x 2160) is copied into a swap
+  chain on the window the game itself created, one picture per interval of the game's 30-per-second frame clock.
+- **What is on screen:** the game's own window (it titles it "Americas") shows a black picture. That is what the
+  game's commands leave in its display surface today: it clears the surface, and every draw is held, because
+  no pipeline state exists (the game's shaders are not translated yet). The shell draws nothing of its own.
+- **Where it stops:** about 13 seconds into a run the game starts its audio. It asks the audio library for the
+  audio device (AcpHalCreate); the shell answers "not provided", because a PC has no console audio processor;
+  the game's audio start-up has no path for that failure and stops at its own breakpoint (image+0x43ad94e).
+  Going further needs either a real audio path behind that object, or a decision by ExCorvus to accept a silent
+  device as a stated exception to rule 4. It is not decided and nothing was built for it.
 - **Textures:** a texture's bytes in the game's memory are in the shell's own untiled layout (xg_xs.h); the
   device tells the game that size when asked. A texture the game places at an address of its own memory is a
   real texture in the PC device's memory - its pixels are not at that address. Nothing copies a texture's bytes
   from the game's memory into a PC texture yet, so no texture with starting data can be sampled.
 - **Network:** every imported function that could open a socket, resolve a name or make an HTTP request is
   connected to a refusal (docs/console-libs/network.md). No run so far has called one.
-- **Not built:** anything that draws. Pipeline states: the game asks for them through device slots 57, 62, 67
-  and 86 and all are refused (the shader translator handles only straight-line compute test shaders). Almost
-  all command-list methods: the ones the game has called so far and that are not answered are slots 32, 52, 71,
-  72, 74, 131, 132 and 146. Queue submission (slot 35) and the queue's fence signal (slot 16). Views made from
-  raw descriptor words (device slot 70) and samplers (slot 61). Presentation (nothing is shown). The queue's
-  page-mapping call (slot 31) is recorded but nothing reads the record. The game runtime library answers every
-  interface query with "no such interface". The audio device and the ray-tracing builder are skeletons that
-  answer failure. PC command allocators are never reset.
+- **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
+  slots 57, 62, 67 and 86 and all are refused (the shader translator handles only straight-line compute test
+  shaders), so every draw is held. Command-list methods that name buffers by address (slots 41 to 48: root
+  buffers, index and vertex buffers), because a game address is not turned into a PC buffer address yet. The
+  command-list methods at slots 70, 71, 72, 74, 75, 126, 131, 132, 142 and 146 (what they are is not known).
+  The primitive topology number 0x11 (not a PC topology). Views made from raw descriptor words (device slot 70)
+  and samplers (slot 61). Reading or writing a texture the game keeps at its own address (its Map is refused).
+  Device slot 81 (a per-frame query; the game tolerates the refusal). The queue's page-mapping call (slot 31)
+  is recorded but nothing reads the record. The game runtime library answers every interface query with "no
+  such interface". The audio device and the ray-tracing builder are skeletons that answer failure. PC command
+  allocators are never reset, so memory grows while a run lasts.
 - **Answers that are less than the full work** are listed in the entry "answers that say yes" below, and in the
   newest entries; each one is a place to look first when the game behaves wrongly later.
-- **Nothing has been drawn on screen.**
+- **Nothing of the game's picture has been drawn.** The window shows the game's cleared surface.
 
 ## 2026-11-25 - the project restarts as its own shell
 
@@ -700,3 +710,66 @@ Each run left the game folder unchanged.
 - **Pipeline states.** After reading the shaders the game asks for pipeline states through device slots 67,
   62 and 57 (and 86 at start-up), each with the public pipeline-state identifier. All refused; the game
   carries on without them.
+
+## 2026-11-26 - frames are recorded, submitted and presented to the game's window; the stop is audio (boots b75-b79)
+
+Measured in the game's code and in runs. The game folder listing was identical before and after every run.
+
+**Fences.** The game asks a fence for the *address* of its completed value (fence method slot 12) once, keeps the
+address, and then reads the number at it again and again without calling anything, sleeping between looks,
+until the number reaches the value it wants; all ones means the device is lost (fn 0x4fb0ad0). So the console
+exposes a fence's completed value as a live number. The shell keeps a 64-bit number in each fence object,
+answers its address, and brings it up to date from the PC fence whenever the game signals the fence through the
+queue (a wait on the PC fence's event) and at every call. Fence slot 8 is the public GetCompletedValue
+(called with the fence alone, result compared with all ones; +0x4dad098).
+
+**The queue.** No queue method is passed on by the public order. Measured and written out: slot 16 = Signal
+(fence, value); slot 18 = GetTimestampFrequency; slot 35 = the console's submission (count, array of lists, the
+frame token, a last number). The last number is 0 where the game submits its frame lists (+0x2482689) and 3
+where its present function submits the lists its threads recorded, up to 256 at a time (+0x24821dd); what the
+number tells the console is not known, both are carried out as the PC queue's ExecuteCommandLists and the
+number is only logged. The game never closes a list after recording (the PC queue only takes closed lists and
+treats a recording one as a fatal error of the whole device), so a list that is still recording is closed on
+the PC at submission.
+
+**Command lists.** The inference that console list slots 32 to 52 are the public methods four lower held for
+every call a run made and the shell could check: 32 SetDescriptorHeaps (two heaps of ours), 34
+SetGraphicsRootSignature, 36 SetGraphicsRootDescriptorTable (handles inside a shader-visible heap), 50
+OMSetRenderTargets (views the game made through the device), 52 ClearRenderTargetView. Each of these is
+answered by the same call on the PC list after its arguments are checked; a call whose arguments do not have
+the expected shape is logged and not passed on. Draws are passed on only when a pipeline state is set, which
+never happens yet. The game also sets primitive topology number 0x11 (list slot 20), which the PC library does
+not have; it is not passed on and draws are held while it is set.
+
+**Presentation.** The game's present call is queue slot 32 (+0x24824c1): (plane count, plane records, present
+parameters). A plane record is 0x48 bytes: the frame token, a count of 1, a pointer to the surface pointer, a
+pointer to a rectangle {0, 0, width, height}, a pointer to 16 more bytes, a colour-space number. The surface is
+one of the two 3840 x 2160 display surfaces the game created. The shell copies it into the next buffer of a
+swap chain on the game's own window and presents that buffer; the swap chain is the PC library's own and scales
+to the window. The game's window has the class name sgaWindowClass and the title "Americas"; the game creates
+it hidden, and the shell shows it, because the window is where the picture goes. The game runs its own
+message loop in its end-of-frame function (fn 0x24846d0). A picture of the window taken during boot b79 shows
+a black client area: the game's cleared surface.
+
+**Pacing.** Where it presents, the game does not pace itself: at a frame's start it only asks the frame clock
+for the current frame without waiting (+0x2482448), and before a present it waits for event type 2 of the frame
+two back (+0x2482405), which has long passed on the shell's clock. Left alone it presented about 500 times a
+second (boot b76). A display shows one picture per interval, so the shell's present takes the next interval of
+the frame clock that has not shown a picture yet and waits for it (at most two intervals). With that, boots
+b77 to b79 present about once per interval. This is the shell's choice; what the console does is not known.
+
+**Other calls seen.** Device slot 81 is called with (a frame token, 0x11100, a place holding the number 6, a
+place for records) and its failure is tolerated (+0x2482710); it is not answered. Fence slot 8 as above.
+
+**Where the runs end.** About 13 seconds in, on another thread, the game starts its audio: ApuCreateHeap
+(0x1c700000 bytes, answered with real memory below 4 GiB), AcpHalAllocateShapeContexts (350), ApuAlloc, then
+AcpHalCreate, which the shell refuses. The game stops at its own breakpoint at image+0x43ad94e. The game
+drives the audio device object through four method offsets and waits on a status number only the console's
+driver writes (docs/console-libs/acp-xapu.md), so there is no small honest answer: it is either a real audio
+path or a silent device accepted as a stated exception. That decision is ExCorvus's.
+
+**Answers that are less than the full work (added by this entry).** One picture per frame-clock interval is the
+shell's own pacing. The submission's last number and the frame token are not used. The present's rectangle,
+colour space and parameters are not used, and only the first plane is shown. The surface is copied without
+tracking the state the game left it in. The window is shown by the shell. Lists are closed by the shell at
+submission. PC command allocators are never reset.
