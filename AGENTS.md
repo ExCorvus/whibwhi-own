@@ -60,6 +60,8 @@ What works today, and where a run currently stops, is in the **Current state** b
   the last message next to each file). Commits are pushed to GitHub as the work goes. The project is on GitHub
   only.
 - **Running the game:** only the coordinating agent starts the game's entry point, and only one run at a time.
+- **The game test before every code commit:** a change under `shell/` or `scripts/` is committed only after
+  `scripts\game_test.ps1` has passed on that exact build (docs/BUILD-AND-RUN.md, "The game test").
 - **Subagents:** allowed when ExCorvus has agreed to it. A subagent never starts the game, never uses the GPU and
   never pushes.
 - **ExCorvus decides** the scope of the project and anything that changes how it is described in public.
