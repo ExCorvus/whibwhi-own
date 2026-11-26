@@ -35,7 +35,7 @@ namespace {
 // main module, the way the console assigns it to the game. The loader then points entry 0 at the loaded image's
 // block (see thread_block.cpp), and the PC libraries keep their own entries. Non-zero initialised so the
 // linker keeps the storage directory; touched once here so it is not stripped.
-__declspec(thread) unsigned char whiwhi_tls_seat[16] = {1};
+// The per-thread storage block comes from tls_seat.cpp (linked in): the exe owns TLS index 0.
 
 std::mutex g_log;
 LoadedImage* g_loaded = nullptr;
@@ -219,14 +219,6 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // a crash must not lose the report
-    whiwhi_tls_seat[0] = 0;                       // keep the storage directory alive
-    {
-        // Entry 0 of the per-thread storage array is redirected by default (the console gives the game index 0
-        // and parts of it read entry 0 directly); WHIWHI_TLS_REDIRECT=0 turns that off.
-        char v[8] = {};
-        const bool off = GetEnvironmentVariableA("WHIWHI_TLS_REDIRECT", v, sizeof(v)) > 0 && v[0] == '0';
-        whiwhi_thread_block_set_redirect(off ? 0 : 1);
-    }
     std::fprintf(stderr, "[boot] tool starting\n");
     std::ifstream file(image_path, std::ios::binary);
     if (!file) {
