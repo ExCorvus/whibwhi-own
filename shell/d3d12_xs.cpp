@@ -8034,6 +8034,312 @@ bool pc_buffer_resource(unsigned long long address, unsigned long long bytes, ID
     return resource != nullptr;
 }
 
+// ---- textures that are only memory ---------------------------------------------------------------------------
+//
+// On the console a texture with starting data is memory plus a description; the image creates no resource object
+// for it (measured, see shell_allocation_info). Its bytes reach that memory through the texture library's copy
+// method, and in this shell that library is ours (xg_xs.h): it lays the bytes out untiled and remembers which
+// memory it wrote by which description. So when a view names such memory, the PC texture the PC device needs is
+// made here from that description and filled from the image's memory, mip by mip, in the library's layout. A copy
+// into the memory after that (the library's number for it grows) is carried into the PC texture the next time a
+// view of it is made. Memory the library did not write is not taken: its layout is not known.
+struct MemoryTexture {
+    ID3D12Resource* texture = nullptr;
+    WhiwhiXgDescription description{};
+    unsigned long long generation = 0;
+};
+SRWLOCK g_memory_textures_lock = SRWLOCK_INIT;
+std::map<unsigned long long, MemoryTexture> g_memory_textures;  // by the image's address
+std::atomic<unsigned long long> g_memory_textures_made{0}, g_memory_textures_refreshed{0};
+
+struct TextureUpload {
+    std::mutex lock;
+    bool tried = false;
+    bool ready = false;
+    ID3D12CommandQueue* queue = nullptr;
+    ID3D12CommandAllocator* allocator = nullptr;
+    ID3D12GraphicsCommandList* list = nullptr;
+    ID3D12Fence* fence = nullptr;
+    HANDLE reached = nullptr;
+    unsigned long long value = 0;
+} g_texture_upload;
+
+bool texture_upload_ready(ID3D12Device* device) {
+    TextureUpload& u = g_texture_upload;
+    if (u.tried) {
+        return u.ready;
+    }
+    u.tried = true;
+    D3D12_COMMAND_QUEUE_DESC queue_desc{};
+    queue_desc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+    u.ready =
+        device->CreateCommandQueue(&queue_desc, __uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&u.queue)) ==
+            0 &&
+        device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, __uuidof(ID3D12CommandAllocator),
+                                       reinterpret_cast<void**>(&u.allocator)) == 0 &&
+        device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, u.allocator, nullptr,
+                                  __uuidof(ID3D12GraphicsCommandList), reinterpret_cast<void**>(&u.list)) == 0 &&
+        u.list->Close() == 0 &&
+        device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), reinterpret_cast<void**>(&u.fence)) ==
+            0 &&
+        (u.reached = CreateEventA(nullptr, FALSE, FALSE, nullptr)) != nullptr;
+    if (!u.ready) {
+        logf("textures that are only memory: the PC objects for filling them could not be made\n");
+    }
+    return u.ready;
+}
+
+// Fills every subresource of `texture` from the image's memory at `address`, laid out as the texture library lays
+// out `d`. Waits until the PC device has done it. Returns an empty string, or why it was not done.
+std::string fill_memory_texture(ID3D12Device* device, ID3D12Resource* texture, const WhiwhiXgDescription& d,
+                                unsigned long long address) {
+    const auto layout = reinterpret_cast<int (*)(const WhiwhiXgDescription*, void*)>(xg_function("whiwhi_xg_layout"));
+    if (!layout) {
+        return "the texture library's layout function was not found";
+    }
+    std::vector<unsigned char> block(WHIWHI_XG_LAYOUT_BYTES);
+    if (!layout(&d, block.data())) {
+        return "the texture library does not lay out this description";
+    }
+    unsigned long long slice_stride = 0;
+    std::memcpy(&slice_stride, block.data() + 0x10, 8);
+    const D3D12_RESOURCE_DESC pc = texture->GetDesc();
+    const unsigned mips = pc.MipLevels;
+    const unsigned slices = pc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1u : pc.DepthOrArraySize;
+    const unsigned count = mips * slices;
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> places(count);
+    std::vector<UINT> rows(count);
+    std::vector<UINT64> row_bytes(count);
+    UINT64 total = 0;
+    device->GetCopyableFootprints(&pc, 0, count, 0, places.data(), rows.data(), row_bytes.data(), &total);
+    if (total == 0 || total == ~0ull) {
+        return "the PC device gives no copy layout for the texture";
+    }
+    const unsigned long long whole = slice_stride * slices;
+    if (!can_read(reinterpret_cast<const void*>(address), static_cast<std::size_t>(whole))) {
+        return "the texture's memory cannot be read";
+    }
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = total;
+    buffer.Height = 1;
+    buffer.DepthOrArraySize = 1;
+    buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ID3D12Resource* upload = nullptr;
+    if (device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                        nullptr, __uuidof(ID3D12Resource),
+                                        reinterpret_cast<void**>(&upload)) != 0) {
+        return "the upload buffer could not be made";
+    }
+    unsigned char* mapped = nullptr;
+    if (upload->Map(0, nullptr, reinterpret_cast<void**>(&mapped)) != 0 || !mapped) {
+        upload->Release();
+        return "the upload buffer could not be mapped";
+    }
+    const auto* memory = reinterpret_cast<const unsigned char*>(address);
+    for (unsigned s = 0; s < slices; ++s) {
+        for (unsigned m = 0; m < mips; ++m) {
+            const unsigned i = m + s * mips;
+            const unsigned char* record = block.data() + 0x38 + m * 0x70;
+            unsigned long long mip_bytes = 0, mip_offset = 0, plane_bytes = 0;
+            unsigned row = 0;
+            std::memcpy(&mip_bytes, record + 0x00, 8);
+            std::memcpy(&mip_offset, record + 0x08, 8);
+            std::memcpy(&plane_bytes, record + 0x10, 8);
+            std::memcpy(&row, record + 0x1c, 4);
+            const D3D12_SUBRESOURCE_FOOTPRINT& f = places[i].Footprint;
+            if (row == 0 || plane_bytes == 0 || row_bytes[i] != row || plane_bytes != rows[i] * row ||
+                mip_bytes != plane_bytes * f.Depth) {
+                upload->Unmap(0, nullptr);
+                upload->Release();
+                return "mip " + std::to_string(m) + ": the library's rows (" + std::to_string(row) + " bytes, " +
+                       std::to_string(plane_bytes) + " per slice) do not match the PC texture's (" +
+                       std::to_string(row_bytes[i]) + " bytes, " + std::to_string(rows[i]) + " rows)";
+            }
+            const unsigned char* from = memory + s * slice_stride + mip_offset;
+            unsigned char* to = mapped + places[i].Offset;
+            for (unsigned z = 0; z < f.Depth; ++z) {
+                for (unsigned r = 0; r < rows[i]; ++r) {
+                    std::memcpy(to + (static_cast<unsigned long long>(z) * rows[i] + r) * f.RowPitch,
+                                from + z * plane_bytes + static_cast<unsigned long long>(r) * row, row);
+                }
+            }
+        }
+    }
+    upload->Unmap(0, nullptr);
+    TextureUpload& u = g_texture_upload;
+    std::lock_guard<std::mutex> guard(u.lock);
+    std::string why;
+    if (!texture_upload_ready(device)) {
+        why = "the PC objects for filling textures could not be made";
+    } else if (u.allocator->Reset() != 0 || u.list->Reset(u.allocator, nullptr) != 0) {
+        why = "the copy list could not be reset";
+    } else {
+        for (unsigned i = 0; i < count; ++i) {
+            D3D12_TEXTURE_COPY_LOCATION to{};
+            to.pResource = texture;
+            to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            to.SubresourceIndex = i;
+            D3D12_TEXTURE_COPY_LOCATION from{};
+            from.pResource = upload;
+            from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            from.PlacedFootprint = places[i];
+            u.list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        }
+        if (u.list->Close() != 0) {
+            why = "the copy list could not be closed";
+        } else {
+            ID3D12CommandList* lists[1] = {u.list};
+            u.queue->ExecuteCommandLists(1, lists);
+            ++u.value;
+            if (u.queue->Signal(u.fence, u.value) != 0 || u.fence->SetEventOnCompletion(u.value, u.reached) != 0 ||
+                WaitForSingleObject(u.reached, 10000) != WAIT_OBJECT_0) {
+                why = "the PC device did not finish the copy within 10 seconds";
+            }
+        }
+    }
+    if (why.empty()) {
+        upload->Release();
+    }  // else the copy may still be using it: kept
+    return why;
+}
+
+// Whether block A (the image's description in the view call, docs/exe-map/DESCRIPTORS.md B.2) describes the
+// texture the library laid out, either whole or from mip `first` on (the image describes one mip level at a time
+// on one of its paths, with the sides shifted down and the mip count lowered).
+bool block_a_fits(const unsigned char* a, const WhiwhiXgDescription& d, unsigned first) {
+    unsigned type = 0, height = 0, format = 0;
+    unsigned long long width = 0;
+    unsigned short depth = 0, mips = 0;
+    std::memcpy(&type, a + 0x00, 4);
+    std::memcpy(&width, a + 0x10, 8);
+    std::memcpy(&height, a + 0x18, 4);
+    std::memcpy(&depth, a + 0x1c, 2);
+    std::memcpy(&mips, a + 0x1e, 2);
+    std::memcpy(&format, a + 0x20, 4);
+    // The three depth formats the image's builder replaces by their typeless partner (B.2, measured).
+    const unsigned same = d.format == 55 ? 53 : d.format == 40 ? 39 : d.format == 20 ? 19 : d.format;
+    if (type != d.type || depth != d.depth_or_array || (format != d.format && format != same)) {
+        return false;
+    }
+    for (unsigned shift : {0u, first}) {
+        if (shift >= d.mips) {
+            continue;
+        }
+        const unsigned long long w = d.width >> shift ? d.width >> shift : 1;
+        const unsigned h = d.height >> shift ? d.height >> shift : 1;
+        const bool block = (d.format >= 70 && d.format <= 84) || (d.format >= 94 && d.format <= 99);
+        const unsigned long long w4 = block ? (w + 3) & ~3ull : w;
+        const unsigned h4 = block ? (h + 3) & ~3u : h;
+        if ((width == w || width == w4) && (height == h || height == h4 || d.type == 2) &&
+            mips == d.mips - shift) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The PC texture for texture memory at `address`, made and filled when the texture library wrote that memory and
+// block A describes what it wrote; refreshed when the library has written it again since. Null with `why` set
+// otherwise. The view's most detailed mip is `first`.
+ID3D12Resource* memory_texture(Wrap* self, unsigned long long address, const unsigned char* block_a, unsigned first,
+                               std::string& why) {
+    const auto written_at = reinterpret_cast<int (*)(unsigned long long, WhiwhiXgDescription*, unsigned long long*)>(
+        xg_function("whiwhi_xg_written_at"));
+    WhiwhiXgDescription d{};
+    unsigned long long generation = 0;
+    if (!written_at || !written_at(address, &d, &generation)) {
+        why = "the address is neither a texture the image placed nor memory the texture library wrote";
+        return nullptr;
+    }
+    if (!block_a) {
+        why = "the view names memory the texture library wrote but gives no description to check it against";
+        return nullptr;
+    }
+    if (!block_a_fits(block_a, d, first)) {
+        why = "the view's description (block A) is not the one the texture library laid the memory out by";
+        return nullptr;
+    }
+    if (d.samples > 1) {
+        why = "a texture of more than one sample per pixel in memory";
+        return nullptr;
+    }
+    ID3D12Device* device = static_cast<ID3D12Device*>(self->pc);
+    AcquireSRWLockExclusive(&g_memory_textures_lock);
+    MemoryTexture& known = g_memory_textures[address];
+    if (known.texture && std::memcmp(&known.description, &d, sizeof(d)) != 0) {
+        known.texture->Release();  // the memory holds another texture now
+        known = MemoryTexture{};
+    }
+    const bool make = known.texture == nullptr;
+    const bool refresh = !make && known.generation != generation;
+    if (make) {
+        D3D12_RESOURCE_DESC pc{};
+        pc.Dimension = static_cast<D3D12_RESOURCE_DIMENSION>(d.type);
+        pc.Width = d.width;
+        pc.Height = d.type == 2 ? 1 : d.height;
+        pc.DepthOrArraySize = d.depth_or_array ? d.depth_or_array : 1;
+        pc.MipLevels = d.mips;
+        pc.Format = static_cast<DXGI_FORMAT>(d.format);
+        pc.SampleDesc.Count = 1;
+        pc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        const HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &pc,
+                                                           D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                           __uuidof(ID3D12Resource),
+                                                           reinterpret_cast<void**>(&known.texture));
+        if (hr != 0 || !known.texture) {
+            known = MemoryTexture{};
+            g_memory_textures.erase(address);
+            ReleaseSRWLockExclusive(&g_memory_textures_lock);
+            char text[96];
+            std::snprintf(text, sizeof(text), "the PC device did not make the texture (0x%08lx)",
+                          static_cast<unsigned long>(hr));
+            why = text;
+            return nullptr;
+        }
+        known.description = d;
+    }
+    ID3D12Resource* texture = known.texture;
+    if (make || refresh) {
+        why = fill_memory_texture(device, texture, d, address);
+        if (!why.empty()) {
+            if (make) {
+                texture->Release();
+                g_memory_textures.erase(address);
+            }
+            ReleaseSRWLockExclusive(&g_memory_textures_lock);
+            why = "filling the PC texture: " + why;
+            return nullptr;
+        }
+        known.generation = generation;
+        (make ? g_memory_textures_made : g_memory_textures_refreshed).fetch_add(1);
+    }
+    ReleaseSRWLockExclusive(&g_memory_textures_lock);
+    static std::atomic<int> shown{0};
+    if (make && few(shown, 8)) {
+        logf("textures that are only memory: a PC texture of %llu x %u x %u, %u mips, format %u made for the memory "
+             "at 0x%llx and filled from it in the texture library's layout\n",
+             d.width, d.height, static_cast<unsigned>(d.depth_or_array), static_cast<unsigned>(d.mips), d.format,
+             address);
+    }
+    return texture;
+}
+
+void log_memory_textures(const char* when) {
+    const unsigned long long made = g_memory_textures_made.load(), refreshed = g_memory_textures_refreshed.load();
+    if (made || refreshed) {
+        logf("textures that are only memory (%s): %llu PC texture(s) made and filled, %llu refilled after the "
+             "texture library wrote their memory again\n",
+             when, made, refreshed);
+    }
+}
+
 SRWLOCK g_slot70_lock = SRWLOCK_INIT;
 std::map<std::string, unsigned long long> g_slot70_refused;  // by reason
 std::atomic<unsigned long long> g_slot70_buffers{0}, g_slot70_textures{0};
@@ -8151,7 +8457,18 @@ HRESULT __stdcall w_device_slot70(Wrap* self, const void* block_a, const std::ui
     }
     ReleaseSRWLockShared(&g_placed_lock);
     if (!resource) {
-        return slot70_refuse("the address is not one of a texture the image placed", format, dimension, address);
+        std::string why;
+        resource = memory_texture(self, address, static_cast<const unsigned char*>(block_a),
+                                  static_cast<unsigned>(desc.Texture2D.MostDetailedMip), why);
+        if (!resource) {
+            return slot70_refuse(why, format, dimension, address);
+        }
+        if (desc.Format != resource->GetDesc().Format) {
+            return slot70_refuse("view format " + std::to_string(format) + " is not the format " +
+                                     std::to_string(static_cast<int>(resource->GetDesc().Format)) +
+                                     " the texture library laid the memory out by",
+                                 format, dimension, address);
+        }
     }
     const D3D12_RESOURCE_DESC have = resource->GetDesc();
     D3D12_RESOURCE_DIMENSION wanted = D3D12_RESOURCE_DIMENSION_UNKNOWN;
@@ -8412,6 +8729,7 @@ unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
     log_sampler_places();
     log_pipeline_prep("whole run");
     log_slot70("whole run");
+    log_memory_textures("whole run");
     return written;
 }
 
