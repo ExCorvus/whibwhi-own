@@ -23,6 +23,16 @@ add_library(d3d12_xs SHARED d3d12_xs.cpp)
 target_compile_definitions(d3d12_xs PRIVATE WHIWHI_D3D12_XS_BUILD)
 target_link_libraries(d3d12_xs PRIVATE onecore)
 
+# The console's audio libraries, provided as skeletons: every imported name exists, every one of them answers
+# "not provided" (a negative HRESULT, a 0 count, a null address) and says so once on stderr. No device is faked.
+add_library(AcpHal SHARED acp_hal.cpp)
+target_compile_definitions(AcpHal PRIVATE WHIWHI_ACP_HAL_BUILD)
+target_link_libraries(AcpHal PRIVATE onecore)
+
+add_library(xapu SHARED xapu.cpp)
+target_compile_definitions(xapu PRIVATE WHIWHI_XAPU_BUILD)
+target_link_libraries(xapu PRIVATE onecore)
+
 # Shell core: image mapper, import table reader, image loader, host-library resolver, console imports, flat
 # hosting model.
 add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp loader.cpp
@@ -38,11 +48,11 @@ target_link_libraries(describe_image PRIVATE whiwhi_shell)
 
 add_executable(connect_imports tools/connect_imports.cpp)
 target_link_libraries(connect_imports PRIVATE whiwhi_shell)
-add_dependencies(connect_imports xmem d3d12_xs)
+add_dependencies(connect_imports xmem d3d12_xs AcpHal xapu)
 
 add_executable(boot_image tools/boot_image.cpp)
 target_link_libraries(boot_image PRIVATE whiwhi_shell)
-add_dependencies(boot_image xmem d3d12_xs)
+add_dependencies(boot_image xmem d3d12_xs AcpHal xapu)
 
 enable_testing()
 
@@ -83,3 +93,8 @@ add_test(NAME d3d12_xs COMMAND test_d3d12_xs)
 add_executable(test_shader tests/test_shader.cpp)
 target_link_libraries(test_shader PRIVATE whiwhi_shell)
 add_test(NAME shader COMMAND test_shader)
+
+# The audio libraries: the built DLLs beside this test must carry every imported name and answer not-provided.
+add_executable(test_acpxapu tests/test_acpxapu.cpp)
+add_dependencies(test_acpxapu AcpHal xapu)
+add_test(NAME acpxapu COMMAND test_acpxapu)
