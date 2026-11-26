@@ -6,7 +6,7 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 
 ## Current state (2026-11-26)
 
-- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 26 tests pass.
+- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 27 tests pass.
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
@@ -51,13 +51,16 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   program and tables it reads, and it agrees with what the containers declare. The root signature the game
   names in a request gives only the order and kind of the parameters: one root signature is named for many
   shaders (16 layouts for 926 pairs), so what a table holds has to be taken from each shader's own module.
-  A translator from that hardware code is the way to a picture. None is built: the shell can read the
-  programs and say what each expects and uses, nothing more. Nearly every request comes from the game's worker
+  A translator from that hardware code is the way to a picture. Its first form exists (boot b118): a pass
+  that writes a PC shader for a pixel or vertex program. It writes 281 of 505 pixel and 129 of 227 vertex
+  programs of a run and refuses the rest with a reason; compute programs are not handled. What it writes has
+  been checked against a reference interpreter on made-up programs only and has not been given to the
+  graphics device (docs/SHADER-TRANSLATOR.md section 26). Nearly every request comes from the game's worker
   threads (tens of thousands in the first seconds); three come from the thread that created the device.
   Details: docs/SHADER-TRANSLATOR.md sections 13, 15 and 16, docs/exe-map/SHADER-PATH.md sections 10 to 12.
 - **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
-  slots 57, 62, 67 and 86; each request is read and counted, and none can be made (the shader translator
-  handles only straight-line compute test shaders), so every draw is held. The
+  slots 57, 62, 67 and 86; each request is read and counted, and none can be made (written shaders are not
+  given to the device yet, and no PC root signature is built for them), so every draw is held. The
   command-list methods at slots 70, 71, 72, 74, 75, 126, 131, 132, 142 and 146 (what they are is not known).
   The primitive topology number 0x11 (not a PC topology). Views made from raw descriptor words (device slot 70).
   Reading or writing a texture the game keeps at its own address (its Map is refused).
@@ -1195,7 +1198,8 @@ the coordinating agent before they were taken in. No picture is drawn by any of 
 - **Inputs and outputs (measured over the 505 pixel and 227 vertex programs of a run).** A container's public parts 'ISG1' and 'OSG1'
   list what the shader declares; `shell/shader_program.*` now reads them. For every program the run counted
   whether its instructions agree with those lists by a simple rule, and they do: a pixel program's
-  interpolation attribute n is the n-th declared input that is not a system value (500 of 500), its colour
+  interpolation attribute n is the n-th declared input that is not a system value (500 of 500; counted by
+  register - two inputs may share one - as the entry of boots b116-b118 says more exactly), its colour
   export targets are the declared render targets (505 of 505); a vertex program reads input element r from the
   four vector registers v(4 + 4r) on (227 of 227) and exports its k-th ordinary output to parameter target
   32 + k (224 of 227; the other 3 declare only the position and export one parameter all the same). The full
@@ -1246,3 +1250,40 @@ The game folder was unchanged after every run. 25 tests pass.
   (operand roles are from public source, the formula is a reading of the public names).
 
 The game folder was unchanged after the run. 26 tests pass.
+
+## 2026-11-26 - a pass that writes a PC shader for a console program; 281 of 505 pixel and 129 of 227 vertex programs written (boots b116-b118; measured)
+
+- **New: `shell/shader_pc.*`.** It joins the pieces of the last entries: one decoded pixel or vertex program, its
+  module's tables and its container's lists go in, a PC shader container comes out (written with
+  `shell/shader_dxbc.*`). One lane of the console's wave becomes one pixel or vertex; loads of descriptors are
+  not carried out but looked up in the module's tables; a sampler the program picks at run time becomes an
+  element of a sampler range without an upper end; inputs and outputs follow the rules measured in boots
+  b111-b115. The pass refuses a whole program rather than leave an instruction out, and says why.
+- **Not done, so that nobody reads more into this: no written shader has been given to the graphics device, no
+  PC root signature exists for one, and nothing of the game's picture is drawn.**
+- **Tested on made-up programs only** (test `shader_pc`): the written PC program, run by a small evaluator in
+  the test, against the console program run by the reference interpreter: 3,275 random straight-line programs
+  and 1,189 with branches and a loop leave the same registers behind; more than seventy further instructions are
+  checked one by one against their public definitions; a textured pixel program and a vertex program are
+  written from made-up tables and read back by the system's shader disassembler. This shows the two models
+  agree. It does not show what a graphics device or the console does.
+- **Measured (boot b118, the run's first 1,024 different containers):** written: 281 of 505 pixel programs and
+  129 of 227 vertex programs. Not written, by the first reason met: 96 vertex programs read a buffer with an
+  element index; 88 pixel programs load through an address the module's tables do not name; 68 read v2 or v3
+  before writing it; 32 use a multiply-add the pass does not cover; 14 read through an unknown descriptor; 11
+  read s9 or s11 before writing it; 12 for five smaller reasons; 2 vertex programs export a parameter their
+  output list does not have. The table, and the list of instructions not covered, are in
+  docs/SHADER-TRANSLATOR.md section 26.
+- **Three mistakes found by building it, corrected:** the reference interpreter did not write the scalar
+  condition after four scalar instructions whose public definition says they write it (found because random
+  programs disagreed); the documents said an interpolation's attribute number counts input elements where the
+  measurement had counted registers (found because 227 programs were refused); the pass read meaning into the
+  fields of the no-operations every program begins with.
+- **Also changed:** `shell/shader_dxbc.*` writes an instruction from a stored operand list, more opcodes, one
+  component of a constant buffer element, and a sampler taken from a range by a run-time number (read back by
+  the system disassembler); `shell/shader_flow.*` can be told that a call through a register comes back.
+- **Not established:** everything listed as "taken to be so" in docs/SHADER-TRANSLATOR.md section 26 - above
+  all that the vertex call returns with the inputs in place, how pixel inputs are interpolated, and what v2
+  and v3 hold.
+
+The game folder was unchanged after every run. 27 tests pass.
