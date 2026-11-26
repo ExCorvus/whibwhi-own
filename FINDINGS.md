@@ -1527,3 +1527,30 @@ hosted from that function: slots 75 (one flag from bit 6 of byte `+0x55` of the 
 
 Boot b150 stopped at the image's own watchdog before graphics (image+0x2215c35, the known slow-start case, as in
 b146); the next boot, b151, ran 40 s with no exception, slot 142 asked with all ones.
+
+## 2026-11-26 - textures that are only memory get PC textures (measured, boot b152)
+
+**What was refused.** Run b151 left 52 texture views of device slot 70 unwritten: their address was not a
+texture the image had placed through the device. Measured in the log: every one of those addresses is memory the
+shell's texture library (`xg_xs`) had copied texture rows into, through the object's copy method (+0x40), in the
+library's own untiled layout (for example `copied subresource 0 (4 bytes) ... into texture memory
+0x202067c7000`, then a view of 0x202067ca000.. in the same run). On the console such a texture is memory plus a
+description; the image creates no resource object for it (measured earlier, device slot 25).
+
+**What the shell does now.**
+- `xg_xs` remembers each start address it copied into, with the description and a number that grows with every
+  copy (`whiwhi_xg_written_at`).
+- Device slot 70, for a texture address the image did not place: when `xg_xs` wrote that memory and the view's
+  block A describes the same texture (type, sides, depth or array size, mip count, format - whole, or from the
+  view's first mip on, and allowing the three depth formats the image's builder makes typeless), the shell makes a
+  PC texture from that description, fills every mip of every slice from the image's memory through an upload
+  buffer and its own copy queue, waits for it, and writes the view. If the library copies into the memory again,
+  the PC texture is filled again the next time a view of it is made. A view whose format is not the texture's is
+  refused with that reason.
+- Memory the library did not write is still refused: its layout is not known.
+
+**Measured (b152, 40 s, no exception, game folder unchanged).** 52 PC textures made and filled, 0 refills; slot
+70 wrote 481 buffer views and **60 texture views** (b151: 8); the only refusal left is 4 structured buffer views
+that start inside an element. Not measured: whether the filled textures show the right picture (nothing is drawn
+yet). Not covered: textures the GPU writes, and texture bytes that reach memory without the library (e.g. read
+straight from a file in the console's tiled layout) - none was seen in this run.
