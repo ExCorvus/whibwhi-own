@@ -1241,3 +1241,20 @@ Follow-up, game tests 22:47 and 22:48 (both stop about 5 s in; the copy's folder
   use it (13, 8, 16, 16 and 64 times); the refused one has 13. The newest dxil-spirv on GitHub (b540c8a, the same
   commit vkd3d-proton uses) does not read it either.
 - Not changed: nothing of the builder; the shaders are given to the PC device as they are.
+## 2026-11-26 - the builder's shaders call the console's own shader functions (game test 23:13, measured)
+
+- vkd3d-proton built from the fork (E:\vkd3d-fork, branch descriptor-heap-over-host-memory) with one change in its
+  shader converter dxil-spirv: it now reads the LLVM instruction `insertvalue`. In the game test 23:13 (stops about
+  5 s in, the copy's folder unchanged) the builder's first shader passes that point. dxil-spirv then stops with
+  "Function 'xbox.global_store_dwordx4_with_cache' is declared but has no definition", and the builder throws
+  E_INVALIDARG from device slot 62.
+- Why (the builder's 52 shaders read from the copy with an own reader of their DXIL bitcode, names of the functions
+  each one declares but does not contain): beside Microsoft's public `dx.op` functions, the shaders call 33
+  functions whose names begin with `xbox.`. They are named after AMD GPU instructions and operations: bit-field
+  insert, three-way minimum/median/maximum, lane id, ballot, lane read and swizzle, conditional mask, byte align,
+  packed 16-bit minimum/maximum, bit count, loads and stores at a GPU address "with cache", scalar loads, atomic
+  add/sub/fmin/fmax at an address, a typed load. 17 of the 52 shaders use `xbox.global_load_dword_with_cache`.
+- So the builder's shaders are DXIL with console functions in them, not plain PC shaders. On the console these
+  functions are supplied by the console's shader compiler in its graphics library. What each function's arguments
+  mean is not established; only the names and the types are read.
+- This corrects the earlier note (22:39) that the builder's shaders are "plain PC DXIL".
