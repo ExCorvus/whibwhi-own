@@ -314,12 +314,18 @@ void carve(Region* from, std::uint64_t at, std::uint64_t bytes) {
     }
 }
 
+// The low byte of the image's protection is the processor's access. PAGE_NOCACHE and PAGE_WRITECOMBINE next to it
+// say how the processor writes the memory; Windows takes them as they are, for committed memory and for mapped
+// pages (measured on the user's PC, 2026-11-26). The graphics bits above them are refused by desktop Windows
+// ("not supported"), so they are kept in the region record only.
 bool access_of(unsigned long protect, DWORD& access) {
     switch (protect & 0xFF) {
     case PAGE_NOACCESS:
+        access = PAGE_NOACCESS;
+        return true;
     case PAGE_READONLY:
     case PAGE_READWRITE:
-        access = protect & 0xFF;
+        access = (protect & 0xFF) | (protect & (PAGE_NOCACHE | PAGE_WRITECOMBINE));
         return true;
     default:
         return false;
