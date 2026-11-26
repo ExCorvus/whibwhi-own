@@ -34,29 +34,41 @@
 // second table: its count is zero and its offset holds the padding value. The name record is the words
 // { 0, 0, 0xFFFFFFFF, 0, length << 16 } followed by the shader's name.
 //
-// What the entries mean was read on five modules (two vertex, one pixel, two compute shaders, boot b96) by
-// comparing them with what each program does (shader_shape.*) and with the resources its container declares:
+// What the entries mean was first read on a few modules and then counted over every pair of a root signature
+// and a container that the image's pipeline requests name together (926 pairs in boot b108; FINDINGS.md has
+// the numbers and docs/exe-map/SHADER-PATH.md section 12 the write-up):
 //
 //   first table - how the pipeline's root parameters reach the program: { kind, offset, count, register, last }
-//     kind 3  a resource descriptor in a table; `last` is the scalar register holding the table's address and
-//             `offset` counts 32-bit words from it (eight words to a 32-byte descriptor)
-//     kind 6  the same for a sampler descriptor
-//     kind 1  a buffer whose address arrives directly in scalar registers, the first one in `last`
-//     kind 0  constants that arrive in scalar registers, the first one in the low byte of `last`
-//     kind 4  a sampler fixed by the pipeline; its index is the second byte of `last`
-//     kind 5  seen in 10 pixel modules of boot b98, with a scalar register in `last`; those programs load
-//             descriptors through that register at offsets no kind 3 entry names. What it is has not been
-//             established, so `understood` is false for a module that has one.
+//     The root parameters take scalar registers in their order, starting at s8 (s4 in a compute program); the
+//     low byte of `last` is the parameter's first register, `count` the number of registers it takes, and the
+//     second byte of `last` the parameter's number in the root signature.
+//     kind 3  a resource descriptor in a descriptor table: the register holds the table's address and `offset`
+//             counts 32-bit words from it (eight words to a 32-byte descriptor); `register` is the shader
+//             register
+//     kind 6  a sampler descriptor: in a table like kind 3; or, at the register right after the last
+//             parameter's, the sampler heap itself, when the root signature says shaders index it directly
+//     kind 1  a buffer whose address arrives directly in two scalar registers
+//     kind 0  a run of constants, one scalar register for each
+//     kind 4  a static sampler; the second byte of `last` is its number among the static samplers of the root
+//             signature the shader was built against (which need not be the object the image names, see below)
+//     kind 5  the resource descriptor heap itself, at a register after the last parameter's, when the root
+//             signature says shaders index it directly (the program then works out the place itself)
 //   second table - one entry for each resource the shader itself declares:
 //     word 0: low byte the class (0 read-only resource, 1 sampler, 2 constant buffer, 3 writable resource),
 //             second byte how it arrives (the first table's kind: 0, 1, 3 or 4)
 //     word 1: offset in words inside the table;  word 2: the shader register number
-//     word 4: low byte the descriptor's size in words, second byte the scalar register, third byte the fixed
-//             sampler's index
+//     word 4: low byte the descriptor's size in words, second byte the scalar register, third byte the root
+//             parameter's number or the static sampler's number
 //
-// Not established: the count word of the first table (it reads as the number of scalar registers taken),
-// word 3 of the second table, bit 0x100 seen in `last` for constants, the record's other words, the tables
-// before the code, and what follows the name. A count over every module of a run is in FINDINGS.md.
+// One thing the count showed has to be kept in mind by anything that binds resources: the root signature object
+// the image names in a request gives the ORDER AND KIND of the parameters, but not what is inside a descriptor
+// table. The image names one root signature for many shaders of the same shape (16 layouts for 926 pairs), so
+// its table ranges and static samplers are mostly another shader's. What a table holds for a given shader is
+// said by that shader's own first table.
+//
+// Not established: word 3 of the second table, the record's other words, the tables before the code, what
+// follows the name, and which resource class a first-table entry has when no shader of the pipeline declares
+// that resource (the first table has no class; the second has one for declared resources only).
 //
 // Nothing is written to disk: the block is unpacked into a vector the caller owns.
 #ifndef WHIWHI_SHELL_SHADER_PROGRAM_HPP
@@ -136,7 +148,8 @@ struct ModuleLayoutEntry {
     std::uint32_t shader_register = 0;  // the register number the shader's source gave the resource
     std::uint32_t last = 0;             // the word the next two fields are taken from
     std::uint8_t scalar_register = 0;   // low byte of `last`
-    std::uint8_t fixed_index = 0;       // second byte of `last`
+    std::uint8_t fixed_index = 0;       // second byte of `last`: the root parameter's number, or for kind 4 the
+                                        // static sampler's number
 };
 
 // An entry of the module's second table: one resource the shader declares.
