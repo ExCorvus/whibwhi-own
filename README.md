@@ -9,7 +9,7 @@ soon as the shell stands, there will not be any blocks for playing all of it.
 
 ## Why a shell, and what it does
 
-The shell is meant for Xbox Series games in general. Its first test case (for example GTA VI, Xbox Series build
+The shell is meant for Xbox Series games in general. Its first test case (GTA, Xbox Series build
 1.0.2.1) is one 120 MB program file in the ordinary 64-bit Windows format, made
 for the same kind of processor a PC has. A PC can execute its code directly: nothing has to be emulated and
 nothing recompiled. What stops it from starting on a PC is everything the program expects to find *around*
