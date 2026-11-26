@@ -260,3 +260,63 @@ control, scalar memory loads, exports, image sampling, and buffer loads.
 3. Program control (branches) needs the control-flow rebuild of section 6.
 4. Image sampling and buffer loads need the memory model of sections 4 and 5.
 5. The 27 programs with the unknown words are refused until the words are understood.
+
+## 14. The instruction reader, rebuilt on the program walk
+
+`shell/shader_isa.*` no longer has its own idea of what an instruction is. It calls `shader_walk.*` for the
+format, the opcode number and the length of every instruction, and then reads that instruction's fields. One
+reader of the stream means the two can never disagree about where an instruction starts or ends, and the
+"the walk landed exactly on the end word" check of section 13 applies to every decode.
+
+**What it extracts.** For every format of section 13:
+
+- The destination, as a typed operand: a scalar register (codes 0..101 on this generation), a special scalar
+  register (102..127, kept as its number and named where a public table names it: flat scratch, XNACK, VCC,
+  TBA/TMA, M0, SGPR_NULL, EXEC), or a vector register. Formats whose result is implicit (scalar compare to SCC,
+  vector compare to VCC) report no destination, because none is encoded.
+- Up to three sources, each typed: scalar register, vector register, inline constant (with its 32-bit value when
+  this build names the code: integers 0..64, -1..-16 and the nine float constants), or "the constant word that
+  follows" with that word's value. Values 256..511 of a 9-bit field are vector registers; 255 is the constant
+  word; 128..254 are inline codes.
+- The 16-bit immediate of the constant formats (SOPK, SOPP), which is part of the instruction word and not a
+  constant word.
+- The fields of the second word, per format: the three 9-bit sources and the modifiers of VOP3 and VOP3P (clamp,
+  absolute/negate-hi, op_sel, output modifier/op_sel-hi, negate); the offsets, flags, address/data registers and
+  resource fields of DS, FLAT, MUBUF, MTBUF and SMEM; the export mask, target and four sources of EXP; the
+  address, data, resource, sampler, dimension, mask and cache fields of MIMG. MIMG's extra address words (the
+  count is in bits 2..1) are kept raw: this reader does not establish from its sources which bits of those words
+  hold a register number, so it decodes nothing from them.
+- One constant word after an instruction is identified by the walk's length, not by re-testing the 255 fields.
+  That covers the source-is-255 case, the six two-source vector opcodes that always take a constant, and the
+  scalar constant-format opcode that does the same.
+
+**What is still raw.** The trap temporaries (112..123) are kept as numbers; an inline code outside the ranges
+above keeps its code and is marked as having no known value; MIMG's extra address words are raw; the packed
+format's op_sel bits are reported as one group (they mean different things per opcode); the format and number
+of an MIMG/MTBUF resource field are the encoded fields (`srsrc >> 2`, the combined 7-bit buffer format), not
+expanded into register indices or format enumerations. A program whose walk meets a word of no format, or that
+does not end on its last word, is refused with the position and the reason.
+
+**Opcode numbers corrected.** The previous reader named `s_mov_b32` as scalar-one-source opcode 0 and
+`v_add_f32` as two-source vector opcode 1. In the public tables for this generation `s_mov_b32` is opcode 3 and
+`v_add_f32` is opcode 3; the old numbers named other instructions. The reader and the translator now use the
+public numbers, and the translator's list of accepted instructions is the same set as before (`s_mov_b32`,
+`s_movk_i32`, `s_add_u32`, `s_sub_u32`, `v_mov_b32`, `v_add_f32`, `v_nop`, `s_nop`, `s_endpgm`), now with the
+right numbers.
+
+**Public sources.** The field positions come from the GFX10 encoding classes in LLVM's AMDGPU backend
+(`VOP1Instructions.td`, `VOP2Instructions.td`, `VOPCInstructions.td`, `VOPInstructions.td`, `SOPInstructions.td`,
+`DSInstructions.td`, `FLATInstructions.td`, `BUFInstructions.td`, `SMInstructions.td`, `MIMGInstructions.td`,
+`SIInstrFormats.td`), and the operand numbering and inline-constant values from `AMDGPUDisassembler.cpp` and
+`AMDGPUBaseInfo.cpp` in the same project. Only the published bit positions and tables were used; no LLVM code
+was copied.
+
+**Where the walk and the public tables disagreed, and the correction.** When this reader was written the walk
+read three opcode fields too narrowly: the packed three-source format has eight opcode bits at 23..16 (the walk
+read seven, 22..16), the untyped buffer format has eight at 25..18 (the walk read seven), and the typed buffer
+format has its opcode at 18..16 plus one bit in the second word (the walk read 18..15). That changed only the
+opcode number those formats were reported under, never a length. The three fields were checked against the
+public definitions (LLVM's `VOP3Pe_gfx10`, `MUBUF_Real_gfx10`, `MTBUF_Real_gfx10`) and the walk now reads them
+as defined there; its test has a word for each. The counts of section 13 are not changed by this: the packed
+format appears there with opcodes 33 and 34 and the untyped buffer format with 13 and 14, all below 128, and no
+typed buffer instruction appears in that list at all.
