@@ -1,11 +1,17 @@
 // Loads a PE64 image without starting it and reports where it was placed, whether it got thread-local storage
-// and, per imported library, how many imports connect to a library on this PC and which the shell would have
-// to provide itself.
+// and, per imported library, how many imports connect: to the shell's own libraries (the ones beside this tool),
+// to a library on this PC, or to nothing yet.
 // Usage: connect_imports <image file> [folder with the image's own libraries] [--names]
+#include "console.hpp"
 #include "host_libraries.hpp"
 #include "image.hpp"
 #include "loader.hpp"
 #include "thread_block.h"
+#include "xmem.h"
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
 
 #include <cctype>
 #include <cstdio>
@@ -22,6 +28,27 @@ static std::string lower(std::string s) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     return s;
+}
+
+static std::string folder_of(const std::string& path) {
+    const std::size_t slash = path.find_last_of("\\/");
+    return slash == std::string::npos ? std::string() : lower(path.substr(0, slash));
+}
+
+// Whether the address lies in a library in this tool's own folder; `name` gets the library's file name.
+static bool in_own_library(void* address, std::string& name) {
+    HMODULE module = nullptr;
+    char library[MAX_PATH * 2];
+    char tool[MAX_PATH * 2];
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<LPCSTR>(address), &module) ||
+        !GetModuleFileNameA(module, library, sizeof(library)) || !GetModuleFileNameA(nullptr, tool, sizeof(tool)) ||
+        folder_of(library) != folder_of(tool)) {
+        return false;
+    }
+    const std::string path = library;
+    name = path.substr(path.find_last_of("\\/") + 1);
+    return true;
 }
 
 int main(int argc, char** argv) {
@@ -60,8 +87,14 @@ int main(int argc, char** argv) {
     }
     LoadedImage loaded;
     std::string reason;
+    std::map<std::string, std::size_t> own; // the shell's own library -> imports it answers
     const ImportResolver resolve = [&](const std::string& library, const ImportedFunction& fn) {
-        return host.resolve(library, fn);
+        void* address = resolve_console_import(host, library, fn);
+        std::string name;
+        if (address && in_own_library(address, name)) {
+            ++own[name];
+        }
+        return address;
     };
     if (!load_image(image, resolve, loaded, reason)) {
         std::printf("could not load the image: %s\n", reason.c_str());
@@ -111,11 +144,32 @@ int main(int argc, char** argv) {
             }
         }
     }
-    std::printf("%zu libraries, %zu functions: %zu connected, %zu not provided\n", loaded.imports.size(), total,
-                loaded.imports_connected, loaded.unprovided->size());
+    std::size_t answered = 0;
+    for (const auto& item : own) {
+        answered += item.second;
+        std::printf("  %-48s the shell's own library answers %zu functions\n", item.first.c_str(), item.second);
+    }
+    std::printf("%zu libraries, %zu functions: %zu connected (%zu of them to the shell's own libraries), "
+                "%zu not provided\n",
+                loaded.imports.size(), total, loaded.imports_connected, answered, loaded.unprovided->size());
     std::printf("not provided: %zu functions in %zu libraries that do not load here, %zu functions missing from "
                 "libraries that do\n",
                 functions_in_absent, libraries_absent, functions_missing);
+    // Libraries the image ships run their own start-up code when Windows loads them; show what that asked of
+    // the memory library.
+    if (const HMODULE memory = GetModuleHandleA("xmem.dll")) {
+        const auto statistics =
+            reinterpret_cast<void (*)(WhiwhiXmemStatistics*)>(GetProcAddress(memory, "whiwhi_xmem_statistics"));
+        if (statistics) {
+            WhiwhiXmemStatistics s{};
+            statistics(&s);
+            std::printf("memory library while loading: %llu calls answered, %llu refused, %llu bytes committed, "
+                        "%llu physical pages handed out\n",
+                        s.calls_virtual_alloc + s.calls_allocate_pages + s.calls_free_pages + s.calls_map +
+                            s.calls_map_scatter + s.calls_alloc + s.calls_free + s.calls_virtual_free,
+                        s.refused, s.bytes_committed, s.pages_allocated);
+        }
+    }
     unload_image(loaded);
     return 0;
 }
