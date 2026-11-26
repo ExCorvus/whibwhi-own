@@ -1,6 +1,6 @@
 # whibwhi
 
-Original work by [ExCorvus](https://github.com/ExCorvus). You need your own copy of the game; this
+We had it before we had it. Original work by [ExCorvus](https://github.com/ExCorvus). You need your own copy of the game; this
 repository contains no game data, keys or executable, and nothing here decrypts or bypasses any protection.
 
 ## Why a shell, and what it does
