@@ -358,15 +358,15 @@ WhiwhiXgDescription written_fields(const WhiwhiXgDescription& d) {
     WhiwhiXgDescription w;
     std::memset(&w, 0, sizeof(w));
     w.type = d.type;
-    w.zero_08 = d.zero_08;
+    w.alignment = d.alignment;
     w.width = d.width;
     w.height = d.height;
     w.depth_or_array = d.depth_or_array;
     w.mips = d.mips;
     w.format = d.format;
-    w.element_bytes = d.element_bytes;
-    w.zero_28 = d.zero_28;
-    w.swizzle_mode = d.swizzle_mode;
+    w.samples = d.samples;
+    w.sample_quality = d.sample_quality;
+    w.layout = d.layout;
     w.flags = d.flags;
     return w;
 }
@@ -395,10 +395,10 @@ void log_description(const char* function, const WhiwhiXgDescription* descriptio
     if (!is_new) {
         return;
     }
-    note("%s (returns to %p): type %u, %llu x %u x %u, %u mips, format code %u, element %u bytes, swizzle mode 0x%x, "
+    note("%s (returns to %p): type %u, %llu x %u x %u, %u mips, format code %u, %u samples, layout number 0x%x, "
          "flags 0x%x - %s",
          function, returns_to, d.type, d.width, d.height, static_cast<unsigned>(d.depth_or_array),
-         static_cast<unsigned>(d.mips), d.format, d.element_bytes, d.swizzle_mode, d.flags, outcome);
+         static_cast<unsigned>(d.mips), d.format, d.samples, d.layout, d.flags, outcome);
 }
 
 } // namespace
@@ -462,6 +462,15 @@ int whiwhi_xg_layout(const WhiwhiXgDescription* description, void* block) {
     }
     fill_block(plan, block);
     return 1;
+}
+
+unsigned long long whiwhi_xg_total_bytes(const WhiwhiXgDescription* description) {
+    Plan plan;
+    if (!description || !make_plan(*description, plan)) {
+        return 0;
+    }
+    const unsigned long long samples = description->samples ? description->samples : 1;
+    return plan.slice_stride * plan.slices * samples;
 }
 
 } // extern "C"
