@@ -2622,6 +2622,33 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
     return hr;
 }
 
+// A measurement: which kind of memory a heap's address lies in - what Windows reports for the page (private,
+// mapped) and which of the memory library's regions hold it. Whether Windows can report writes to that memory
+// depends on it.
+void log_heap_memory_kind(unsigned long long address, unsigned long long bytes) {
+    MEMORY_BASIC_INFORMATION info{};
+    const bool known = VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info)) != 0;
+    std::string held;
+    using Regions = unsigned long long (*)(WhiwhiXmemRegion*, unsigned long long);
+    if (const auto regions = reinterpret_cast<Regions>(xmem_function("whiwhi_xmem_regions"))) {
+        std::vector<WhiwhiXmemRegion> list(static_cast<std::size_t>(regions(nullptr, 0)) + 256);
+        const unsigned long long count = regions(list.data(), list.size());
+        for (unsigned long long i = 0; i < count && i < list.size(); ++i) {
+            const auto base = reinterpret_cast<unsigned long long>(list[i].base);
+            if (address >= base && address + bytes <= base + list[i].bytes) {
+                char item[160];
+                std::snprintf(item, sizeof(item), " [kind %lu, 0x%llx bytes from 0x%llx, type 0x%lx, attributes 0x%llx]",
+                              list[i].kind, list[i].bytes, base, list[i].type, list[i].attributes);
+                held += item;
+            }
+        }
+    }
+    logf("device slot 14: the heap's address 0x%llx is Windows memory type 0x%lx (private 0x20000, mapped 0x40000), "
+         "state 0x%lx, protect 0x%lx; held by the memory library in%s\n",
+         address, known ? info.Type : 0ul, known ? info.State : 0ul, known ? info.Protect : 0ul,
+         held.empty() ? " no region" : held.c_str());
+}
+
 // Device slot 14, CreateDescriptorHeap(description, identifier, out). The description is the public 16-byte one
 // (type, count, flags, node mask; measured at the image's call). See "descriptor heaps" above for the address
 // the image sees. Heap type 4 exists only on the console and is refused.
@@ -2679,6 +2706,7 @@ HRESULT __stdcall w_device_slot14(Wrap* self, const D3D12_DESCRIPTOR_HEAP_DESC* 
              "0x%llx (from the memory library), the PC heap is at 0x%llx\n",
              static_cast<unsigned>(desc->Type), desc->NumDescriptors, step, static_cast<unsigned>(desc->Flags),
              range.title, range.pc_cpu);
+        log_heap_memory_kind(range.title, range.bytes);
     }
     *out = wrapped;
     return 0;
