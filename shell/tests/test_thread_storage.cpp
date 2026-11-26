@@ -13,6 +13,11 @@
 
 using namespace whiwhi::shell;
 
+// A thread-local variable in this test executable makes Windows assign storage index 0 to the main module,
+// the way the console assigns it to the game (see boot_image.cpp). Non-zero initialised so the linker keeps
+// the storage directory; touched once in main so it is not stripped.
+__declspec(thread) unsigned char whiwhi_tls_seat[16] = {1};
+
 static int failures = 0;
 #define CHECK(cond)                                                          \
     do {                                                                     \
@@ -287,10 +292,23 @@ static void exercise(const Image& image, bool expect_moved) {
     CHECK(!loaded.thread_storage);
 }
 
+static LONG WINAPI test_veh(EXCEPTION_POINTERS* info) {
+    std::fprintf(stderr, "[test] exception 0x%08lx at 0x%llx rip 0x%llx\n", info->ExceptionRecord->ExceptionCode,
+                 (unsigned long long)(uintptr_t)info->ExceptionRecord->ExceptionAddress,
+                 (unsigned long long)info->ContextRecord->Rip);
+    std::fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 int main() {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);  // a crash must not lose the report
+    AddVectoredExceptionHandler(1, &test_veh);
+    whiwhi_tls_seat[0] = 0;                     // keep the storage directory alive
+    std::fprintf(stderr, "[test] start, whiwhi index %lu\n", whiwhi_thread_block_index());
     // Windows gave the library a storage index and a block for this thread, aligned as declared.
     CHECK(whiwhi_thread_block_index() != WHIWHI_THREAD_BLOCK_NO_INDEX);
     CHECK(whiwhi_thread_block() != nullptr);
+    std::fprintf(stderr, "[test] block %p\n", whiwhi_thread_block());
     CHECK(reinterpret_cast<std::uintptr_t>(whiwhi_thread_block()) % WHIWHI_THREAD_BLOCK_ALIGNMENT == 0);
 
     const auto pe = make_pe(kZeroFill, 0);
