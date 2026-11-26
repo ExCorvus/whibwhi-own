@@ -34,6 +34,9 @@
 #include "d3d12_xs.h"
 #include "shader_container.hpp"  // names and sizes of the chunks of a shader container
 #include "shader_isa.hpp"        // the console instruction reader, used to say what a shader's code part holds
+#include "shader_names.hpp"      // public names of the instructions identified so far
+#include "shader_program.hpp"    // the packed program inside a shader container, unpacked in memory
+#include "shader_shape.hpp"      // what a decoded program expects to be set, and where its descriptors come from
 #include "shader_walk.hpp"       // instruction lengths, to walk a whole program and count its instructions
 #include "xg_xs.h"  // the texture description; the library's functions are looked up by name at run time
 
@@ -2092,6 +2095,8 @@ void show_stripped_program(const char* where, const std::uint8_t* part, std::uin
          end_count ? " at" : "", ends.c_str(), reading.c_str());
 }
 
+void census_packed_program(const std::uint8_t* container, std::uint32_t bytes);
+
 // Shows the chunk table of the container at `pointer` (names and sizes). Returns false when it is not one.
 bool show_container(const char* where, std::size_t offset_in_description, const void* pointer) {
     if (!can_read(pointer, 0x20)) {
@@ -2149,6 +2154,7 @@ bool show_container(const char* where, std::size_t offset_in_description, const 
                 break;
             }
         }
+        census_packed_program(bytes, declared);
     } else {
         names = std::string("(not readable: ") + container.reason + ")";
     }
@@ -2184,6 +2190,8 @@ int show_containers_in(const char* where, const void* description, std::size_t b
     }
     return found;
 }
+
+std::string export_set_text(std::uint64_t targets);
 
 // Looks, in memory, at one block a description points at (a pointer followed by its size): how long it is,
 // where the console instruction set's end-of-program word stands in it, and what the shell's instruction reader
@@ -2239,6 +2247,51 @@ void probe_block(const char* where, std::size_t offset_in_description, const std
     }
     logf("%s: block at +0x%zx of the description: %zu bytes; end-of-program word %d time(s)%s%s%s\n", where,
          offset_in_description, block_bytes, end_count, end_count ? " at" : "", ends.c_str(), reading.c_str());
+    // Diagnostics, off unless WHIWHI_SHOW_STAGE_DATA=1: for a program, the registers it expects to be set; for a
+    // block that is not a program (the data that travels with a stage), its words. The second prints bytes of the
+    // game into the log, so a log made this way stays on this machine.
+    static const bool show = [] {
+        char value[8] = {};
+        return GetEnvironmentVariableA("WHIWHI_SHOW_STAGE_DATA", value, sizeof(value)) > 0 && value[0] == '1';
+    }();
+    if (!show) {
+        return;
+    }
+    if (end_count) {
+        const whiwhi::shell::DecodedShader decoded =
+            whiwhi::shell::decode_shader(block, first_end + 4, whiwhi::shell::ShaderStage::kUnknown);
+        if (decoded.ok) {
+            const whiwhi::shell::ProgramShape shape = whiwhi::shell::shape_of(decoded);
+            std::string uses;
+            for (const whiwhi::shell::ResourceReference& ref : shape.resources) {
+                if (ref.use != whiwhi::shell::ResourceUse::kMemory && uses.size() < 600) {
+                    uses += std::string(" ") + whiwhi::shell::resource_use_name(ref.use) + " " +
+                            whiwhi::shell::origin_text(ref.origin);
+                }
+            }
+            logf("%s: program at +0x%zx: expects %s and %s; exports %s; uses:%s\n", where, offset_in_description,
+                 whiwhi::shell::register_set_text(shape.scalar_inputs).c_str(),
+                 whiwhi::shell::register_set_text(shape.vector_inputs).c_str(),
+                 export_set_text(shape.export_targets).c_str(), uses.empty() ? " nothing" : uses.c_str());
+        }
+        return;
+    }
+    std::string line;
+    for (std::size_t at = 0; at + 4 <= block_bytes && at < 0x300; at += 4) {
+        std::uint32_t word = 0;
+        std::memcpy(&word, block + at, 4);
+        char text[16];
+        std::snprintf(text, sizeof(text), " %08x", word);
+        line += text;
+        if ((at / 4) % 16 == 15 || at + 8 > block_bytes) {
+            logf("%s: stage data at +0x%zx, words from +0x%zx:%s\n", where, offset_in_description,
+                 at - (at % 64), line.c_str());
+            line.clear();
+        }
+    }
+    if (!line.empty()) {
+        logf("%s: stage data at +0x%zx, last words:%s\n", where, offset_in_description, line.c_str());
+    }
 }
 
 void probe_blocks_in(const char* where, const void* description, std::size_t bytes) {
@@ -2280,8 +2333,81 @@ struct ProgramCensus {
     unsigned long long tail_code_end = 0;                  // words after the end that are the "code end" filler
     unsigned long long tail_zero = 0;
     unsigned long long tail_other = 0;
+    // The shape of the landed programs (shader_shape.*), numbers and register names only.
+    unsigned long long decoded = 0, not_decoded = 0;       // the instruction reader's verdict on a landed program
+    unsigned long long with_branches = 0, with_loops = 0;
+    unsigned long long with_other_memory = 0;              // programs using DS or FLAT instructions
+    std::map<std::string, unsigned long long> not_decoded_why;
+    std::map<std::string, unsigned long long> scalar_inputs;   // set of scalar registers read before written
+    std::map<std::string, unsigned long long> vector_inputs;
+    std::map<std::string, unsigned long long> export_sets;     // kinds of export target a program writes
+    std::map<std::string, unsigned long long> origins;         // "<use>: <where its descriptor comes from>"
+    // A number worked out from the words of each landed program (first word to the end word), kept so that a
+    // program found elsewhere can be recognised as the same words. The words themselves are not kept.
+    std::set<unsigned long long> word_sums;
 };
 ProgramCensus g_programs;
+
+unsigned long long sum_of_words(const std::uint32_t* words, std::size_t count) {
+    unsigned long long sum = 1469598103934665603ull;
+    for (std::size_t i = 0; i < count; ++i) {
+        sum = (sum ^ words[i]) * 1099511628211ull;
+    }
+    return sum ^ (static_cast<unsigned long long>(count) << 40);
+}
+
+// The kinds of export target in a program: colour (0..7), depth (8), position (12..15), parameter (32..63).
+std::string export_set_text(std::uint64_t targets) {
+    std::string text;
+    const auto add = [&text](const char* what) {
+        if (!text.empty()) {
+            text += "+";
+        }
+        text += what;
+    };
+    if (targets & 0xFFull) add("colour");
+    if (targets & 0x100ull) add("depth");
+    if (targets & 0xF000ull) add("position");
+    if (targets & 0xFFFFFFFF00000000ull) add("parameter");
+    if (targets & ~(0xFFull | 0x100ull | 0xF000ull | 0xFFFFFFFF00000000ull)) add("other");
+    return text.empty() ? "none" : text;
+}
+
+// Where a descriptor comes from, without the offsets (so that programs can be counted together).
+std::string origin_class_text(const whiwhi::shell::RegisterOrigin& origin) {
+    char text[48];
+    switch (origin.level) {
+        case whiwhi::shell::RegisterOrigin::kInput:
+            std::snprintf(text, sizeof(text), "input s%u", origin.root);
+            return text;
+        case whiwhi::shell::RegisterOrigin::kLoaded:
+            std::snprintf(text, sizeof(text), "[s%u+..]", origin.root);
+            return text;
+        case whiwhi::shell::RegisterOrigin::kLoadedTwice:
+            std::snprintf(text, sizeof(text), "[[s%u+..]+..]", origin.root);
+            return text;
+        default:
+            return "other";
+    }
+}
+
+void log_counted(const char* what, const std::map<std::string, unsigned long long>& counted, std::size_t limit) {
+    std::vector<std::pair<unsigned long long, std::string>> ordered;
+    for (const auto& item : counted) {
+        ordered.emplace_back(item.second, item.first);
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::size_t shown = 0;
+    for (const auto& item : ordered) {
+        if (shown++ >= limit) {
+            break;
+        }
+        logf("programs, %s: %llu x  %s\n", what, item.first, item.second.c_str());
+    }
+    if (ordered.size() > limit) {
+        logf("programs, %s: ... and %zu more kinds\n", what, ordered.size() - limit);
+    }
+}
 
 void log_program_census(const char* when) {
     AcquireSRWLockShared(&g_programs.lock);
@@ -2316,10 +2442,12 @@ void log_program_census(const char* when) {
     std::string line;
     int shown = 0;
     for (const auto& item : ordered) {
-        char text[48];
-        std::snprintf(text, sizeof(text), "  %s %u: %llu",
-                      whiwhi::shell::walk_format_name(static_cast<whiwhi::shell::WalkFormat>(item.second >> 16)),
-                      item.second & 0xFFFF, item.first);
+        char text[96];
+        const whiwhi::shell::WalkFormat format = static_cast<whiwhi::shell::WalkFormat>(item.second >> 16);
+        const unsigned opcode = item.second & 0xFFFFu;
+        const char* name = whiwhi::shell::instruction_name(format, opcode);
+        std::snprintf(text, sizeof(text), "  %s %u%s%s: %llu", whiwhi::shell::walk_format_name(format), opcode,
+                      name ? " " : "", name ? name : "", item.first);
         line += text;
         if (++shown % 8 == 0) {
             logf("programs, instruction counts:%s\n", line.c_str());
@@ -2332,6 +2460,24 @@ void log_program_census(const char* when) {
     if (!line.empty()) {
         logf("programs, instruction counts:%s\n", line.c_str());
     }
+    // The shape of the programs the instruction reader decoded.
+    AcquireSRWLockShared(&g_programs.lock);
+    const unsigned long long decoded = c.decoded, not_decoded = c.not_decoded, branches = c.with_branches,
+                             loops = c.with_loops, other_memory = c.with_other_memory;
+    const auto why = c.not_decoded_why;
+    const auto scalar_inputs = c.scalar_inputs;
+    const auto vector_inputs = c.vector_inputs;
+    const auto export_sets = c.export_sets;
+    const auto origins = c.origins;
+    ReleaseSRWLockShared(&g_programs.lock);
+    logf("programs, shape (%s): the instruction reader decoded %llu of the landed programs and refused %llu; %llu "
+         "have a branch, %llu a backward branch (a loop), %llu use local-data or flat memory instructions\n",
+         when, decoded, not_decoded, branches, loops, other_memory);
+    log_counted("reader refused", why, 6);
+    log_counted("exports", export_sets, 8);
+    log_counted("scalar registers read before written", scalar_inputs, 16);
+    log_counted("vector registers read before written", vector_inputs, 10);
+    log_counted("descriptor origin", origins, 40);
 }
 
 void census_program(const std::uint8_t* block, std::size_t block_bytes) {
@@ -2368,11 +2514,43 @@ void census_program(const std::uint8_t* block, std::size_t block_bytes) {
             }
         }
     }
+    // The shape of a landed program, worked out before the lock is taken.
+    bool shaped = false;
+    whiwhi::shell::ProgramShape shape;
+    std::string refused_why;
+    if (landed) {
+        const whiwhi::shell::DecodedShader decoded =
+            whiwhi::shell::decode_shader(block, (first_end + 1) * 4, whiwhi::shell::ShaderStage::kUnknown);
+        if (decoded.ok) {
+            shape = whiwhi::shell::shape_of(decoded);
+            shaped = true;
+        } else {
+            refused_why = decoded.bad_reason.substr(0, 72);
+        }
+    }
+    const unsigned long long landed_sum = landed ? sum_of_words(words, first_end + 1) : 0;
     AcquireSRWLockExclusive(&g_programs.lock);
     const unsigned long long number = ++g_programs.programs;
     g_programs.bytes += block_bytes;
+    if (landed && shaped) {
+        ++g_programs.decoded;
+        if (shape.branches) ++g_programs.with_branches;
+        if (shape.backward_branches) ++g_programs.with_loops;
+        if (shape.other_memory) ++g_programs.with_other_memory;
+        ++g_programs.scalar_inputs[whiwhi::shell::register_set_text(shape.scalar_inputs)];
+        ++g_programs.vector_inputs[whiwhi::shell::register_set_text(shape.vector_inputs)];
+        ++g_programs.export_sets[export_set_text(shape.export_targets)];
+        for (const whiwhi::shell::ResourceReference& ref : shape.resources) {
+            ++g_programs.origins[std::string(whiwhi::shell::resource_use_name(ref.use)) + ": " +
+                                 origin_class_text(ref.origin)];
+        }
+    } else if (landed) {
+        ++g_programs.not_decoded;
+        ++g_programs.not_decoded_why[refused_why];
+    }
     if (landed) {
         ++g_programs.landed;
+        g_programs.word_sums.insert(landed_sum);
         g_programs.instructions += steps.size();
         if (steps.size() > g_programs.longest) {
             g_programs.longest = steps.size();
@@ -2438,6 +2616,421 @@ void census_programs_in(const void* description, std::size_t bytes) {
             can_read(reinterpret_cast<const void*>(pointer), static_cast<std::size_t>(size))) {
             census_program(reinterpret_cast<const std::uint8_t*>(pointer), static_cast<std::size_t>(size));
         }
+    }
+}
+
+// ---- the packed program inside a shader container: a count of what it holds ---------------------------------
+//
+// Measured in boots b90-b93: the 'DXIL' part of the game's containers has no PC bitcode, but it has a directory
+// ('XDAT') with an entry that is a zlib-packed block ('XBCH'). shader_program.* unpacks that block in memory.
+// Every unpacked block seen starts with the four bytes 'FSSM' and a header (a module); the module reader in
+// shader_program.* finds the code through that header. This section counts, for each distinct container,
+// numbers only: whether the block is a module, whether the module reader finds the program and that program
+// ends on the block's one end-of-program word with the code ending where the filler ends, which header place
+// named the code, and what the program expects and uses (shader_shape.*), per kind of shader. Nothing
+// unpacked is kept or written. (Two earlier readings of these blocks were wrong and are corrected by this
+// count: a walk started in the zero words before the code, or at the header itself, also "lands", because
+// those words happen to read as one-word instructions.)
+struct PackedCensus {
+    SRWLOCK lock = SRWLOCK_INIT;
+    std::set<std::uintptr_t> seen;  // containers looked at, by address
+    unsigned long long containers = 0, unpacked = 0, none = 0, refused = 0;
+    unsigned long long packed_bytes = 0, unpacked_bytes = 0;
+    unsigned long long modules = 0;        // unpacked blocks that start with 'FSSM'
+    unsigned long long module_place = 0;   // ... whose header names a place for the code that lies inside the block
+    unsigned long long module_lands = 0;   // ... from which a walk lands exactly on the first end-of-program word
+    unsigned long long module_fits = 0;    // ... and whose code ends exactly where the filler after the program ends
+    unsigned long long bare = 0;           // blocks that do not start with 'FSSM'
+    unsigned long long bare_lands = 0;     // ... in which a walk from the first word lands on the first end word
+    unsigned long long programs = 0;       // programs found either way
+    unsigned long long decoded = 0;        // ... that the instruction reader decoded
+    unsigned long long same_words = 0;     // ... whose words are those of a program from a precompiled description
+    std::map<std::string, unsigned long long> why;          // why a container gave no program
+    std::map<std::string, unsigned long long> directories;  // entry kinds, in order
+    std::map<std::string, unsigned long long> words;        // the word after each tag
+    std::map<std::string, unsigned long long> ends;         // end-of-program words in the unpacked block
+    std::map<std::string, unsigned long long> header;       // what the module header's first fields hold
+    std::map<std::string, unsigned long long> kinds;        // "<form>, <kind of shader>"
+    std::map<std::string, unsigned long long> not_found;    // why no program was found in a block
+    std::map<std::string, unsigned long long> inputs;       // "<kind>: scalar registers read before written"
+    std::map<std::string, unsigned long long> exports;      // "<kind>: kinds of export target"
+    std::map<std::string, unsigned long long> origins;      // "<kind>: <use>: <where its descriptor comes from>"
+};
+PackedCensus g_packed;
+
+bool private_diagnostics() {
+    static const bool on = [] {
+        char value[8] = {};
+        return GetEnvironmentVariableA("WHIWHI_SHOW_STAGE_DATA", value, sizeof(value)) > 0 && value[0] == '1';
+    }();
+    return on;
+}
+
+// The kind of shader a container's public program header names (the public numbering of that header).
+const char* packed_kind_name(unsigned kind) {
+    static const char* const kKinds[] = {"pixel", "vertex", "geometry", "hull", "domain", "compute", "library",
+                                         "ray generation", "intersection", "any hit", "closest hit", "miss",
+                                         "callable", "mesh", "amplification"};
+    return kind < 15 ? kKinds[kind] : "unknown kind";
+}
+
+void log_packed_counted(const char* what, const std::map<std::string, unsigned long long>& counted,
+                        std::size_t limit) {
+    std::vector<std::pair<unsigned long long, std::string>> ordered;
+    for (const auto& item : counted) {
+        ordered.emplace_back(item.second, item.first);
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::size_t shown = 0;
+    for (const auto& item : ordered) {
+        if (shown++ >= limit) {
+            break;
+        }
+        logf("packed programs, %s: %llu x  %s\n", what, item.first, item.second.c_str());
+    }
+    if (ordered.size() > limit) {
+        logf("packed programs, %s: ... and %zu more kinds\n", what, ordered.size() - limit);
+    }
+}
+
+void log_packed_census(const char* when) {
+    AcquireSRWLockShared(&g_packed.lock);
+    const PackedCensus& c = g_packed;
+    const unsigned long long containers = c.containers, unpacked = c.unpacked, none = c.none, refused = c.refused,
+                             packed_bytes = c.packed_bytes, unpacked_bytes = c.unpacked_bytes, modules = c.modules,
+                             place = c.module_place, lands = c.module_lands, fits = c.module_fits, bare = c.bare,
+                             bare_lands = c.bare_lands, programs = c.programs, decoded = c.decoded,
+                             same = c.same_words;
+    const auto why = c.why;
+    const auto directories = c.directories;
+    const auto words = c.words;
+    const auto ends = c.ends;
+    const auto header = c.header;
+    const auto kinds = c.kinds;
+    const auto not_found = c.not_found;
+    const auto inputs = c.inputs;
+    const auto exports = c.exports;
+    const auto origins = c.origins;
+    ReleaseSRWLockShared(&g_packed.lock);
+    if (!containers) {
+        return;
+    }
+    logf("packed programs in shader containers (%s): %llu distinct container(s): %llu unpacked (%llu bytes from "
+         "%llu packed), %llu without a packed program, %llu refused\n",
+         when, containers, unpacked, unpacked_bytes, packed_bytes, none, refused);
+    logf("packed programs (%s): %llu block(s) start with 'FSSM': the header names a place for the code inside the "
+         "block in %llu, a walk from that place lands exactly on the end-of-program word in %llu, and the code ends "
+         "where the filler ends in %llu. %llu block(s) start otherwise: a walk from the first word lands on the "
+         "end-of-program word in %llu. Programs found: %llu; the instruction reader decoded %llu; %llu have the "
+         "same words as a program from a precompiled description\n",
+         when, modules, place, lands, fits, bare, bare_lands, programs, decoded, same);
+    log_packed_counted("no program because", why, 8);
+    log_packed_counted("directory entry kinds", directories, 8);
+    log_packed_counted("words after the tags", words, 8);
+    log_packed_counted("end-of-program words in the block", ends, 8);
+    log_packed_counted("module header", header, 24);
+    log_packed_counted("form and kind", kinds, 16);
+    log_packed_counted("no program found because", not_found, 8);
+    log_packed_counted("scalar registers read before written", inputs, 40);
+    log_packed_counted("exports", exports, 16);
+    log_packed_counted("descriptor origin", origins, 48);
+}
+
+void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
+    AcquireSRWLockExclusive(&g_packed.lock);
+    const bool fresh = g_packed.seen.size() < 65536 &&
+                       g_packed.seen.insert(reinterpret_cast<std::uintptr_t>(container)).second;
+    ReleaseSRWLockExclusive(&g_packed.lock);
+    if (!fresh) {
+        return;
+    }
+    const whiwhi::shell::PackedProgram program = whiwhi::shell::read_packed_program(container, bytes);
+    std::string entry_kinds;
+    for (const whiwhi::shell::ProgramDirectoryEntry& entry : program.entries) {
+        char text[16];
+        std::snprintf(text, sizeof(text), "%s0x%02x", entry_kinds.empty() ? "" : " ", entry.kind);
+        entry_kinds += text;
+    }
+    if (!program.ok()) {
+        AcquireSRWLockExclusive(&g_packed.lock);
+        ++g_packed.containers;
+        if (program.status == whiwhi::shell::ProgramStatus::kNoProgram) {
+            ++g_packed.none;
+        } else {
+            ++g_packed.refused;
+        }
+        ++g_packed.why[program.reason.substr(0, 96)];
+        if (!entry_kinds.empty()) {
+            ++g_packed.directories[entry_kinds];
+        }
+        ReleaseSRWLockExclusive(&g_packed.lock);
+        return;
+    }
+    const std::vector<std::uint8_t>& block = program.bytes;
+    const std::size_t size = block.size();
+    const std::size_t count = size / 4;
+    // The block as 32-bit words from its first byte (a program is made of such words).
+    std::vector<std::uint32_t> words(count);
+    if (count) {
+        std::memcpy(words.data(), block.data(), count * 4);
+    }
+    std::size_t first_end = count;
+    unsigned long long end_count = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (words[i] == whiwhi::shell::kEndOfProgramWord) {
+            if (first_end == count) {
+                first_end = i;
+            }
+            ++end_count;
+        }
+    }
+    // Where the filler after the program ends (the word index after the last filler word).
+    std::size_t filler_end = first_end < count ? first_end + 1 : count;
+    while (filler_end < count && words[filler_end] == 0xBF9F0000u) {
+        ++filler_end;
+    }
+
+    const bool module = size >= 0x50 && std::memcmp(block.data(), "FSSM", 4) == 0;
+    bool place_ok = false, lands = false, fits = false;
+    std::size_t code_word = 0;        // first word of the code
+    std::size_t code_words = 0;       // words the header says the code has (a module), or up to the filler's end
+    std::uint32_t second = 0, third = 0, fifth = 0;
+    std::size_t header_place = 0;     // the header place (a module) that led to the code
+    std::string not_found;
+    if (module) {
+        second = words[1];
+        third = words[2];
+        fifth = words[4];
+        // The module reader (shader_program.*) finds the code through the header or refuses with a reason; it
+        // never guesses a place. Which header place names the code is counted per kind of shader.
+        const whiwhi::shell::ModuleProgram found = whiwhi::shell::find_module_program(block.data(), size);
+        if (found.found) {
+            place_ok = true;
+            header_place = found.header_place;
+            code_word = found.code_offset / 4;
+            code_words = found.code_bytes / 4;
+            // The reader's walk ends on an end-of-program word; here it is checked that this is the block's
+            // one end word found by scanning, and that the code ends where the filler ends.
+            lands = code_word + found.program_bytes / 4 == first_end + 1;
+            fits = lands && code_word + code_words == filler_end;
+            if (!lands) {
+                not_found = "the module reader's program does not end on the block's end-of-program word";
+            }
+        } else {
+            not_found = found.reason;
+        }
+    } else if (first_end < count) {
+        const whiwhi::shell::WalkResult walk = whiwhi::shell::walk_program(words.data(), count);
+        lands = walk.reached_end && walk.end_word_index == first_end;
+        code_words = filler_end;
+        if (!lands) {
+            not_found = walk.reached_end ? "a walk from the first word ends at another word"
+                        : walk.stopped_unknown ? "a walk from the first word meets a word of no known format"
+                                               : "a walk from the first word runs out of words";
+        }
+    } else {
+        not_found = "the block has no end-of-program word";
+    }
+
+    // What the program expects and uses.
+    const unsigned kind = program.program_version >> 16;
+    const char* const kind_name = packed_kind_name(kind);
+    bool decoded_ok = false, same = false;
+    whiwhi::shell::ProgramShape shape;
+    if (lands) {
+        const std::size_t program_words = first_end - code_word + 1;
+        const whiwhi::shell::DecodedShader decoded = whiwhi::shell::decode_shader(
+            block.data() + code_word * 4, program_words * 4, whiwhi::shell::ShaderStage::kUnknown);
+        decoded_ok = decoded.ok;
+        if (decoded.ok) {
+            shape = whiwhi::shell::shape_of(decoded);
+        }
+        const unsigned long long sum = sum_of_words(words.data() + code_word, program_words);
+        AcquireSRWLockShared(&g_programs.lock);
+        same = g_programs.word_sums.count(sum) != 0;
+        ReleaseSRWLockShared(&g_programs.lock);
+    }
+
+    char text[128];
+    const auto bounded = [](std::map<std::string, unsigned long long>& counted, const std::string& key) {
+        if (counted.size() < 512 || counted.count(key)) {
+            ++counted[key];
+        }
+    };
+    AcquireSRWLockExclusive(&g_packed.lock);
+    const unsigned long long number = ++g_packed.containers;
+    ++g_packed.unpacked;
+    g_packed.packed_bytes += program.packed_bytes;
+    g_packed.unpacked_bytes += program.unpacked_bytes;
+    bounded(g_packed.directories, entry_kinds);
+    std::snprintf(text, sizeof(text), "directory %u, block %u", program.directory_word, program.block_word);
+    bounded(g_packed.words, text);
+    std::snprintf(text, sizeof(text), "%llu%s", end_count, size % 4 ? " (size not a multiple of 4)" : "");
+    bounded(g_packed.ends, text);
+    std::snprintf(text, sizeof(text), "%s, %s", module ? "module ('FSSM')" : "program from the first word", kind_name);
+    bounded(g_packed.kinds, text);
+    if (module) {
+        ++g_packed.modules;
+        if (place_ok) ++g_packed.module_place;
+        if (lands) ++g_packed.module_lands;
+        if (fits) ++g_packed.module_fits;
+        std::snprintf(text, sizeof(text), "word at +0x04 = 0x%x", second);
+        bounded(g_packed.header, text);
+        std::snprintf(text, sizeof(text), "word at +0x08 = the block's size - %lld",
+                      static_cast<long long>(size) - static_cast<long long>(third));
+        bounded(g_packed.header, text);
+        std::snprintf(text, sizeof(text), "word at +0x10 = %u", fifth);
+        bounded(g_packed.header, text);
+        if (lands) {
+            std::snprintf(text, sizeof(text), "%s: the code is named through the header place +0x%zx", kind_name,
+                          header_place);
+            bounded(g_packed.header, text);
+        }
+    } else {
+        ++g_packed.bare;
+        if (lands) ++g_packed.bare_lands;
+    }
+    if (!not_found.empty()) {
+        bounded(g_packed.not_found, not_found);
+    }
+    if (lands) {
+        ++g_packed.programs;
+        if (decoded_ok) ++g_packed.decoded;
+        if (same) ++g_packed.same_words;
+        if (decoded_ok) {
+            bounded(g_packed.inputs,
+                    std::string(kind_name) + ": " + whiwhi::shell::register_set_text(shape.scalar_inputs));
+            bounded(g_packed.exports, std::string(kind_name) + ": " + export_set_text(shape.export_targets));
+            for (const whiwhi::shell::ResourceReference& ref : shape.resources) {
+                bounded(g_packed.origins, std::string(kind_name) + ": " + whiwhi::shell::resource_use_name(ref.use) +
+                                              ": " + origin_class_text(ref.origin));
+            }
+        }
+    }
+    const unsigned long long shown = g_packed.unpacked;
+    ReleaseSRWLockExclusive(&g_packed.lock);
+
+    if (shown <= 4 || (!lands && shown <= 64)) {
+        logf("packed program #%llu: %s shader, container of %u bytes; %u packed bytes unpack to %u; %s; "
+             "end-of-program word %llu time(s); %s\n",
+             shown, kind_name, bytes, program.packed_bytes, program.unpacked_bytes,
+             module ? "the block starts with 'FSSM'" : "the block does not start with 'FSSM'", end_count,
+             lands ? (fits ? "the program was found and its code ends where the filler ends"
+                           : "the program was found")
+                   : not_found.c_str());
+        if (lands) {
+            logf("packed program #%llu: the code starts at +0x%zx; the program ends at +0x%zx; the filler ends at "
+                 "+0x%zx; %zu bytes follow; the instruction reader %s it\n",
+                 shown, code_word * 4, first_end * 4 + 4, filler_end * 4, size - filler_end * 4,
+                 decoded_ok ? "decoded" : "refused");
+        }
+    }
+
+    // Off unless WHIWHI_SHOW_STAGE_DATA=1 (the log then holds game bytes and stays on this machine): for the
+    // first three blocks of each form and kind, what the program expects and uses next to the words around it,
+    // so that the tables that say which register carries what can be worked out.
+    if (private_diagnostics() && lands && decoded_ok) {
+        static SRWLOCK shown_lock = SRWLOCK_INIT;
+        static std::map<unsigned, int> shown_kinds;
+        AcquireSRWLockExclusive(&shown_lock);
+        const bool show = shown_kinds[(module ? 0x100u : 0u) | (kind & 0xff)]++ < 3;
+        ReleaseSRWLockExclusive(&shown_lock);
+        if (show) {
+            std::string line;
+            for (const whiwhi::shell::ResourceReference& ref : shape.resources) {
+                line += std::string(" ") + whiwhi::shell::resource_use_name(ref.use) + " " +
+                        whiwhi::shell::origin_text(ref.origin);
+                if (line.size() > 600) {
+                    line += " ...";
+                    break;
+                }
+            }
+            logf("packed program #%llu (private): %s shader, %s, block of %zu bytes, code +0x%zx..+0x%zx, %zu "
+                 "instruction(s); expects %s and %s; exports %s (%u); interpolates %u (highest attribute %u); "
+                 "uses:%s\n",
+                 shown, kind_name, module ? "module" : "bare program", size, code_word * 4, first_end * 4 + 4,
+                 shape.instructions, whiwhi::shell::register_set_text(shape.scalar_inputs).c_str(),
+                 whiwhi::shell::register_set_text(shape.vector_inputs).c_str(),
+                 export_set_text(shape.export_targets).c_str(), static_cast<unsigned>(shape.exports),
+                 static_cast<unsigned>(shape.interpolations), static_cast<unsigned>(shape.highest_attribute),
+                 line.empty() ? " nothing" : line.c_str());
+            line.clear();
+            const auto flush = [&](const char* what) {
+                if (!line.empty()) {
+                    logf("packed program #%llu (private): %s:%s\n", shown, what, line.c_str());
+                    line.clear();
+                }
+            };
+            // The other parts of the container (public interface parts and the two small directory entries).
+            const whiwhi::shell::ShaderContainer parts = whiwhi::shell::read_shader_container(container, bytes);
+            for (const whiwhi::shell::ShaderChunk& chunk : parts.chunks) {
+                if (std::memcmp(chunk.name, "DXIL", 4) == 0 || chunk.size > 1024) {
+                    continue;
+                }
+                char name[40];
+                std::snprintf(name, sizeof(name), "part %.4s (%u bytes)", chunk.name, chunk.size);
+                for (std::uint32_t i = 0; i + 4 <= chunk.size; i += 4) {
+                    std::uint32_t word = 0;
+                    std::memcpy(&word, container + chunk.offset + 8 + i, 4);
+                    std::snprintf(text, sizeof(text), " %08x", word);
+                    line += text;
+                    if (line.size() > 150) {
+                        flush(name);
+                    }
+                }
+                flush(name);
+            }
+            for (const whiwhi::shell::ProgramDirectoryEntry& entry : program.entries) {
+                if (entry.kind == whiwhi::shell::kProgramEntryKind || entry.size > 256) {
+                    continue;
+                }
+                char name[40];
+                std::snprintf(name, sizeof(name), "directory entry 0x%02x (%u bytes)", entry.kind, entry.size);
+                for (std::uint32_t i = 0; i + 4 <= entry.size; i += 4) {
+                    std::uint32_t word = 0;
+                    std::memcpy(&word, container + program.part_offset + entry.offset + i, 4);
+                    std::snprintf(text, sizeof(text), " %08x", word);
+                    line += text;
+                }
+                flush(name);
+            }
+            // Every word before the code that is neither zero nor the padding value, with its place.
+            for (std::size_t i = 0; i < code_word; ++i) {
+                if (words[i] == 0 || words[i] == 0xdeadbeefu) {
+                    continue;
+                }
+                std::snprintf(text, sizeof(text), " +0x%03zx=%08x", i * 4, words[i]);
+                line += text;
+                if (line.size() > 150) {
+                    flush("head");
+                }
+            }
+            flush("head");
+            // Everything after the filler, as words, then the last bytes when the block is not whole words.
+            for (std::size_t i = filler_end; i < count; ++i) {
+                if ((i - filler_end) % 8 == 0) {
+                    char name[32];
+                    std::snprintf(name, sizeof(name), "after the filler, +0x%zx", (i - 8) * 4);
+                    flush(name);
+                }
+                std::snprintf(text, sizeof(text), " %08x", words[i]);
+                line += text;
+            }
+            {
+                char name[32];
+                std::snprintf(name, sizeof(name), "after the filler, +0x%zx",
+                              count > filler_end ? (count - 1 - (count - 1 - filler_end) % 8) * 4 : filler_end * 4);
+                flush(name);
+            }
+            for (std::size_t i = count * 4; i < size; ++i) {
+                std::snprintf(text, sizeof(text), " %02x", block[i]);
+                line += text;
+            }
+            flush("last bytes");
+        }
+    }
+    if (number >= 64 && (number & (number - 1)) == 0) {
+        log_packed_census("so far");
     }
 }
 
@@ -5105,6 +5698,7 @@ unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
     }
     ReleaseSRWLockShared(&g_containers.lock);
     log_program_census("whole run");
+    log_packed_census("whole run");
     log_address_outcomes();
     return written;
 }
