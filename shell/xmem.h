@@ -71,6 +71,11 @@ WHIWHI_XMEM_API int XMemGetWorkingSetStatistics(unsigned long kind, void* statis
 WHIWHI_XMEM_API int XMemIsToolsMemAvailable(void);
 WHIWHI_XMEM_API int XMemTransferMemory(unsigned long kind, unsigned long long bytes);
 
+// The query some shipped console libraries import (XboxBvhBuilder.dll asks for it): like VirtualQuery, but it
+// also reports the regions this library created, with their console protect/type bits. Fills a
+// MEMORY_BASIC_INFORMATION-shaped block; returns the bytes written.
+WHIWHI_XMEM_API unsigned long long XMemVirtualQuery(const void* address, void* buffer, unsigned long long length);
+
 // ---- For the shell ----------------------------------------------------------------------------------------
 
 // Stands in for the image's VirtualFree import: an image frees what XMemVirtualAlloc gave it with VirtualFree.
@@ -110,6 +115,7 @@ typedef struct WhiwhiXmemStatistics {
     unsigned long long calls_working_set_statistics;
     unsigned long long calls_tools_mem_available;
     unsigned long long calls_transfer_memory;
+    unsigned long long calls_virtual_query;
 } WhiwhiXmemStatistics;
 
 WHIWHI_XMEM_API void whiwhi_xmem_statistics(WhiwhiXmemStatistics* out);
