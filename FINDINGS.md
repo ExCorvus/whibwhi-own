@@ -1491,3 +1491,21 @@ ExCorvus chose "real audio in steps". Built:
 - **Next unhosted** (b148): command-list slots 70, 75, 126 and 142; device slot 81; the interface
   {54ec77fa-1377-44e6-8c32-88fd5f44c84c} asked of the device; two game-runtime interfaces; XGSuggestSwizzleMode;
   Map of placed textures; views of textures that exist only as memory; pipelines (threading open).
+
+### 2026-11-26 - two command-list state calls hosted: depth bounds (slot 70) and shading rate (slot 126) (boot b149)
+
+Read from the executable (fn 0x32520, the function that sends the context's pending state to a command list):
+
+- **Slot 70** (`+0x230`, site 0x33390) takes two floats in `xmm1`/`xmm2`. The context keeps them at `+0x123f0` and
+  `+0x123f4`; when word `+0x44` of the current depth-stencil state entry is zero, the pair is the constant at
+  0x6159bc0, which is (0.0, 1.0) - the public default of the depth bounds. Taken as `OMSetDepthBounds(min, max)`
+  (inferred: arguments and default measured, the name is not in the file).
+- **Slot 126** (`+0x3f0`, site 0x32638) takes a byte and a pointer to two dwords, made from bytes 0, 1 and 2 of the
+  dword at context `+0x12380` (shifts and masks from the constants at 0x615a8b0 and 0x6159f10); the call is skipped
+  when the three bytes did not change. Taken as `RSSetShadingRate(rate, combiners[2])` (inferred from the shape
+  only). The shell passes on only numbers the public lists have.
+
+Measured in boot b149 (40 s, no exception, game folder unchanged): the PC device has depth bounds and shading rate
+tier 2; slot 126 asked once with (0, 0, 0) and set on the PC list; slot 70 asked with (0, 1) and set. Still not
+hosted from that function: slots 75 (one flag from bit 6 of byte `+0x55` of the pipeline-side object) and 142 (the
+64-bit value at context `+0x12360`, all ones when unset).
