@@ -977,3 +977,37 @@ unchanged): **479 of 505 pixel** and **224 of 227 vertex** programs written.
 Each of these is understood from the private listings; they are the next small pieces. Nothing the pass writes
 has been given to the graphics device; compute programs are not handled; a PC root signature per pipeline is
 still the next big piece.
+
+## 29. The last small refusals: 496 of 505 pixel and all 227 vertex programs written (boot b134; measured)
+
+Six small pieces, each understood from the private listings of boot b131, built and tested:
+
+- **`v_readfirstlane_b32` writes a scalar register.** The reader (`shader_isa`) typed every one-operand vector
+  instruction's destination as a vector register; this instruction takes lane 0 of a vector register into a
+  scalar register (Mesa builds it with `bld.def(s1)`, `aco_select_nir_intrinsics.cpp`). The reader now types its
+  destination - one-word opcode 2 and two-word 0x182 - as scalar, and the pass copies the source register's value
+  (every lane taken alike). A reader fault, corrected.
+- **A move into the null register writes nothing** and is skipped (taken to be so from its public name,
+  SGPR_NULL; no file read states what a write to it does).
+- **The interpolation move is a flat input.** Selector 2 (P0, the first vertex's value) reads the input component
+  with the input declared `constant`; Mesa writes a flat input this way (`aco_isel_helpers.cpp`). Taken to be so:
+  P0 is the vertex the PC's constant interpolation takes. Other selectors are refused.
+- **A vertex program that declares only the position** and still exports a parameter: the parameter is left out
+  (no declared output receives it and no pixel input list can name it). Why the compiler emits it is not
+  established. Other mismatches stay refused.
+- **The interpolation value is a token.** The register right after the last one the first table names holds the
+  value interpolation reads through M0; it is not a number. The pass marks it (and any register it is copied
+  into by a scalar move) as a token, readable only by a move toward M0; a stray read of it as a number is refused.
+- **A descriptor word is decided per path.** Whether a register holds a word of a descriptor now follows the last
+  write on the way the program is taking (the last-writer analysis), not the order instructions are written in. A
+  register one branch loads a descriptor over is still a number on the branch that did not load it.
+
+Measured, boot b134 (game folder unchanged): **496 of 505 pixel** and **all 227 vertex** programs written.
+
+**What is still refused (9 pixel programs).** 4 texel reads whose values go to an instruction the pass cannot
+type; 3 a resource taken from the descriptor heap by number (needs an unbounded resource range and the root
+signature design); 2 a sampler the pass cannot tell. Two programs hold `v_cos_f32` (its hardware input scale is
+not established). These tie into the next pieces rather than being quick fixes.
+
+Nothing the pass writes has been given to the graphics device; compute programs are not handled. A PC root
+signature per pipeline, built from what the written shaders declare (`PcShader::bindings`), is the next piece.
