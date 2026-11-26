@@ -414,6 +414,28 @@ int main() {
         }
     }
 
+    {
+        // A caller may say that a call through a register comes back: the call is then an instruction of its
+        // block like any other, and nothing else that is refused becomes accepted.
+        const std::vector<std::uint8_t> code = bytes_of({nop(), sop1(0x21, 4, 4), nop(), end()});
+        const DecodedShader decoded = decode_shader(code.data(), code.size(), ShaderStage::kVertex);
+        CHECK(decoded.ok);
+        CHECK(!flow_of(decoded).ok);
+        FlowOptions options;
+        options.call_through_register_returns = true;
+        const FlowGraph graph = flow_of(decoded, options);
+        CHECK(graph.ok);
+        if (graph.ok) {
+            CHECK(graph.blocks.size() == 1);
+            CHECK(graph.blocks[0].instruction_count == 4);
+            CHECK(graph.blocks[0].end == FlowEnd::kEndOfProgram);
+        }
+        const std::vector<std::uint8_t> jump = bytes_of({sop1(0x20, 0, 0), end()});
+        const DecodedShader jump_decoded = decode_shader(jump.data(), jump.size(), ShaderStage::kVertex);
+        CHECK(jump_decoded.ok);
+        CHECK(!flow_of(jump_decoded, options).ok);
+    }
+
     // ---- 10. an irreducible graph: a cycle with two entries is reported and not structured ----------------
     {
         // 0 cbr_scc0 +1 (-> 2 or 1), 1 branch 0 (-> 2), 2 branch -2 (-> 1), 3 end (unreachable)
