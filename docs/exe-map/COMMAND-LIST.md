@@ -183,7 +183,7 @@ meaning (fence? frame event handle?) is **U**.
 
 ---
 
-## 5. What this means for the shell
+## 5. What this means for the weave
 
 1. Slot 73 must not forward to `CreateCommandList` directly: the description block and the extra arguments have to
    be translated, and the console identifier (`c3827890-…`) has to be answered with an object that also carries
