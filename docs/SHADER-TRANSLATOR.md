@@ -207,3 +207,56 @@ What this changes for the plan:
   asks is what the game does on the console; rule 7 bans building pipelines on another thread because that
   crashed the driver in the earlier attempt. Which of the two the shell does is ExCorvus's decision; until then only
   the device's own thread is served.
+
+## 13. What the game's programs are made of (boots b86-b87; measured, numbers only)
+
+`shell/shader_walk.*` reads the length of every instruction from the public description of the instruction
+formats. The graphics library walks each distinct program block of the precompiled pipeline descriptions once,
+in memory, and counts (format, opcode) pairs. Nothing of a program is written anywhere; these are counts.
+
+**The first 1,024 distinct programs of a run** (840 KiB of blocks):
+
+- 997 walk from the block's first word exactly to the end-of-program word. So the length rules are right for
+  these, and a program starts at its block's first byte.
+- 27 do not: each meets a word whose top six bits are 111111, which is no format of the public description. In
+  every one of the 12 looked at, the instruction before it is the same (two-source vector format, opcode 3), the
+  stop is 53 to 71 words into the program, and a walk can only be picked up again 3 to 60 words later. What
+  those words are is not known (an instruction format of this console's GPU that is not public, or data in the
+  middle of the program). Such a program has to be refused by the translator until this is understood.
+- The 997 hold 106,163 instructions; the longest has 2,802. They use 222 different (format, opcode) pairs.
+
+**The most used, in order** (format, opcode number inside the format, occurrences). The numbers are as read from
+the instruction words; the names have to be taken from the public opcode tables of this GPU generation before
+anything is implemented, and are deliberately not written here from memory.
+
+| format opcode: count | | | |
+|---|---|---|---|
+| VOP2 8: 13,371 | SOPP 12: 6,038 | VOP2 43: 5,666 | SOP1 4: 5,525 |
+| VOP3 331: 5,376 | VINTRP 1: 4,707 | VINTRP 0: 4,707 | VOP2 3: 4,343 |
+| SOP1 3: 3,814 | VOP3 384: 2,990 | VOP2 4: 2,765 | VOP2 1: 2,190 |
+| SOPP 33: 2,087 | VOP1 1: 2,075 | VOP1 42: 2,066 | SMEM 2: 2,047 |
+| EXP 0: 1,838 | MIMG 32: 1,554 | VINTRP 2: 1,294 | VOP2 16: 1,144 |
+| VOP3 264: 1,122 | SOPP 32: 1,103 | SOPP 1: 997 | SOP2 30: 969 |
+| SOPP 4: 936 | SMEM 3: 931 | VOP2 44: 929 | VOP2 26: 752 |
+| VOP1 8: 752 | MUBUF 14: 728 | VOP3P 33: 722 | VOP3P 34: 720 |
+| SOP1 10: 718 | SMEM 9: 708 | VOP3 257: 695 | VOP1 6: 653 |
+| SMEM 10: 621 | VOP2 45: 619 | SMEM 8: 574 | SOP2 15: 541 |
+| SOPP 8: 526 | SMEM 4: 512 | SOPC 1: 489 | VOP2 47: 461 |
+| SOP2 39: 460 | SOP2 21: 450 | VOP2 37: 431 | VOP2 0: 429 |
+| SOP2 11: 411 | SOPC 0: 409 | VOP1 37: 387 | SOP2 14: 372 |
+| SMEM 11: 352 | SOPP 15: 317 | SMEM 12: 311 | VOP1 7: 307 |
+| MUBUF 13: 290 | SOPP 2: 289 | VOP3 260: 283 | VOP3 259: 279 |
+| MIMG 39: 257 | MIMG 0: 251 | VOP1 39: 236 | VOP3 6: 236 |
+
+The first 16 pairs are about two thirds of all instructions; the first 64 are about 94%. Two-source and
+three-source vector arithmetic dominate; then attribute interpolation (pixel shaders), scalar moves and program
+control, scalar memory loads, exports, image sampling, and buffer loads.
+
+**What this says about the order of work:**
+
+1. Redo the instruction reader (`shader_isa.*`) on top of the walk, with the fields of every format.
+2. Straight-line arithmetic first (the vector formats), then scalar moves and memory loads, then exports and
+   attribute interpolation - that is a whole simple vertex or pixel shader.
+3. Program control (branches) needs the control-flow rebuild of section 6.
+4. Image sampling and buffer loads need the memory model of sections 4 and 5.
+5. The 27 programs with the unknown words are refused until the words are understood.
