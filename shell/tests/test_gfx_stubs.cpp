@@ -83,14 +83,20 @@ int main() {
             CHECK(GetProcAddress(xgr, n) != nullptr);
         }
         const auto init = reinterpret_cast<long (*)(void*, void*)>(GetProcAddress(xgr, "InitializeApiImpl"));
-        const auto query = reinterpret_cast<long (*)(const void*, void**)>(GetProcAddress(xgr, "QueryApiImpl"));
+        const auto query = reinterpret_cast<long (*)(const GUID*, const GUID*, void**)>(
+            GetProcAddress(xgr, "QueryApiImpl"));
         if (init) {
             CHECK(init(nullptr, nullptr) == 0);
         }
         if (query) {
+            // Two identifiers the function must only read (they are read-only in the image), then the output.
+            static const GUID id = {0x11111111, 0x2222, 0x3333, {1, 2, 3, 4, 5, 6, 7, 8}};
+            const GUID before = id;
             void* out = reinterpret_cast<void*>(static_cast<size_t>(1));
-            CHECK(query(nullptr, &out) == 0x80004001L);
+            CHECK(query(&id, &id, &out) == 0x80004002L);
             CHECK(out == nullptr);
+            CHECK(std::memcmp(&id, &before, sizeof(GUID)) == 0);
+            CHECK(query(&id, &id, nullptr) == 0x80004002L);
         }
     }
 
