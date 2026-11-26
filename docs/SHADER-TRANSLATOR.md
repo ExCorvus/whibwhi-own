@@ -868,3 +868,75 @@ there the PC result can differ by one unit of a half.
 **Not built:** compute programs; the PC root signature that matches a written shader (section 20); giving a
 written shader to the device; everything in the two tables above. The older SPIR-V translator
 (`shader_translate.*`, `spirv.*`) is not on this path: the PC device takes only its own container kinds.
+
+## 27. Down the list of refusals: 415 of 505 pixel and 224 of 227 vertex programs written (boots b119-b130; measured)
+
+Section 26 ended with a count of why programs were not written. This section takes the largest reasons in turn.
+Each was first read on the game's programs (in private listings that stay on the machine that made them), then
+built, then tested on made-up programs, then counted again.
+
+| run | what was added | pixel written | vertex written |
+|---|---|---|---|
+| b118 | (section 26) | 281 | 129 |
+| b121 | constant buffers read at an element number | 281 | 224 |
+| b123 | what the pass knows about a register follows the last write to it | 367 | 224 |
+| b129 | five more kinds of instruction | 415 | 224 |
+| b130 | the pixel position | 415 | 224 |
+
+**A buffer read at an element number (96 vertex programs).** Measured: in every one of the 96 the read is the
+four-word buffer load with its element-number flag set, no offset register, through a four-word descriptor
+that the program loaded from its descriptor table; the element number is a float turned into an integer just
+before. Each of these programs declares exactly one resource, a constant buffer, and the descriptor is that
+constant buffer's. So the read is "row n of the constant buffer", n worked out at run time. The pass writes it
+as a constant-buffer read with a run-time element and declares the buffer as indexed that way. Inferred, not
+measured: that one element of the console's read is 16 bytes, the PC's row size (nothing in the program or its
+tables gives an element size; four words are read for each number).
+
+**What the pass knows about a register (88 pixel programs).** The pass keeps facts such as "this register holds
+the address of the descriptor table" or "these eight registers hold the descriptor of texture 3". It used to
+drop a fact unless the registers were written only once in the whole program. The game's pixel programs do
+otherwise: they load a texture's eight words into the registers s4 to s11, over the table's own address in s8
+and over the sampler heap's address in s11 (copied elsewhere first), and loop afterwards. A fact now belongs to
+the write that made it: for every place in the program the pass works out which single instruction last wrote
+each register (or that several could have, where paths join), and a fact holds exactly where its write is that
+last one. The rule follows writes, not values: two different instructions that copy the same address into a
+register on two paths still end the fact where the paths join. That loses a program now and then and never
+writes a wrong one.
+
+**More instructions** (numbers and operand lists from the public opcode table; each tested alone):
+
+| instruction | what is written | source for the meaning |
+|---|---|---|
+| multiply-accumulate, plain (`v_mac_f32`) | multiply, then add to the destination: the product is rounded before the sum | the name pair with the fused form in the public table; tested against the fused form on a case where the two differ |
+| multiply-accumulate, fused, two-word form (`v_fmac_f32`) | the fused multiply-add of section 26 | as the one-word form |
+| byte n of a word as a float (`v_cvt_f32_ubyte0` to `3`) | shift, mask to eight bits, convert; byte 0 is the lowest | LLVM's own simplification rules for these instructions |
+| compare into the execution mask (the one-word compares numbered 16 above the ordinary ones) | the ordinary compare, its result ANDed into the execution mask; the condition mask is left alone | the public table's rule for these numbers, and Mesa's assembler: on this generation they write only the execution mask |
+
+Not carried: a modifier on the value a multiply-accumulate adds to; the two-word form of a compare into the
+execution mask. The public compiler notes that the plain multiply-accumulate flushes very small numbers to zero
+on the hardware; the PC instructions do not.
+
+**The pixel position (68 programs).** Measured: of the 146 pixel programs whose input list has the position, 78
+are marked as reading none of it and read no vector register past v1 before writing it; the other 68 are marked
+as reading its x and y, and read exactly v2 and v3. The order (x in v2, y in v3) is the order in which the
+public driver lists what a pixel program of this hardware starts with: the interpolation weights first, then
+the position's components that are used. The pass fills v2 and v3 from the PC's position input when exactly
+those conditions hold, and refuses otherwise. Taken to be so: the value is the pixel centre's window
+coordinate on both sides.
+
+**What is still refused (boot b130; first reason met).**
+
+| programs | reason |
+|---|---|
+| 64 pixel | a texel read at integer coordinates (`image_load`): these are the programs that use the position. The pass does not know the number type of the texture |
+| 11 pixel | a register read before any write that nothing known provides (s9 in 10, s11 in 1) |
+| 6 pixel | a scalar move into a special register the pass does not carry |
+| 4 pixel | `v_readfirstlane_b32` |
+| 2 pixel | a resource taken from the descriptor heap by number |
+| 2 pixel | a word of a descriptor used as a number |
+| 1 pixel | the interpolation move |
+| 3 vertex | an export of a parameter the output list does not have (they declare only the position) |
+
+Everything of section 26 that was "taken to be so" still is, and still nothing the pass writes has been given
+to the graphics device. Compute programs are not handled. A PC root signature for a pipeline, built from what
+the written shaders declare, is the next piece.
