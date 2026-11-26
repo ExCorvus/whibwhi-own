@@ -287,11 +287,20 @@ struct PcMachine {
                     out.c[i] = o.immediate.count == 1 ? o.immediate.bits[0] : o.immediate.bits[i];
                 }
                 return out;
-            case dx::OperandFile::kConstantBuffer:
+            case dx::OperandFile::kConstantBuffer: {
+                std::uint32_t element = o.index2;
+                if (o.relative_index) {
+                    if (o.relative_temp >= temps.size()) {
+                        error = "an element number from a temporary register that was not declared";
+                        return out;
+                    }
+                    element += temps[o.relative_temp].c[o.relative_component & 3];
+                }
                 for (unsigned i = 0; i < 4; ++i) {
-                    v.c[i] = constant ? constant(o.index0, o.index2, i) : 0;
+                    v.c[i] = constant ? constant(o.index0, element, i) : 0;
                 }
                 break;
+            }
             default:
                 error = "a source operand the evaluator does not know";
                 return out;
@@ -903,7 +912,7 @@ void compare_program(const P& words, Tally& tally, const char* family, unsigned 
 struct Single {
     bool written = false;
     std::string reason;
-    std::uint32_t v3 = 0, s2 = 0, s3 = 0, exec_lo = 0, exec_hi = 0;
+    std::uint32_t v3 = 0, s2 = 0, s3 = 0, exec_lo = 0, exec_hi = 0, vcc_lo = 0;
     bool scc = false;
 };
 
@@ -949,6 +958,7 @@ Single single(const P& body, std::uint32_t a, std::uint32_t b, std::uint32_t c =
     out.s3 = pc_scalar(shader, machine, 3);
     out.exec_lo = pc_scalar(shader, machine, 126);
     out.exec_hi = pc_scalar(shader, machine, 127);
+    out.vcc_lo = pc_scalar(shader, machine, 106);
     out.scc = pc_condition(shader, machine);
     return out;
 }
@@ -1437,6 +1447,70 @@ int main() {
             result = single(p, 77, 0, 0, ~0ull);
             CHECK(result.written && result.v3 == 77);
         }
+        // The two instructions that add a product to their destination. v_mac_f32 rounds the product before
+        // adding, v_fmac_f32 does not: with a = b = 1 + 2^-12 the product 1 + 2^-11 + 2^-24 rounds to
+        // 1 + 2^-11, so adding -(1 + 2^-11) gives 0 the first way and 2^-24 the second.
+        {
+            const std::uint32_t a = 0x3F800800u, minus = 0xBF801000u, tiny = 0x33800000u;
+            const auto body = [](bool two_word, unsigned op, std::uint32_t before, unsigned neg3 = 0) {
+                P p;
+                vop1(p, 1, 3, kLit, before);
+                if (two_word) {
+                    vop3(p, op, 3, V(0), V(1), 0, 0, neg3);
+                } else {
+                    vop2(p, op, 3, V(0), 1);
+                }
+                return p;
+            };
+            expect_v3("v_mac_f32", body(false, 31, fbits(0.25f)), fbits(1.5f), fbits(2.0f), 0, fbits(3.25f));
+            expect_v3("v_mac_f32 rounds the product", body(false, 31, minus), a, a, 0, 0);
+            expect_v3("v_mac_f32, two words", body(true, 0x11F, minus), a, a, 0, 0);
+            expect_v3("v_fmac_f32 does not", body(false, 43, minus), a, a, 0, tiny);
+            expect_v3("v_fmac_f32, two words", body(true, 0x12B, minus), a, a, 0, tiny);
+            expect_v3("v_fmac_f32, two words, first source negated", body(true, 0x12B, fbits(0.25f), 1), fbits(1.5f),
+                      fbits(2.0f), 0, fbits(-2.75f));
+            // A modifier on the value that is added to is refused: the sources read do not say it applies.
+            const Single refused = single(body(true, 0x12B, fbits(0.25f), 4), fbits(1.5f), fbits(2.0f));
+            CHECK(!refused.written && refused.reason.find("added to") != std::string::npos);
+        }
+        // One byte of a word as a float.
+        expect_v3("v_cvt_f32_ubyte0", one_vop1(17), 0x11C83344u, 0, 0, fbits(68.0f));
+        expect_v3("v_cvt_f32_ubyte1", one_vop1(18), 0x11C83344u, 0, 0, fbits(51.0f));
+        expect_v3("v_cvt_f32_ubyte2", one_vop1(19), 0x11C83344u, 0, 0, fbits(200.0f));
+        expect_v3("v_cvt_f32_ubyte3", one_vop1(20), 0x11C83344u, 0, 0, fbits(17.0f));
+        expect_v3("v_cvt_f32_ubyte1, two words", one_vop3(0x192), 0x11C83344u, 0, 0, fbits(51.0f));
+        // A compare into the execution mask: where it fails the lane stops (a later vector write does not
+        // happen) and the condition mask is left as it was (here: set by an ordinary compare first).
+        {
+            const auto body = [](unsigned op) {
+                P p;
+                vopc(p, 194, V(0), 0);     // v_cmp_eq_u32 v0, v0: the condition mask becomes all ones
+                vopc(p, op, V(0), 1);      // the compare into the execution mask, v0 against v1
+                vop1(p, 1, 3, kLit, 0x77777777u);
+                return p;
+            };
+            Single result = single(body(210), 5, 5);  // v_cmpx_eq_u32, equal
+            CHECK(result.written && result.exec_lo == 0xFFFFFFFFu && result.exec_hi == 0xFFFFFFFFu);
+            CHECK(result.v3 == 0x77777777u && result.vcc_lo == 0xFFFFFFFFu);
+            result = single(body(210), 5, 6);         // not equal
+            CHECK(result.written && result.exec_lo == 0 && result.exec_hi == 0);
+            CHECK(result.v3 == 0x33333333u && result.vcc_lo == 0xFFFFFFFFu);
+            result = single(body(17), fbits(1.0f), fbits(2.0f));  // v_cmpx_lt_f32, 1 < 2
+            CHECK(result.written && result.exec_lo == 0xFFFFFFFFu && result.v3 == 0x77777777u);
+            result = single(body(17), fbits(2.0f), fbits(1.0f));
+            CHECK(result.written && result.exec_lo == 0 && result.v3 == 0x33333333u);
+            result = single(body(30), 0x7FC00000u, fbits(1.0f));  // v_cmpx_nlt_f32 with a not-a-number: true
+            CHECK(result.written && result.exec_lo == 0xFFFFFFFFu);
+            result = single(body(145), 0xFFFFFFFFu, 1);           // v_cmpx_lt_i32: -1 < 1
+            CHECK(result.written && result.exec_lo == 0xFFFFFFFFu);
+            result = single(body(209), 0xFFFFFFFFu, 1);           // v_cmpx_lt_u32: not
+            CHECK(result.written && result.exec_lo == 0);
+            // The two-word form of such a compare is not covered.
+            P p;
+            vop3(p, 210, 126, V(0), V(1));
+            result = single(p, 5, 5);
+            CHECK(!result.written && result.reason.find("not written") != std::string::npos);
+        }
     }
 
     // ---- the disassembler -------------------------------------------------------------------------------
@@ -1659,6 +1733,175 @@ int main() {
             const PcShader refused = write_pc_shader(input);
             CHECK(!refused.ok && refused.reason.find("input list does not have") != std::string::npos);
         }
+
+        // What the pass knows about a register belongs to the write that made it. The shape below is the one
+        // the game's pixel programs with loops have: the texture's eight words are loaded into s4..s11, over
+        // the table's own register (s8), a constant (s9) and the sampler heap's register (s11, copied to s24
+        // first); the sample then sits in a loop that runs twice.
+        //   0  as it is: written; both passes of the loop sample texture 7 with sampler 5.
+        //   1  a second load through s8 after the first: s8 no longer holds the table's address - refused.
+        //   2  the loop's end writes one of the sampler's registers: on the way back to the loop's head the
+        //      register has two possible last writes, so the sampler is not known there - refused.
+        const auto looped = [](int variant) {
+            P p;
+            leading_no_operations(p);
+            sop1(p, 4, 14, 126);               // s14:s15 = EXEC
+            sop1(p, 10, 126, 126);             // whole-quad mode
+            sop1(p, 3, 2, 9);                  // s2 = the first constant
+            sop1(p, 3, 24, 11);                // s24 = the sampler heap
+            sop1(p, 3, 9, I(0));
+            smem(p, 3, 4, 8, kNoRegister, 0);  // the texture's eight words into s4..s11, through s8:s9
+            if (variant == 1) {
+                smem(p, 3, 40, 8, kNoRegister, 0);
+            }
+            sop1(p, 3, 124, 12);               // M0 = s12
+            sop1(p, 3, 25, I(0));
+            vintrp(p, 0, 2, 0, 0, 0);
+            vintrp(p, 0, 3, 0, 1, 0);
+            vintrp(p, 1, 2, 0, 0, 1);
+            vintrp(p, 1, 3, 0, 1, 1);
+            sop2(p, 15, 126, 126, 14);         // EXEC = EXEC AND s14:s15
+            sop2(p, 30, 14, 2, I(4));          // s14 = s2 * 16
+            smem(p, 2, 28, 24, 14, 0);         // the sampler's four words through s24:s25 at s14
+            sopk(p, 0, 3, 2);                  // s3 = 2: the loop's counter
+            const int head = static_cast<int>(p.size());
+            mimg(p, 32, 1, 0xF, 4, 2, 8, 28);  // sample the 2-D texture at (v2, v3) into v8..v11
+            if (variant == 2) {
+                sop1(p, 3, 28, I(0));
+            }
+            sopk(p, 15, 3, 0xFFFF);            // s3 = s3 - 1
+            sopc(p, 7, 3, I(0));               // s3 != 0 ?
+            sopp(p, 5, static_cast<unsigned>(head - static_cast<int>(p.size()) - 1) & 0xFFFFu);
+            vop2(p, 47, 4, V(8), 9);
+            vop2(p, 47, 5, V(10), 11);
+            exp(p, 0, 0xF, true, true, true, 4, 5, 0, 0);
+            return p;
+        };
+        {
+            const DecodedShader program_looped = decode(looped(0), ShaderStage::kPixel);
+            CHECK(program_looped.ok);
+            input.program = &program_looped;
+            const PcShader written = write_pc_shader(input);
+            if (!written.ok) {
+                std::printf("FAIL: the looped pixel program was not written: %s\n", written.reason.c_str());
+                ++failures;
+            } else {
+                const PcBinding* texture = binding_of(written, PcBindingKind::kTexture);
+                const PcBinding* heap = binding_of(written, PcBindingKind::kSamplerHeap);
+                CHECK(texture && heap && texture->shader_register == 7 && heap->scalar_register == 11);
+                PcMachine machine = machine_for(written);
+                machine.inputs[1].c[0] = fbits(0.125f);
+                machine.inputs[1].c[1] = fbits(0.875f);
+                machine.constant = [](std::uint32_t, std::uint32_t element_number, unsigned component) {
+                    return element_number == 0 && component == 0 ? 5u : 0xBADu;
+                };
+                machine.sample = [](const SampleCall&) {
+                    Vec4 texel;
+                    texel.c[0] = fbits(0.25f);
+                    texel.c[1] = fbits(0.5f);
+                    texel.c[2] = fbits(0.75f);
+                    texel.c[3] = fbits(1.0f);
+                    return texel;
+                };
+                machine.run(written.listing);
+                CHECK(machine.error.empty() && machine.finished && !machine.discarded);
+                CHECK(machine.samples.size() == 2);
+                for (const SampleCall& call : machine.samples) {
+                    CHECK(call.texture_register == 7 && call.sampler_by_number && call.sampler_number == 5);
+                    CHECK(call.where.c[0] == fbits(0.125f) && call.where.c[1] == fbits(0.875f));
+                }
+                CHECK(machine.outputs[0].c[0] == fbits(0.25f) && machine.outputs[0].c[3] == fbits(1.0f));
+            }
+            const DecodedShader twice = decode(looped(1), ShaderStage::kPixel);
+            input.program = &twice;
+            const PcShader refused_twice = write_pc_shader(input);
+            CHECK(!refused_twice.ok && refused_twice.reason.find("tables do not name") != std::string::npos);
+            const DecodedShader rewritten = decode(looped(2), ShaderStage::kPixel);
+            input.program = &rewritten;
+            const PcShader refused_rewritten = write_pc_shader(input);
+            CHECK(!refused_rewritten.ok && refused_rewritten.reason.find("sampler the pass cannot tell") != std::string::npos);
+        }
+        // A register that is a copy of the sampler heap's address on one way and of the table's on the other is
+        // neither where the ways meet: a load through it is refused (0). The pass follows writes, not values:
+        // a second copy of the same address on one way is refused as well (1), which loses a program and
+        // never writes a wrong one. With one write only, before the ways part, the load is written (2).
+        for (int variant = 0; variant < 3; ++variant) {
+            P p;
+            sop1(p, 3, 16, 11);                // s16 = the sampler heap
+            sopc(p, 6, 9, I(0));               // the first constant == 0 ?
+            sopp(p, 5, 1);                     // then skip one instruction
+            if (variant == 2) {
+                sopp(p, 0);                    // s_nop
+            } else {
+                sop1(p, 3, 16, variant == 0 ? 8 : 11);
+            }
+            sop1(p, 3, 17, I(0));
+            smem(p, 2, 28, 16, kNoRegister, 0);
+            const DecodedShader joined = decode(p, ShaderStage::kPixel);
+            CHECK(joined.ok);
+            input.program = &joined;
+            const PcShader result = write_pc_shader(input);
+            if (variant == 2) {
+                CHECK(result.ok);
+            } else {
+                CHECK(!result.ok && result.reason.find("tables do not name") != std::string::npos);
+            }
+        }
+    }
+
+    // ---- 4a2. a pixel program that reads the position ---------------------------------------------------
+    // The shader reads the x and y of its position input: the program finds them in v2 and v3. Variant 1: the
+    // input list says the shader reads all four components, which is not the measured case: nothing is given.
+    // Variant 2: the program also reads v4 before writing it, so more than the centre weights comes before
+    // the position and the two registers cannot be told: nothing is given.
+    for (int variant = 0; variant < 3; ++variant) {
+        Signature inputs, outputs;
+        inputs.found = outputs.found = true;
+        inputs.elements = {element("SV_Position", 0, 1, 3, 0, 0xF), element("TEXCOORD", 0, 0, 3, 1, 0x1)};
+        inputs.elements[0].use_mask = variant == 1 ? 0xF : 0x3;
+        outputs.elements = {element("SV_Target", 0, 64, 3, 0, 0xF)};
+        P p;
+        leading_no_operations(p);
+        if (variant != 2) {
+            vintrp(p, 0, 4, 0, 0, 0);          // attribute 0, x: first step through v0 ...
+            vintrp(p, 1, 4, 0, 0, 1);          // ... second step through v1
+        }
+        vop2(p, 3, 5, V(2), 4);                // v5 = v2 + v4
+        vop2(p, 8, 6, V(3), 3);                // v6 = v3 * v3
+        vop2(p, 47, 7, V(5), 6);               // pack v5, v6 as halves, twice
+        vop2(p, 47, 8, V(5), 6);
+        exp(p, 0, 0xF, true, true, true, 7, 8, 0, 0);
+        const DecodedShader program = decode(p, ShaderStage::kPixel);
+        CHECK(program.ok);
+        PcShaderInput input;
+        input.stage = PcStage::kPixel;
+        input.program = &program;
+        input.inputs = &inputs;
+        input.outputs = &outputs;
+        const PcShader shader = write_pc_shader(input);
+        if (variant != 0) {
+            CHECK(!shader.ok && shader.reason.find("before any write") != std::string::npos);
+            continue;
+        }
+        if (!shader.ok) {
+            std::printf("FAIL: the pixel program that reads the position was not written: %s\n",
+                        shader.reason.c_str());
+            ++failures;
+            continue;
+        }
+        PcMachine machine = machine_for(shader);
+        machine.inputs[0].c[0] = fbits(10.5f);
+        machine.inputs[0].c[1] = fbits(20.5f);
+        machine.inputs[0].c[2] = fbits(77.0f);  // z and w must not be used
+        machine.inputs[0].c[3] = fbits(88.0f);
+        machine.inputs[1].c[0] = fbits(0.25f);
+        machine.run(shader.listing);
+        CHECK(machine.error.empty() && machine.finished && !machine.discarded);
+        CHECK(machine.outputs[0].c[0] == fbits(10.75f) && machine.outputs[0].c[1] == fbits(420.25f));
+        CHECK(machine.outputs[0].c[2] == fbits(10.75f) && machine.outputs[0].c[3] == fbits(420.25f));
+        expect_lines(disassembler, "pixel program that reads the position", shader.container,
+                     {"dcl_input_ps_siv linear noperspective v0.xy, position", "dcl_input_ps linear v1.x",
+                      "dcl_output o0.xyzw", "ret"});
     }
 
     // ---- 4b. a vertex program ----------------------------------------------------------------------------
@@ -1737,6 +1980,107 @@ int main() {
         input.stage = PcStage::kPixel;
         const PcShader refused = write_pc_shader(input);
         CHECK(!refused.ok && !refused.reason.empty());
+    }
+
+    // ---- 4c. a vertex program that reads its constant buffer by element number ---------------------------
+    // The shape measured on the game's vertex programs: a float input is turned into a whole number, and four
+    // words are loaded from the constant buffer at that element (16 bytes each) plus a fixed number of bytes.
+    {
+        ModuleTables tables;
+        tables.found = true;
+        tables.understood = true;
+        tables.layout = {layout_entry(3, 0, 1, 2, 8, 0)};
+        tables.resources = {resource_entry(2, 3, 0, 2, 4, 8, 0)};
+        DeclaredResources declared;
+        declared.found = true;
+        declared.resources = {DeclaredResource{2, 1, 2, 2}};
+        Signature inputs, outputs;
+        inputs.found = outputs.found = true;
+        inputs.elements = {element("POSITION", 0, 0, 3, 0, 0x7), element("BLENDINDICES", 0, 0, 3, 1, 0x1)};
+        outputs.elements = {element("TEXCOORD", 0, 0, 3, 0, 0x3), element("SV_Position", 0, 1, 3, 1, 0xF)};
+
+        P p;
+        leading_no_operations(p);
+        sop1(p, 33, 4, 4);                                // the call through s4
+        smem(p, 2, 12, 8, kNoRegister, 0);                // the buffer's four words through s8
+        vop1(p, 8, 1, V(8));                              // v1 = the second input's first component, as a whole number
+        mubuf(p, 14, true, false, 32, 12, 20, 1, I(0));   // v20..v23 = element v1 + 2
+        mubuf(p, 13, true, false, 8, 12, 30, 1, I(0));    // v30, v31 = the third and fourth word of element v1
+        exp(p, 12, 0xF, false, false, false, 20, 21, 22, 23);
+        exp(p, 32, 0x3, false, true, false, 30, 31, 0, 0);
+        const DecodedShader program = decode(p, ShaderStage::kVertex);
+        CHECK(program.ok);
+        PcShaderInput input;
+        input.stage = PcStage::kVertex;
+        input.program = &program;
+        input.tables = &tables;
+        input.inputs = &inputs;
+        input.outputs = &outputs;
+        input.declared = &declared;
+        const PcShader shader = write_pc_shader(input);
+        if (!shader.ok) {
+            std::printf("FAIL: the vertex program with an element number was not written: %s\n", shader.reason.c_str());
+            ++failures;
+        } else {
+            const PcBinding* buffer = binding_of(shader, PcBindingKind::kConstantBuffer);
+            CHECK(shader.bindings.size() == 1 && buffer && buffer->indexed);
+            PcMachine machine = machine_for(shader);
+            machine.inputs[1].c[0] = fbits(5.0f);
+            machine.constant = [](std::uint32_t, std::uint32_t element_number, unsigned component) {
+                return element_number * 16 + component;
+            };
+            machine.run(shader.listing);
+            CHECK(machine.error.empty() && machine.finished);
+            for (unsigned c = 0; c < 4; ++c) {
+                CHECK(machine.outputs[1].c[c] == 7 * 16 + c);  // element 5 + 2
+            }
+            CHECK(machine.outputs[0].c[0] == 5 * 16 + 2 && machine.outputs[0].c[1] == 5 * 16 + 3);
+            // The read as the system's disassembler shows it: the element number from a register, plus 2.
+            std::string read_line;
+            for (const PcInstruction& instruction : shader.listing) {
+                if (instruction.operands.size() == 2 && instruction.operands[1].file == dx::OperandFile::kConstantBuffer &&
+                    instruction.operands[1].relative_index && instruction.operands[1].index2 == 2) {
+                    char text[120];
+                    std::snprintf(text, sizeof text, "mov r%u.xyzw, CB%u[2][r%u.x + 2].xyzw", instruction.operands[0].index0,
+                                  buffer ? buffer->id : 0, instruction.operands[1].relative_temp);
+                    read_line = text;
+                }
+            }
+            CHECK(!read_line.empty());
+            char buffer_line[120];
+            std::snprintf(buffer_line, sizeof buffer_line,
+                          "dcl_constantbuffer CB%u[2:2][4096], dynamicIndexed, space=1", buffer ? buffer->id : 0);
+            expect_lines(disassembler, "vertex program with an element number", shader.container,
+                         {buffer_line, read_line, "ret"});
+        }
+
+        // Refused: an element number together with an offset register, and words that cross a 16-byte element.
+        {
+            P q;
+            leading_no_operations(q);
+            sop1(q, 33, 4, 4);
+            smem(q, 2, 12, 8, kNoRegister, 0);
+            vop1(q, 8, 1, V(8));
+            mubuf(q, 14, true, true, 0, 12, 20, 1, I(0));
+            exp(q, 12, 0xF, false, true, false, 20, 21, 22, 23);
+            const DecodedShader both = decode(q, ShaderStage::kVertex);
+            input.program = &both;
+            const PcShader refused = write_pc_shader(input);
+            CHECK(!refused.ok && refused.reason.find("byte offset register") != std::string::npos);
+        }
+        {
+            P q;
+            leading_no_operations(q);
+            sop1(q, 33, 4, 4);
+            smem(q, 2, 12, 8, kNoRegister, 0);
+            vop1(q, 8, 1, V(8));
+            mubuf(q, 14, true, false, 4, 12, 20, 1, I(0));
+            exp(q, 12, 0xF, false, true, false, 20, 21, 22, 23);
+            const DecodedShader crossing = decode(q, ShaderStage::kVertex);
+            input.program = &crossing;
+            const PcShader refused = write_pc_shader(input);
+            CHECK(!refused.ok && refused.reason.find("cross a 16-byte element") != std::string::npos);
+        }
     }
 
     // ---- 5. refusals ---------------------------------------------------------------------------------------
