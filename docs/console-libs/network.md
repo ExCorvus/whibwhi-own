@@ -1,9 +1,9 @@
-# The game's network imports, and the shell's refusal
+# The game's network imports, and the weave's refusal
 
 Project rule 3: **nothing online** (no Xbox Live, no Rockstar services). This document lists every function the
-original executable imports from a network library, what the game does when such a call fails, and what the shell
-answers instead — the code is [`shell/offline.cpp`](../../shell/offline.cpp), the test is
-[`shell/tests/test_offline.cpp`](../../shell/tests/test_offline.cpp).
+original executable imports from a network library, what the game does when such a call fails, and what the weave
+answers instead — the code is [`weave/offline.cpp`](../../weave/offline.cpp), the test is
+[`weave/tests/test_offline.cpp`](../../weave/tests/test_offline.cpp).
 
 Every statement is marked **V** (read in the executable's own listing or import table, or in a public header,
 RVA named), **I** (inferred from those) or **U** (unknown). RVAs are image-relative (image base `0x140000000`). No
@@ -17,11 +17,11 @@ private listing files, and this PC's `ws2_32.dll` export table.
   `XCurl.dll` underneath).
 - **V** Today all of them are connected to the real libraries, which is what rule 3 forbids: nothing refuses or
   even records a network call.
-- **V** The shell now answers 49 of those 78 imports itself, with the failure value and error each function's
+- **V** The weave now answers 49 of those 78 imports itself, with the failure value and error each function's
   public documentation gives: no socket is created, no name is resolved, no byte is sent. Each refused call is
   named once on stderr and counted.
 - **V** The other 29 imports are handed to the real library. They are the calls that only read or release
-  something the shell never handed out (`closesocket`, `freeaddrinfo`, `WinHttpCloseHandle`,
+  something the weave never handed out (`closesocket`, `freeaddrinfo`, `WinHttpCloseHandle`,
   `HCHttpCallCloseHandle`, …) and the pure helpers (`htons`, `inet_addr`, `gethostname`, `WSAGetLastError`,
   `WinHttpCrackUrl`, …). Section 4 lists every one, with the reason.
 - **V** The game handles a refusal at most of these entry points: it checks the failure value, reads the error,
@@ -30,7 +30,7 @@ private listing files, and this PC's `ws2_32.dll` export table.
 
 ## 1. What the executable imports
 
-Measured with our own import reader (`shell/tools/list_imports.exe`) and the private name list script; the
+Measured with our own import reader (`weave/tools/list_imports.exe`) and the private name list script; the
 counts agree with [FINDINGS.md](../../FINDINGS.md).
 
 ### 1.1 WS2_32.dll — 25 functions, 23 by ordinal
@@ -116,7 +116,7 @@ checked, the error is read, and the game carries on with a failure of its own �
   `0x5a61184` is an `int3`. There is no failure path: a nonzero return stops the game in its own assertion.
 - **V** That function is reached from `0x5bf0410` (a once-only guard), which is reached from `0x266ea0` →
   `0x266cf0` → `0x266be0` (two callers: `0x2669c0`, `0x2208b90`) — the game's network start-up chain.
-- **U** Whether a run under the shell reaches that chain, and at what point. Every run so far handed `WSAStartup`
+- **U** Whether a run under the weave reaches that chain, and at what point. Every run so far handed `WSAStartup`
   to the real library, where it succeeded, so the `int3` has never been exercised. This is the one refusal that
   could stop a run before anything else; section 6 makes it a decision, not a default.
 
@@ -138,7 +138,7 @@ checked, the error is read, and the game carries on with a failure of its own �
   `WSAGetLastError` and treats `10035` (`WSAEWOULDBLOCK`) and `10036` (`WSAEINPROGRESS`) as "connect in progress,
   fine". Any other code is logged and the call fails; the socket is then closed (`0x41e2e95` → `0x41e3080`).
 - **V** `0x58aafc8` in `0x58aaf80`: a negative result closes the socket and returns `-1`.
-- **I** `WSAENOTSOCK` (10038, what the shell answers) is neither of the two tolerated codes, so both callers take
+- **I** `WSAENOTSOCK` (10038, what the weave answers) is neither of the two tolerated codes, so both callers take
   the failure path. Nothing retries.
 
 ### 2.4 Name resolution: `getaddrinfo`, `gethostbyname`, `gethostname`
@@ -155,7 +155,7 @@ checked, the error is read, and the game carries on with a failure of its own �
 - **V** `gethostname` at `0x41d31d6` in `0x41d3170`: a nonzero return is tolerated (logged, then the empty name is
   used) and at `0x58ab09c` in `0x58ab040` its failure only means "no local name to resolve".
 - **V** `WSAGetLastError` (ordinal 111, ten call sites) is read immediately after each of these failures, which is
-  why the shell has to set the **Winsock** error, not only the Windows one (see 3.1).
+  why the weave has to set the **Winsock** error, not only the Windows one (see 3.1).
 
 ### 2.5 `send`, `recv`, `setsockopt` and the rest of the socket calls
 
@@ -206,14 +206,14 @@ and **V** every failure is checked and logged with `GetLastError`:
 - **V** The nine `HCHttpCallRequestGet…` calls in `0x563095a` are each followed by `test eax, eax` / `js`, so they
   return an HRESULT (see 5.1).
 
-## 3. What the shell answers
+## 3. What the weave answers
 
 `offline_replacement(library, import)` returns a function for each row below. Each replacement has the public
 signature and calling convention of the function it replaces, never touches the network, sets the error and
 returns the documented failure value. The first call of a function writes
 
 ```
-[offline] <library>!<function> refused: the shell does not go online
+[offline] <library>!<function> refused: the weave does not go online
 ```
 
 once to stderr; every call is counted (`offline_refusals()`, `offline_report()`).
@@ -225,7 +225,7 @@ once to stderr; every call is counted (`offline_refusals()`, `offline_report()`)
   a stale one. `set_wsa_error()` therefore calls the real `ws2_32.dll`'s `WSASetLastError` (looked up with
   `GetModuleHandleA`/`GetProcAddress`) **and** `SetLastError`, and the test checks both.
 - **V** Calling `WSASetLastError` opens no socket and sends nothing: it writes one per-thread word. It is the only
-  call the shell makes into a network library.
+  call the weave makes into a network library.
 - **V** WinHTTP uses `GetLastError`; libHttpClient uses its HRESULT.
 
 ### 3.2 WS2_32.dll — 18 refused
@@ -233,9 +233,9 @@ once to stderr; every call is counted (`offline_refusals()`, `offline_report()`)
 Failure values and codes from each function's Microsoft Learn page and the "Windows Sockets Error Codes" page;
 constants from `winsock2.h` / `ws2tcpip.h` (Windows SDK 10.0.26100.0, the header on this machine).
 
-| function | return on failure | error the shell sets | why this code |
+| function | return on failure | error the weave sets | why this code |
 |----------|-------------------|----------------------|---------------|
-| `WSAStartup(115)` | the error code itself (0 = success) | `WSASYSNOTREADY` (10091) | "the network subsystem is unavailable" — the shell provides none |
+| `WSAStartup(115)` | the error code itself (0 = success) | `WSASYSNOTREADY` (10091) | "the network subsystem is unavailable" — the weave provides none |
 | `socket(23)` | `INVALID_SOCKET` | `WSANOTINITIALISED` (10093) | "a successful WSAStartup call must occur before using this function" — literally the state, since `WSAStartup` was refused |
 | `connect(4)` | `SOCKET_ERROR` (−1) | `WSAENOTSOCK` (10038) | "the descriptor is not a socket" — no socket was ever handed out |
 | `bind(2)`, `listen(13)`, `accept(1)` | `INVALID_SOCKET` (accept) / `SOCKET_ERROR` | `WSAENOTSOCK` | same |
@@ -253,7 +253,7 @@ Constants from `winhttp.h`; failure values from each function's Microsoft Learn 
 answers its documented failure — `NULL` for a handle, `FALSE` for a BOOL — with `ERROR_WINHTTP_CANNOT_CONNECT`
 (`WINHTTP_ERROR_BASE + 29` = 12029, "a connection with the server could not be established"). Microsoft's page for
 `WinHttpOpen` lists `ERROR_WINHTTP_INTERNAL_ERROR` and `ERROR_NOT_ENOUGH_MEMORY` instead; neither says *why*, and
-"cannot connect" is what the shell means, so that is the code chosen. It is a documented WinHTTP error either way.
+"cannot connect" is what the weave means, so that is the code chosen. It is a documented WinHTTP error either way.
 
 | function | return on failure | error |
 |----------|-------------------|-------|
@@ -290,17 +290,17 @@ library). None of them creates an endpoint, resolves a name or sends a byte.
 
 | import(s) | why it is not refused |
 |-----------|-----------------------|
-| `closesocket(3)` | closes a handle the shell never handed out; the real library answers `WSAENOTSOCK` for `INVALID_SOCKET` and does nothing else |
-| `freeaddrinfo` | frees a list the shell never produced; in the game it is only called after a successful `getaddrinfo` (`0x41d327f`, `0x41e3df0` both guard or follow success) |
+| `closesocket(3)` | closes a handle the weave never handed out; the real library answers `WSAENOTSOCK` for `INVALID_SOCKET` and does nothing else |
+| `freeaddrinfo` | frees a list the weave never produced; in the game it is only called after a successful `getaddrinfo` (`0x41d327f`, `0x41e3df0` both guard or follow success) |
 | `htons(9)` | byte-order arithmetic, no network |
 | `inet_addr(11)` | parses a dotted address, no lookup |
 | `gethostname(57)` | reads the local machine's name; no packet leaves the machine |
 | `WSAGetLastError(111)` | reads the thread's error word — and it is how the game reads the errors the refusals set |
 | `__WSAFDIsSet(151)` | tests a bit in an fd_set |
 | `WinHttpCrackUrl` | splits a URL string, no network |
-| `WinHttpCloseHandle` | closes a handle the shell never handed out; the game calls it on its failure paths (`0x55e4a5e`…`0x55e4a70`), where the handle may be null, and the real library answers `FALSE` for that |
+| `WinHttpCloseHandle` | closes a handle the weave never handed out; the game calls it on its failure paths (`0x55e4a5e`…`0x55e4a70`), where the handle may be null, and the real library answers `FALSE` for that |
 | `WinHttpSetOption`, `WinHttpSetTimeouts`, `WinHttpSetStatusCallback`, `WinHttpAddRequestHeaders`, `WinHttpQueryHeaders` | local operations on a handle. No handle exists, so the real library answers `ERROR_INVALID_HANDLE` (or `WINHTTP_INVALID_STATUS_CALLBACK` for the callback) by itself — a truer answer than an invented one |
-| `HCCleanupAsync`, `HCHttpCallCloseHandle` | release something the shell never created |
+| `HCCleanupAsync`, `HCHttpCallCloseHandle` | release something the weave never created |
 | `HCHttpCallDuplicateHandle` | duplicates a handle; with no object the real library answers null |
 | `HCSettingsGetTraceLevel`, `HCTraceImplMessage`, `HCTraceSetEtwEnabled` | tracing only — no network, and their prototypes are not in the public header |
 | the nine `HCHttpCallRequestGet…` | see 5.1 |
@@ -316,19 +316,19 @@ library). None of them creates an endpoint, resolves a name or sends a byte.
   were checked); they are part of the GDK build the game ships. Their **parameter lists are therefore unknown**.
 - **V** The image treats them as returning an HRESULT: each call in `0x563095a` is followed by
   `test eax, eax` / `js`.
-- **U** Their exact arguments. Writing a replacement would mean guessing them, so the shell does not: they go to
+- **U** Their exact arguments. Writing a replacement would mean guessing them, so the weave does not: they go to
   the real library, which reads a call object that cannot exist and answers `E_INVALIDARG` /
-  `E_HC_NOT_INITIALISED`. This is the one hole in "the shell answers everything itself", and it is a read-only
+  `E_HC_NOT_INITIALISED`. This is the one hole in "the weave answers everything itself", and it is a read-only
   hole: none of the nine sends anything.
 
 ### 5.2 A refusal is a synchronous failure, not a network error
 
 - **V** `HCHttpCallPerformAsync` is refused with a synchronous `E_FAIL`. On a real network error the library would
-  instead *complete* the game's `XAsyncBlock` with a failure, on a task queue, after a retry policy. The shell does
+  instead *complete* the game's `XAsyncBlock` with a failure, on a task queue, after a retry policy. The weave does
   not synthesise that completion (that would mean reporting work that did not happen, and it would need the game's
   task queue). The game's code at `0x562fa10` handles the synchronous failure path, but a caller that waits for a
   completion it never scheduled would wait. Nothing here can send either way.
-- The same applies to `HCHttpCallCreate`: a caller that ignores the HRESULT gets a null handle, which the shell
+- The same applies to `HCHttpCallCreate`: a caller that ignores the HRESULT gets a null handle, which the weave
   wrote on purpose.
 
 ### 5.3 `WSAStartup` is the one refusal that can stop the game in its own assert
@@ -340,21 +340,21 @@ decision for ExCorvus (section 6).
 
 - Covered **V**: sockets (no handle can be created), name resolution (`getaddrinfo`, `gethostbyname`), HTTP through
   WinHTTP (no session), HTTP through libHttpClient (no initialisation, no call object, no perform).
-- Not covered **U**: any library the shell does not import or answer. If some other shipped DLL opened Winsock on
+- Not covered **U**: any library the weave does not import or answer. If some other shipped DLL opened Winsock on
   its own (for example `XCurl.dll` loaded by something other than libHttpClient), its own `WSAStartup`/`socket`
-  calls would go to the same real `ws2_32.dll` and would *not* pass through the shell's boundary — the shell only
+  calls would go to the same real `ws2_32.dll` and would *not* pass through the weave's boundary — the weave only
   answers the game's own import table. Measured today: the only network libraries in the import table are the
   three above.
 
 ## 6. How to connect it
 
-In `shell/console.cpp`, at the **top** of `resolve_console_import`, before the ordinal branch (23 of the 25 socket
+In `weave/console.cpp`, at the **top** of `resolve_console_import`, before the ordinal branch (23 of the 25 socket
 imports are by ordinal and would otherwise go straight to the real library):
 
 ```cpp
 void* resolve_console_import(HostLibraries& host, const std::string& library, const ImportedFunction& fn) {
     if (void* refusal = offline_replacement(library, fn)) {
-        return refusal;                    // a network entry point the shell answers itself
+        return refusal;                    // a network entry point the weave answers itself
     }
     if (fn.by_ordinal) {
         return host.resolve(library, fn);
@@ -362,7 +362,7 @@ void* resolve_console_import(HostLibraries& host, const std::string& library, co
     ...
 ```
 
-and in the tool that starts the game (`shell/tools/boot_image.cpp`), after the run:
+and in the tool that starts the game (`weave/tools/boot_image.cpp`), after the run:
 
 ```cpp
 offline_report();   // one line per refused function, plus the total; silent when nothing was refused
@@ -383,7 +383,7 @@ choices, both in one place (`kEntries` in `offline.cpp`):
 This is a scope decision (rule 3 is ExCorvus's), not an implementation detail, so it is left as written in the code and
 flagged here rather than chosen silently.
 
-**What was connected (2026-11-26, when this was taken into the shell).** `shell/console.cpp` connects every
+**What was connected (2026-11-26, when this was taken into the weave).** `weave/console.cpp` connects every
 refusal of this document except one: `WSAStartup` goes to the real library. Reason: it initialises the socket
 library inside the process and sends nothing; the game stops in its own check when it fails; and answering "the
 network subsystem is not ready" would not be true of the PC. No socket can exist afterwards all the same, because
@@ -394,7 +394,7 @@ choice is ExCorvus's to reverse: removing the exception in `resolve_console_impo
 
 ## 7. How it is checked
 
-`shell\build.cmd` builds and runs everything; the test is `test_offline` and it uses no network:
+`weave\build.cmd` builds and runs everything; the test is `test_offline` and it uses no network:
 
 - **V** all 78 imports of the three libraries are asserted against the two lists in this document (49 refused, 29
   passed) — by name **and** by ordinal, so a name that moves from one side to the other fails;
