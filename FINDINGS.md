@@ -297,6 +297,20 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
   through handled breakpoints (a second occurrence at the same address ends the boot), and WHIWHI_WATCH=<rva> arms a
   1-byte write watchpoint on the entry thread (used to find the flag writer above). 12/12 tests pass.
 
+## 2026-11-26 - loader stub patch (the shell plays the console's loader) and the precise boundary
+
+- Census of the whole image: exactly **4** distinct int3 stub addresses are referenced from vtables
+  (0x22106e0 shared by 30 slots, plus 0xb883ff, 0xb98348, 0x486c766). All are `int3` followed by the release code
+  (`cc c3` = break-in-debug, ret) - slots the console's own loader fills at load time.
+- The shell now does that loader step on its in-memory copy only (shell/loader.cpp nop_loader_stubs): pointers
+  from data sections into executable gaps outside the exception-table functions that start with 0xCC get
+  0xCC -> 0x90 (nop) in memory; disk untouched; each patched address logged. Boot b19 confirms the mechanism:
+  the fault moved from the stub (0x22106e0) to the inline int3 right after the call (image+0x2219650).
+- That inline int3 is the game's own "this call must not return here" assert on the pool-allocation path
+  (fn 0x4fac3c0 -> fn 0x2219620 -> vtable slot +0x30). The slot's real body exists only in the console loader's
+  patch; it is not derivable from the image. So this path is the honest boundary: the shell fills every stub it
+  can derive, and stops where the game needs code only the console has.
+
 ## 2026-11-26 - booting the image in the shell; what the runs showed (measured)
 
 - shell/tools/boot_image.cpp (run by Temp\opencode\run_boot.ps1) loads the image, connects imports, optionally
