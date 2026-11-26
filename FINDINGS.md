@@ -9,7 +9,7 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 - **Returned to this state on 2026-11-26** (bugfix: undid an AI trap). Everything built after boot b80 was
   taken out of the repository again; see the last dated entry. This block describes the b80 state, re-measured
   in boot b169.
-- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 17 tests pass.
+- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 27 tests pass (the shader translator came back, see the newest entries).
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
@@ -37,9 +37,13 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   from the game's memory into a PC texture yet, so no texture with starting data can be sampled.
 - **Network:** every imported function that could open a socket, resolve a name or make an HTTP request is
   connected to a refusal (docs/console-libs/network.md). No run so far has called one.
-- **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
-  slots 57, 62, 67 and 86 and all are refused (the shader translator handles only straight-line compute test
-  shaders), so every draw is held. Command-list methods that name buffers by address (slots 41 to 48: root
+- **Pipelines (boots b172-b174):** device slot 86 writes the game's vertex and pixel programs as PC shaders bound
+  to the shell's layout and makes real PC pipelines with the shell's one root signature; the PC device took every
+  one written (32,768+ in b174). The game's start-up waits for about 50,000 of them, which takes longer than
+  300 s at the PC device's compile rate. Slots 57, 62 and 67 are not provided.
+- **Not built:** anything that draws the game's picture. Draws are held while a pipeline of the shell's layout
+  is named, because the arguments buffer and the shell's heaps are not filled from the game's root arguments
+  yet. Command-list methods that name buffers by address (slots 41 to 48: root
   buffers, index and vertex buffers), because a game address is not turned into a PC buffer address yet. The
   command-list methods at slots 70, 71, 72, 74, 75, 126, 131, 132, 142 and 146 (what they are is not known).
   The primitive topology number 0x11 (not a PC topology). Views made from raw descriptor words (device slot 70)
@@ -865,3 +869,35 @@ printed no reason.
 So the normal call does not take the game's shaders as they are: the stream is the normal one, its shader stages
 are not. That is where the game's Direct3D 12 differs from the normal one for pipelines. What the console device
 does with these shader containers is to be read from the executable and the containers next.
+
+## 2026-11-26 - the game's pipelines made from its shaders written against the shell's layout (measured, boots b172-b174)
+
+The shader translator came back from the saved work, bound to one layout of the shell's own
+(shell/shader_pc.hpp, `shell_layout`): every console program is written as a PC shader that reads its starting
+registers from one arguments buffer and takes its descriptors from the shell's heaps by place. Device slot 86
+now writes the stream's vertex and pixel programs that way, names the shell's one root signature instead of the
+game's, and hands the rest of the stream to the PC device's CreatePipelineState unchanged
+(`w_device_stream_pipeline` and `shell_layout_root_signature` in shell/d3d12_xs.cpp). Written shaders are kept in
+memory and each container is written once.
+
+The shell's root signature (19 parameters: a sampler table, the arguments buffer, one table over the resource
+heap with 12 ranges, and 16 root buffers for addresses) is accepted by the PC device.
+
+Boot b172 (60 s, game folder unchanged): the PC device made every pipeline whose shaders were written: 16,384
+made by the last log line, none refused by the device. The 384 not made were refused by the translator itself
+for three reasons (pixel programs only): a texel read whose values go to an instruction the pass cannot type,
+`MIMG 32` with a sampler the pass cannot tell, and a resource taken from the descriptor heap by number.
+
+Slot 67 is not the same call as slot 86: at the image's call that returns to image+0x24800db its first argument
+is not a {size, stream} pair (the "size" read was 0x260a...). The earlier reading in GRAPHICS-CALLS.md section
+2.2c that slots 67 and 86 have the same three arguments was a guess from the comparison and is wrong for 67. Slot
+67 is back to "not provided" until its shape is read.
+
+Boot b174 (300 s, game folder unchanged, no fault of the driver or the machine): about 44,700 pipeline requests,
+32,768 made by the last power-of-two line, 714 shaders written, 89,428 taken from memory. The game presented one
+frame and its start-up was still waiting for pipelines when the run ended (boot b141 of the saved work saw about
+50,000 asked before the game moved on). So the start-up is bound by how fast the PC device compiles pipelines.
+
+Draws are held: a list that names one of these pipelines does not set it on the PC list, because its draws need
+the arguments buffer and the shell's heaps filled from the game's root arguments, which is not built yet. No list
+named a pipeline in these runs (the start-up had not finished).
