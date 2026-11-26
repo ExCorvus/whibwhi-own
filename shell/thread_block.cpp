@@ -69,20 +69,22 @@ unsigned char* current_block() {
     return static_cast<unsigned char*>(blocks[_tls_index]);
 }
 
-// Set to 1 to point array entry 0 at the block while an image holds it (the console gives the game, the main
-// module, storage index 0; off by default while that is worked out - see FINDINGS.md).
-volatile long g_redirect_index_zero = 0;
+// Set to 1 to point array entry 0 at the upper half of the block while an image holds it. On the console the
+// game is the main module, so its storage sits at index 0 of the per-thread array and parts of the image read
+// entry 0 directly (measured: the image reads gs:[0x58] then entry 0 and works at offsets up to 0x13a8, which
+// crashes when entry 0 is a small foreign block). Entry 0 therefore points at the zeroed upper half of our
+// own per-thread block: in-bounds for the image, zeroed (measured safe) for whatever else owns entry 0.
+constexpr unsigned long kSlot0Offset = WHIWHI_THREAD_BLOCK_BYTES / 2;
+volatile long g_redirect_index_zero = 1;
 
 void fill_current_block() {
     unsigned char* block = current_block();
     __stosb(block, 0, WHIWHI_THREAD_BLOCK_BYTES);
     __movsb(block, static_cast<const unsigned char*>(g_image.initial_data),
             static_cast<size_t>(g_image.initial_bytes));
-    // On the console the game is the main module, so its storage sits at index 0 of the per-thread array and
-    // parts of the image read entry 0 directly. While the image holds the block, point entry 0 at it too.
     if (_tls_index != WHIWHI_THREAD_BLOCK_NO_INDEX && g_redirect_index_zero) {
         void** blocks = reinterpret_cast<void**>(__readgsqword(0x58));
-        blocks[0] = block;
+        blocks[0] = block + kSlot0Offset;
     }
 }
 
