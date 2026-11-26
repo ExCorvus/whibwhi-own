@@ -151,7 +151,7 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
         dump_vtable(info->ContextRecord->Rcx);
     }
     std::fprintf(stderr, "\n");
-    // True backtrace by unwinding the faulting context (the stack scan below is only a fallback).
+    // Backtrace by unwinding the faulting context.
     {
         CONTEXT c = *info->ContextRecord;
         std::fprintf(stderr, "[boot] unwind:");
@@ -174,21 +174,6 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
             }
             if (!c.Rip) {
                 break;
-            }
-        }
-        std::fprintf(stderr, "\n");
-    }
-    // Poor-man's backtrace: scan the top of the faulting stack for return addresses into the image.
-    if (g_loaded && g_loaded->base) {
-        const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(g_loaded->base);
-        const std::uintptr_t* sp = reinterpret_cast<const std::uintptr_t*>(info->ContextRecord->Rsp);
-        std::fprintf(stderr, "[boot] stack scan (image return addresses):");
-        int found = 0;
-        for (int i = 0; i < 512 && found < 16; ++i) {
-            const std::uintptr_t v = sp[i];
-            if (v >= base + 0x1000 && v < base + g_loaded->size) {
-                std::fprintf(stderr, " +0x%llx", static_cast<unsigned long long>(v - base));
-                ++found;
             }
         }
         std::fprintf(stderr, "\n");
