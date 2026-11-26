@@ -261,6 +261,76 @@ void set_unprovided_handler(UnprovidedHandler handler) {
     g_unprovided_handler = handler;
 }
 
+// The console's own loader fills stub slots in the image at load time: vtable entries that point at an int3
+// followed by the release code (e.g. "cc c3" = break in debug, ret). The shell plays the loader, so it does the
+// same on its in-memory copy only: every pointer from an initialized-data section into an executable section
+// that lands outside the image's own function table (the exception directory) and starts with 0xCC gets that
+// byte replaced with 0x90 (nop), so the code after it runs. The file on disk is never touched; each patched
+// address is logged. This changes no game logic - it removes the debug break, exactly as a release load does.
+static std::size_t nop_loader_stubs(const Image& image, std::uint8_t* base, std::size_t size) {
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> funcs;
+    const std::uint32_t er = image.data_directory_rva(Image::kExceptionDirectory);
+    const std::uint32_t es = image.data_directory_size(Image::kExceptionDirectory);
+    if (er && es) {
+        for (std::uint32_t at = er; at + kUnwindEntrySize <= er + es && at + kUnwindEntrySize <= size;
+             at += kUnwindEntrySize) {
+            funcs.emplace_back(rd32(base + at), rd32(base + at + 4));
+        }
+    }
+    std::sort(funcs.begin(), funcs.end());
+    const auto in_func = [&](std::uint32_t rva) {
+        const auto it = std::upper_bound(funcs.begin(), funcs.end(), rva,
+                                         [](std::uint32_t v, const std::pair<std::uint32_t, std::uint32_t>& f) {
+                                             return v < f.first;
+                                         });
+        return it != funcs.begin() && rva < (it - 1)->second;
+    };
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> execs;
+    for (const Section& s : image.sections()) {
+        if (s.characteristics & 0x20000000) {  // IMAGE_SCN_MEM_EXECUTE
+            execs.emplace_back(s.virtual_address, s.virtual_address + s.virtual_size);
+        }
+    }
+    const auto in_exec = [&](std::uint32_t rva) {
+        for (const auto& e : execs) {
+            if (rva >= e.first && rva < e.second) {
+                return true;
+            }
+        }
+        return false;
+    };
+    std::size_t patched = 0;
+    const std::uint64_t self = reinterpret_cast<std::uint64_t>(base);
+    for (const Section& s : image.sections()) {
+        if (!(s.characteristics & 0x40000000)) {  // IMAGE_SCN_CNT_INITIALIZED_DATA
+            continue;
+        }
+        const std::uint32_t n = std::min(s.virtual_size, s.raw_size);
+        for (std::uint32_t off = 0; off + 8 <= n; ++off) {
+            std::uint64_t v;
+            std::memcpy(&v, base + s.virtual_address + off, 8);
+            if (v < self || v >= self + size) {
+                continue;
+            }
+            const std::uint32_t rva = static_cast<std::uint32_t>(v - self);
+            if (in_exec(rva) && !in_func(rva) && rva < size && base[rva] == 0xCC) {
+                base[rva] = 0x90;
+                if (patched < 32) {
+                    std::fprintf(stderr, "[loader] loader stub at image+0x%x: int3 -> nop (referenced from image+0x%x)\n",
+                                 rva, s.virtual_address + off);
+                    std::fflush(stderr);
+                }
+                ++patched;
+            }
+        }
+    }
+    if (patched) {
+        std::fprintf(stderr, "[loader] loader stubs patched in memory: %zu\n", patched);
+        std::fflush(stderr);
+    }
+    return patched;
+}
+
 bool load_image(const Image& image, const ImportResolver& resolve, LoadedImage& out, std::string& reason) {
     out = LoadedImage{};
     reason.clear();
@@ -301,6 +371,8 @@ bool load_image(const Image& image, const ImportResolver& resolve, LoadedImage& 
             return fail(why);
         }
     }
+
+    nop_loader_stubs(image, base, size);
 
     {
         std::string why;
