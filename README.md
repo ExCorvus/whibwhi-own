@@ -69,8 +69,8 @@ the program file itself, not the length of a run, as the reference. The longer a
 
 Points 1, 2, 3 and 5 work far enough that the game starts, sets itself up, opens all its packages, creates its
 window and presents frames. **The window is black**: that is the game's cleared surface, because point 4 is
-unfinished. The shell reads 927 of the first 1,024 shaders of a run and can write a PC shader for 479 of 505
-pixel and 224 of 227 vertex shaders, but none has been given to the graphics card yet, so every draw is held.
+unfinished. The shell reads 927 of the first 1,024 shaders of a run and can write a PC shader for 496 of 505
+pixel and all 227 vertex shaders, but none has been given to the graphics card yet, so every draw is held.
 The exact state is the "Current state" block at the top of [FINDINGS.md](FINDINGS.md).
 
 ## Files
