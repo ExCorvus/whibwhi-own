@@ -365,3 +365,23 @@ written from.
 2. Control flow: blocks, branches, loops, as a structure a shader language can express.
 3. The in-between form and the most used instructions (section 13's list) on top of it.
 4. The back end, once decided.
+
+## 16. Step 1 of the order of work is done: which register carries what (boots b97-b99; measured)
+
+The module that holds a program also says how each resource reaches it (docs/exe-map/SHADER-PATH.md
+section 11, `read_module_tables` in shell/shader_program.*). For a translator this means:
+
+- A program does not name resources. It loads a descriptor from memory at [scalar register + offset] and uses
+  the loaded words in an image, buffer or sampler instruction. The first table turns (scalar register, offset)
+  into the register number the shader's source used; the container's public 'PSV0' part turns that number
+  into a resource type and a register space. Together they give the declaration a PC shader needs.
+- Constants and buffer addresses that arrive directly in scalar registers are named by the first table too.
+- The scalar registers of the root parameters are known without running anything: they are given out in order,
+  from s8 (vertex, pixel) or s4 (compute), each parameter taking as many as its count word says.
+
+Counted over all 581 modules of a run, with no exception to the three statements above. What is left open is
+listed in FINDINGS.md: ten modules with an entry kind that is not understood, fixed samplers, and the registers
+a program reads that are not root parameters (s12 in most pixel programs, s5-s7 in compute programs, s4 in
+vertex programs).
+
+Next in the order of work: control flow, then the in-between form.
