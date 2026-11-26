@@ -60,8 +60,8 @@ target_link_libraries(xgameruntime PRIVATE onecore)
 # Shell core: image mapper, import table reader, image loader, host-library resolver, console imports, flat
 # hosting model.
 add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp loader.cpp
-                               offline.cpp shader_container.cpp shader_isa.cpp shader_translate.cpp shader_walk.cpp
-                               spirv.cpp)
+                               offline.cpp shader_container.cpp shader_isa.cpp shader_names.cpp shader_translate.cpp
+                               shader_walk.cpp spirv.cpp)
 target_include_directories(whiwhi_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(whiwhi_shell PUBLIC whiwhi_seat)
 
@@ -138,6 +138,11 @@ add_test(NAME shader_container COMMAND test_shader_container)
 add_executable(test_shader_walk tests/test_shader_walk.cpp)
 target_link_libraries(test_shader_walk PRIVATE whiwhi_shell)
 add_test(NAME shader_walk COMMAND test_shader_walk)
+
+# The public names of the instructions the walk reads, and the groups a translator works through.
+add_executable(test_shader_names tests/test_shader_names.cpp)
+target_link_libraries(test_shader_names PRIVATE whiwhi_shell)
+add_test(NAME shader_names COMMAND test_shader_names)
 
 # The network boundary: every imported network name is either refused with its documented failure value and error,
 # or passed through; the log line appears once per function; the counters count every call.
