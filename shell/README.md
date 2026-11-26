@@ -21,7 +21,12 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 - `console.hpp` / `console.cpp` — the few imports that are not answered by the same-named library: `VirtualFree`
   goes to the memory library, `GetModuleHandleA/W(NULL)` answers with the loaded game image, and file calls on
   the drive letter the console mounts the game's package as are answered from the game folder, read-only. Also
-  connects the allocation routines the game exports to the memory library.
+  connects the allocation routines the game exports to the memory library, and connects the game's network
+  imports to the refusals in `offline.cpp`.
+- `offline.hpp` / `offline.cpp` - the network boundary: a refusal for every imported function that would open a
+  socket, resolve a name or make an HTTP request (documented failure value and error, one log line per function,
+  a counter). Harmless helpers go to the real libraries. What each import gets is in
+  `docs/console-libs/network.md`.
 - `hosting.hpp` / `hosting.cpp` — address model for showing the game's memory to the GPU: one range,
   `device_address = heap_base + (game_va - flat_base)`. Not yet connected to a GPU.
 - `shader_container.hpp` / `shader_container.cpp` — recognises the two headers the game's shader bytes arrive
@@ -66,8 +71,8 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 
 ## Tests
 
-`tests/` holds 14 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
-shader_container, acpxapu, chad, xcrdapi, gfx_stubs). They use made-up inputs only: no game files, no GPU.
+`tests/` holds 15 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
+shader_container, offline, acpxapu, chad, xcrdapi, gfx_stubs). They use made-up inputs only: no game files, no GPU.
 
 ## Build and test
 
