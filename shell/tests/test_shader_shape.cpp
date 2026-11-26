@@ -174,6 +174,31 @@ int main() {
         CHECK(register_set_text(s.vector_inputs) == "-");
     }
 
+    // A no-operation reads nothing, whatever its fields hold: here the two-word form (format 110101, opcode
+    // 384) with a destination field of 5, source fields naming v200, v201 and the constant word that follows,
+    // and the one-word form (opcode 0) with a source field naming v77. The real add after them reads v1 and v2.
+    {
+        std::vector<std::uint32_t> q;
+        q.push_back(0xD4000000u | (384u << 16) | 5u);
+        q.push_back((256u + 200u) | ((256u + 201u) << 9) | (255u << 18));
+        q.push_back(0x12345678u);                       // the constant word the no-operation carries
+        q.push_back(0x7E000000u | (9u << 17) | (256u + 77u));  // one-word no-operation
+        q.push_back(vop2(3, 3, 2, 256 + 1));            // v3 = v1 + v2
+        q.push_back(kEndOfProgramWord);
+        const std::vector<std::uint8_t> c = bytes_of(q);
+        const DecodedShader d = decode_shader(c.data(), c.size(), ShaderStage::kCompute);
+        CHECK(d.ok);
+        CHECK(d.instructions.size() == 4);
+        if (d.instructions.size() == 4) {
+            CHECK(d.instructions[0].format == WalkFormat::kVop3 && d.instructions[0].opcode == 384);
+            CHECK(d.instructions[0].has_constant_word && d.instructions[0].constant_word == 0x12345678u);
+            CHECK(d.instructions[1].format == WalkFormat::kVop1 && d.instructions[1].opcode == 0);
+        }
+        const ProgramShape s = shape_of(d);
+        CHECK(register_set_text(s.vector_inputs) == "v1-v2");
+        CHECK(register_set_text(s.scalar_inputs) == "-");
+    }
+
     CHECK(std::string(resource_use_name(ResourceUse::kImage)) == "image");
     CHECK(std::string(resource_use_name(ResourceUse::kConstantBuffer)) == "constant buffer");
 
