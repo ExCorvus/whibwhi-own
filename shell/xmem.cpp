@@ -803,6 +803,47 @@ void XMemFreeDefault(void* pointer, unsigned long long attributes) {
     XMemFree(pointer, attributes);
 }
 
+int XMemGetWorkingSetStatistics(unsigned long kind, void* statistics) {
+    Guard guard;
+    ++state().stats.calls_working_set_statistics;
+    try {
+        if (!statistics) {
+            ++state().stats.refused;
+            return 0;
+        }
+        MEMORYSTATUSEX mem{};
+        mem.dwLength = sizeof(mem);
+        GlobalMemoryStatusEx(&mem);
+        std::memset(statistics, 0, 0x78);
+        auto* q = static_cast<unsigned long long*>(statistics);
+        q[0] = mem.ullTotalPhys;
+        q[1] = mem.ullAvailPhys;
+        q[2] = mem.ullTotalPageFile;
+        q[3] = mem.ullAvailPageFile;
+        note("XMemGetWorkingSetStatistics kind 0x%lx: answered with the machine's numbers "
+             "(total %llu, available %llu)\n",
+             kind, mem.ullTotalPhys, mem.ullAvailPhys);
+        return 1;
+    } catch (...) {
+        ++state().stats.host_failures;
+        return 0;
+    }
+}
+
+int XMemIsToolsMemAvailable(void) {
+    Guard guard;
+    ++state().stats.calls_tools_mem_available;
+    note("XMemIsToolsMemAvailable: answered yes (a PC has no reserved tools slice)\n");
+    return 1;
+}
+
+int XMemTransferMemory(unsigned long kind, unsigned long long bytes) {
+    Guard guard;
+    ++state().stats.calls_transfer_memory;
+    note("XMemTransferMemory kind %lu, %llu bytes: nothing to move on a PC, answered success\n", kind, bytes);
+    return 1;
+}
+
 int __stdcall whiwhi_xmem_virtual_free(void* address, unsigned long long size, unsigned long type) {
     Guard guard;
     ++state().stats.calls_virtual_free;
