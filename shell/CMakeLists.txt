@@ -19,7 +19,7 @@ target_link_libraries(xmem PRIVATE onecore)
 # The console's graphics library: the three imported entry points answered on a PC (a wrapped real D3D12
 # device behind D3D12XboxCreateDevice).
 add_library(d3d12_xs SHARED d3d12_xs.cpp inflate.cpp shader_container.cpp shader_isa.cpp shader_names.cpp
-                            shader_program.cpp shader_shape.cpp shader_walk.cpp)
+                            shader_program.cpp shader_shape.cpp shader_walk.cpp shader_flow.cpp)
 target_compile_definitions(d3d12_xs PRIVATE WHIWHI_D3D12_XS_BUILD)
 target_link_libraries(d3d12_xs PRIVATE onecore)
 
@@ -61,8 +61,9 @@ target_link_libraries(xgameruntime PRIVATE onecore)
 # Shell core: image mapper, import table reader, image loader, host-library resolver, console imports, flat
 # hosting model.
 add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp inflate.cpp
-                               loader.cpp offline.cpp shader_container.cpp shader_isa.cpp shader_names.cpp
-                               shader_program.cpp shader_shape.cpp shader_translate.cpp shader_walk.cpp spirv.cpp)
+                               loader.cpp offline.cpp shader_container.cpp shader_flow.cpp shader_isa.cpp
+                               shader_meaning.cpp shader_names.cpp shader_program.cpp shader_shape.cpp
+                               shader_translate.cpp shader_walk.cpp spirv.cpp)
 target_include_directories(whiwhi_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(whiwhi_shell PUBLIC whiwhi_seat)
 
@@ -153,6 +154,16 @@ add_test(NAME shader_shape COMMAND test_shader_shape)
 add_executable(test_shader_program tests/test_shader_program.cpp)
 target_link_libraries(test_shader_program PRIVATE whiwhi_shell)
 add_test(NAME shader_program COMMAND test_shader_program)
+
+# The control flow of a decoded program: blocks, edges, dominators, loops, and the region tree (hand-built words).
+add_executable(test_shader_flow tests/test_shader_flow.cpp)
+target_link_libraries(test_shader_flow PRIVATE whiwhi_shell)
+add_test(NAME shader_flow COMMAND test_shader_flow)
+
+# What the covered arithmetic, move, compare and bit instructions compute, on one hand-built lane.
+add_executable(test_shader_meaning tests/test_shader_meaning.cpp)
+target_link_libraries(test_shader_meaning PRIVATE whiwhi_shell)
+add_test(NAME shader_meaning COMMAND test_shader_meaning)
 
 # The network boundary: every imported network name is either refused with its documented failure value and error,
 # or passed through; the log line appears once per function; the counters count every call.
