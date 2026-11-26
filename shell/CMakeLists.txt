@@ -33,6 +33,11 @@ add_library(xapu SHARED xapu.cpp)
 target_compile_definitions(xapu PRIVATE WHIWHI_XAPU_BUILD)
 target_link_libraries(xapu PRIVATE onecore)
 
+# The console's audio DSP library: five entry points. A skeleton: each one logs its name and arguments once and
+# answers failure, until the shell has a PC path for the APU's command channel.
+add_library(chad SHARED chad.cpp)
+target_compile_definitions(chad PRIVATE WHIWHI_CHAD_BUILD)
+
 # Shell core: image mapper, import table reader, image loader, host-library resolver, console imports, flat
 # hosting model.
 add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp loader.cpp
@@ -98,3 +103,8 @@ add_test(NAME shader COMMAND test_shader)
 add_executable(test_acpxapu tests/test_acpxapu.cpp)
 add_dependencies(test_acpxapu AcpHal xapu)
 add_test(NAME acpxapu COMMAND test_acpxapu)
+
+add_executable(test_chad tests/test_chad.cpp)
+target_include_directories(test_chad PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_dependencies(test_chad chad)
+add_test(NAME chad COMMAND test_chad $<TARGET_FILE:chad>)
