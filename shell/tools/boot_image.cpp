@@ -62,6 +62,12 @@ void dump_vtable(std::uintptr_t rcx) {
     if (rcx <= 0x10000 || rcx >= 0x7FFFFFFFFFFF) {
         return;
     }
+    // Only read what is readable: a fault here would run this handler again and add noise to the log.
+    MEMORY_BASIC_INFORMATION readable{};
+    if (VirtualQuery(reinterpret_cast<const void*>(rcx), &readable, sizeof(readable)) != sizeof(readable) ||
+        readable.State != MEM_COMMIT || (readable.Protect & 0xFF) == PAGE_NOACCESS || (readable.Protect & PAGE_GUARD)) {
+        return;
+    }
     __try {
         std::fprintf(stderr, " [rcx] 0x%llx bytes:", static_cast<unsigned long long>(rcx));
         for (int i = 0; i < 0x20; ++i) {
@@ -304,6 +310,23 @@ int main(int argc, char** argv) {
     if (library_folder && !host.add_directory(library_folder)) {
         std::printf("cannot use the library folder %s\n", library_folder);
         return 1;
+    }
+
+    // The console's package drive (G:\) is answered from the folder with the game's files: the library folder
+    // when one is given, otherwise the folder the image file is in.
+    {
+        std::string folder = library_folder ? library_folder : image_path;
+        if (!library_folder) {
+            const std::size_t slash = folder.find_last_of("\\/");
+            folder = slash == std::string::npos ? "." : folder.substr(0, slash);
+        }
+        wchar_t full[MAX_PATH * 2] = {};
+        const std::wstring wide(folder.begin(), folder.end());
+        if (GetFullPathNameW(wide.c_str(), MAX_PATH * 2, full, nullptr) > 0) {
+            set_package_root(full);
+            SetEnvironmentVariableW(L"WHIWHI_GAME_DIR", full);  // the storage library maps onto the same folder
+            std::fprintf(stderr, "[boot] the package drive G:\\ is answered from %ls (read-only)\n", full);
+        }
     }
 
     AddVectoredExceptionHandler(1, &on_exception);
