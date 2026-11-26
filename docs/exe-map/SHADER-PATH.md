@@ -259,9 +259,13 @@ corrects two expectations above.
   description two blocks, each contain exactly one end-of-program word of the hardware instruction set
   (0xBF810000), some way before the block's end. Those blocks are the precompiled programs. The other blocks of
   a description have no such word; what they hold (per-stage data) is not understood.
-- **Not established:** whether a program starts at its block's first byte (the shell's instruction reader knows
-  too few instruction formats to walk a whole program); what follows the end-of-program word inside a block;
-  which block of a slot 57 description belongs to which stage.
+- **Established in boots b86-b87** with a complete reader of instruction lengths (`shell/shader_walk.*`): a
+  program starts at its block's first byte. Of the first 1,024 distinct program blocks of a run, a walk from
+  the first word lands exactly on the end-of-program word in 997. After the end word a block holds filler
+  words (the instruction set's "code end" word, about 50 per program), some zero words and, in some
+  programs, other words (about 1,400 in all; probably constants the program reads, not checked).
+- **Not established:** which block of a slot 57 description belongs to which stage; what the 27 programs
+  hold that the walk cannot read (see `docs/SHADER-TRANSLATOR.md` section 13).
 - **Threads.** Three requests come from the thread that created the device. Every other request comes from the
   game's worker threads, tens of thousands within the first twenty seconds. The shell serves pipeline requests on
   the device's own thread only (rule 7); what to do with requests from the game's own worker threads is ExCorvus's
