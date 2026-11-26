@@ -25,7 +25,8 @@ target_link_libraries(d3d12_xs PRIVATE onecore)
 
 # Shell core: image mapper, import table reader, image loader, host-library resolver, console imports, flat
 # hosting model.
-add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp loader.cpp)
+add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp loader.cpp
+                               shader_isa.cpp shader_translate.cpp spirv.cpp)
 target_include_directories(whiwhi_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(whiwhi_shell PUBLIC whiwhi_tls)
 
@@ -78,3 +79,7 @@ add_test(NAME xmem COMMAND test_xmem)
 add_executable(test_d3d12_xs tests/test_d3d12_xs.cpp)
 add_dependencies(test_d3d12_xs d3d12_xs)
 add_test(NAME d3d12_xs COMMAND test_d3d12_xs)
+
+add_executable(test_shader tests/test_shader.cpp)
+target_link_libraries(test_shader PRIVATE whiwhi_shell)
+add_test(NAME shader COMMAND test_shader)
