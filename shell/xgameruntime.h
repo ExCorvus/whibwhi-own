@@ -22,6 +22,7 @@ WHIWHI_XGAMERUNTIME_API long __stdcall InitializeApiImplEx(void* a, void* b, voi
 WHIWHI_XGAMERUNTIME_API long __stdcall InitializeApiImplEx2(void* a, void* b, void* c, void* d);
 WHIWHI_XGAMERUNTIME_API long __stdcall QueryApiImpl(const void* iid, void** out);
 WHIWHI_XGAMERUNTIME_API long __stdcall UninitializeApiImpl(void* a);
+WHIWHI_XGAMERUNTIME_API long __stdcall XErrorReport(void* a, void* b, void* c);
 
 #ifdef __cplusplus
 }
