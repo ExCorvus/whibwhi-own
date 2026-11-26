@@ -332,6 +332,9 @@ ULONG __stdcall w_addref(Wrap* self) {
 void forget_descriptor_heap(Wrap* heap);
 void give_back_requested_block(Wrap* surface);
 void forget_console_signature(const Wrap* signature);
+bool can_read(const void* address, std::size_t bytes);
+extern SRWLOCK g_rtv_lock;
+extern std::unordered_map<unsigned long long, unsigned long long> g_rtv_at_pc;
 
 ULONG __stdcall w_release(Wrap* self) {
     const long r = self->refs.fetch_sub(1) - 1;
@@ -496,6 +499,7 @@ constexpr unsigned long long kDescriptorHeapAttributes = 0x00800004ull;
 
 struct HeapRange {
     Wrap* wrap;
+    unsigned int type;          // the heap type the image asked for
     unsigned long long title;   // start as the image sees it
     unsigned long long bytes;
     unsigned long long pc_cpu;  // the PC heap's own start handles
@@ -510,14 +514,32 @@ void* xmem_function(const char* name) {
 }
 
 void forget_descriptor_heap(Wrap* heap) {
+    unsigned int type = 0;
+    unsigned long long pc_cpu = 0, bytes = 0;
     AcquireSRWLockExclusive(&g_heaps_lock);
     for (std::size_t i = 0; i < g_heaps.size(); ++i) {
         if (g_heaps[i].wrap == heap) {
+            type = g_heaps[i].type;
+            pc_cpu = g_heaps[i].pc_cpu;
+            bytes = g_heaps[i].bytes;
             g_heaps.erase(g_heaps.begin() + static_cast<std::ptrdiff_t>(i));
             break;
         }
     }
     ReleaseSRWLockExclusive(&g_heaps_lock);
+    if (type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV && pc_cpu) {
+        // A gone render-target heap's PC positions must not be taken for rehydrated ones if the PC library later
+        // puts another heap at the same addresses.
+        AcquireSRWLockExclusive(&g_rtv_lock);
+        for (auto it = g_rtv_at_pc.begin(); it != g_rtv_at_pc.end();) {
+            if (it->first >= pc_cpu && it->first < pc_cpu + bytes) {
+                g_rtv_at_pc.erase(it++);
+            } else {
+                ++it;
+            }
+        }
+        ReleaseSRWLockExclusive(&g_rtv_lock);
+    }
     if (heap->title_address) {
         if (const auto release = reinterpret_cast<void (*)(void*, unsigned long long)>(xmem_function("XMemFree"))) {
             release(reinterpret_cast<void*>(heap->title_address), kDescriptorHeapAttributes);
@@ -660,6 +682,159 @@ bool is_target_heap_type(unsigned int type) {
     return type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV || type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
 }
 
+// The image treats a descriptor as 32 bytes of its own memory, copies those bytes as raw memory and never reads
+// what is inside (docs/exe-map/DESCRIPTORS.md C.2/C.3). A render-target heap is one whose address the image chose,
+// so those bytes are here too. They only name a view: the shell's table keeps the resource and the description
+// needed to make the same PC view again, and each PC position remembers the number of the view it holds.
+constexpr unsigned long long kRtvNoteMagic = 0x5748565254565431ull;
+constexpr unsigned long long kRtvNoteKind = 1;  // a render-target view
+struct RtvNote {
+    unsigned long long magic;
+    unsigned long long kind;
+    unsigned long long view;  // one-based number in g_rtv_views
+    unsigned long long spare;
+};
+static_assert(sizeof(RtvNote) == 32, "a note is one descriptor of the image's memory");
+
+struct RtvRecord {
+    ID3D12Resource* resource;
+    bool has_description;
+    D3D12_RENDER_TARGET_VIEW_DESC description;
+};
+SRWLOCK g_rtv_lock = SRWLOCK_INIT;
+std::vector<RtvRecord> g_rtv_views;  // index = view number - 1
+std::unordered_map<unsigned long long, unsigned long long> g_rtv_at_pc;  // PC position -> view number
+
+// A handle as the image or the PC library has it, when it lies in a type-2 heap whose image-side memory we know:
+// the same position as the image's address, the PC handle and the end of the image's memory.
+bool target_heap_of_handle(unsigned long long handle, unsigned long long& title, unsigned long long& pc,
+                           unsigned long long& title_end) {
+    bool found = false;
+    AcquireSRWLockShared(&g_heaps_lock);
+    for (const HeapRange& r : g_heaps) {
+        if (r.type != D3D12_DESCRIPTOR_HEAP_TYPE_RTV || !r.title) {
+            continue;
+        }
+        if (handle >= r.title && handle < r.title + r.bytes) {
+            title = handle;
+            pc = r.pc_cpu + (handle - r.title);
+            title_end = r.title + r.bytes;
+            found = true;
+            break;
+        }
+        if (r.pc_cpu && handle >= r.pc_cpu && handle < r.pc_cpu + r.bytes) {
+            title = r.title + (handle - r.pc_cpu);
+            pc = handle;
+            title_end = r.title + r.bytes;
+            found = true;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_heaps_lock);
+    return found;
+}
+
+bool note_fits(unsigned long long title, unsigned long long title_end) {
+    return title <= title_end && title_end - title >= sizeof(RtvNote);
+}
+
+bool read_rtv_note(unsigned long long title, unsigned long long title_end, RtvNote& note) {
+    if (!note_fits(title, title_end)) {
+        return false;
+    }
+    std::memcpy(&note, reinterpret_cast<const void*>(title), sizeof(note));
+    return note.magic == kRtvNoteMagic && note.kind == kRtvNoteKind && note.view != 0;
+}
+
+// A note of zero clears the position: the image's bytes say there is no view named there any more.
+void write_rtv_note(unsigned long long title, unsigned long long title_end, unsigned long long view) {
+    if (!note_fits(title, title_end)) {
+        return;
+    }
+    RtvNote note{};
+    if (view) {
+        note.magic = kRtvNoteMagic;
+        note.kind = kRtvNoteKind;
+        note.view = view;
+    }
+    std::memcpy(reinterpret_cast<void*>(title), &note, sizeof(note));
+}
+
+bool target_note_at_handle(unsigned long long handle, RtvNote& note) {
+    unsigned long long title = 0, pc = 0, end = 0;
+    return target_heap_of_handle(handle, title, pc, end) && read_rtv_note(title, end, note);
+}
+
+// The resource and description are kept exactly as the call gave them to the PC library; no new lifetime rule.
+unsigned long long note_rtv_view(ID3D12Resource* resource, const void* description) {
+    RtvRecord record{};
+    record.resource = resource;
+    if (description && can_read(description, sizeof(record.description))) {
+        record.has_description = true;
+        std::memcpy(&record.description, description, sizeof(record.description));
+    }
+    AcquireSRWLockExclusive(&g_rtv_lock);
+    const auto number = static_cast<unsigned long long>(g_rtv_views.size()) + 1;
+    g_rtv_views.push_back(record);
+    ReleaseSRWLockExclusive(&g_rtv_lock);
+    return number;
+}
+
+bool rtv_view_record(unsigned long long number, RtvRecord& record) {
+    bool found = false;
+    AcquireSRWLockShared(&g_rtv_lock);
+    if (number && number <= g_rtv_views.size()) {
+        record = g_rtv_views[static_cast<std::size_t>(number - 1)];
+        found = true;
+    }
+    ReleaseSRWLockShared(&g_rtv_lock);
+    return found;
+}
+
+void set_rtv_number_at_pc(unsigned long long pc, unsigned long long number) {
+    AcquireSRWLockExclusive(&g_rtv_lock);
+    if (number) {
+        g_rtv_at_pc[pc] = number;
+    } else {
+        g_rtv_at_pc.erase(pc);
+    }
+    ReleaseSRWLockExclusive(&g_rtv_lock);
+}
+
+// If the PC position does not hold the view its note names, make that view there again before it is used.
+bool rehydrate_rtv(unsigned long long pc, unsigned long long number) {
+    RtvRecord record{};
+    if (!g_device || !rtv_view_record(number, record)) {
+        return false;
+    }
+    unsigned long long held = 0;
+    AcquireSRWLockShared(&g_rtv_lock);
+    const auto it = g_rtv_at_pc.find(pc);
+    if (it != g_rtv_at_pc.end()) {
+        held = it->second;
+    }
+    ReleaseSRWLockShared(&g_rtv_lock);
+    if (held != number) {
+        static_cast<ID3D12Device*>(g_device->pc)->CreateRenderTargetView(
+            record.resource, record.has_description ? &record.description : nullptr,
+            D3D12_CPU_DESCRIPTOR_HANDLE{static_cast<SIZE_T>(pc)});
+        set_rtv_number_at_pc(pc, number);
+        note_target_view(pc, record.resource != nullptr);
+    }
+    return true;
+}
+
+// Move a note with an image-side copy. The caller passes the source notes gathered before any writing, so a copy
+// of overlapping ranges still moves what was there when the copy began.
+void copy_rtv_note(unsigned long long to, const RtvNote* note) {
+    unsigned long long title = 0, pc = 0, end = 0;
+    if (!target_heap_of_handle(to, title, pc, end)) {
+        return;
+    }
+    write_rtv_note(title, end, note ? note->view : 0);
+    set_rtv_number_at_pc(pc, note ? note->view : 0);
+}
+
 // Device methods that take descriptor handles by value (one 8-byte value each). First and Second are the
 // positions of the handle arguments after the object (Second 0 = none).
 template <int Slot, int First, int Second>
@@ -674,7 +849,18 @@ void __stdcall cpu_handle_thunk(Wrap* self, void* a1, void* a2, void* a3, void* 
     if (Slot == 20 || Slot == 21) {
         // A render-target or depth view (resource, description, handle): a view of no resource is not one a
         // clear or a binding can use.
-        note_target_view(reinterpret_cast<unsigned long long>(a[First]), a[1] != nullptr);
+        const unsigned long long pc = reinterpret_cast<unsigned long long>(a[First]);
+        note_target_view(pc, a[1] != nullptr);
+        if (Slot == 20) {
+            unsigned long long title = 0, heap_pc = 0, end = 0;
+            // a3 is the destination as the image has it, before it was moved to the PC heap.
+            if (target_heap_of_handle(reinterpret_cast<unsigned long long>(a3), title, heap_pc, end)) {
+                const unsigned long long number =
+                    note_rtv_view(static_cast<ID3D12Resource*>(a[1]), a[2]);
+                write_rtv_note(title, end, number);
+                set_rtv_number_at_pc(heap_pc, number);
+            }
+        }
     } else if (Slot == 24) {
         // The simple copy (count, to, from, heap type): a copied view is a view where it lands.
         const unsigned type = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(a[4]));
@@ -684,9 +870,20 @@ void __stdcall cpu_handle_thunk(Wrap* self, void* a1, void* a2, void* a3, void* 
                 static_cast<D3D12_DESCRIPTOR_HEAP_TYPE>(type));
             const unsigned long long to = reinterpret_cast<unsigned long long>(a[2]);
             const unsigned long long from = reinterpret_cast<unsigned long long>(a[3]);
-            for (unsigned i = 0; i < count && i < 65536u; ++i) {
-                note_target_view(to + static_cast<unsigned long long>(i) * step,
-                                 is_target_view(from + static_cast<unsigned long long>(i) * step));
+            const std::size_t n = std::min<std::size_t>(count, 65536u);
+            std::vector<RtvNote> notes(n);
+            std::vector<bool> have(n, false);
+            if (type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV) {
+                for (std::size_t i = 0; i < n; ++i) {
+                    have[i] = target_note_at_handle(from + static_cast<unsigned long long>(i) * step, notes[i]);
+                }
+            }
+            for (std::size_t i = 0; i < n; ++i) {
+                const unsigned long long at = to + static_cast<unsigned long long>(i) * step;
+                note_target_view(at, is_target_view(from + static_cast<unsigned long long>(i) * step));
+                if (type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV) {
+                    copy_rtv_note(at, have[i] ? &notes[i] : nullptr);
+                }
             }
         }
     }
@@ -723,8 +920,18 @@ void __stdcall w_device_copy_descriptors(Wrap* self, unsigned int dest_count, co
         };
         const std::vector<unsigned long long> to = flatten(dest, dest_sizes);
         const std::vector<unsigned long long> from = flatten(source, source_sizes);
+        std::vector<RtvNote> notes(from.size());
+        std::vector<bool> have(from.size(), false);
+        if (type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV) {
+            for (std::size_t i = 0; i < from.size(); ++i) {
+                have[i] = target_note_at_handle(from[i], notes[i]);
+            }
+        }
         for (std::size_t i = 0; i < to.size() && i < from.size(); ++i) {
             note_target_view(to[i], is_target_view(from[i]));
+            if (type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV) {
+                copy_rtv_note(to[i], have[i] ? &notes[i] : nullptr);
+            }
         }
     }
 }
@@ -919,10 +1126,23 @@ void __stdcall w_list_root_constants(Wrap* self, unsigned int index, unsigned in
     }
 }
 
-// A render-target or depth handle as the image has it -> the PC handle, if a view was made there.
+// A render-target or depth handle as the image has it -> the PC handle, if a view was made there. A type-2
+// position with a note is remade from the shell's record when it does not yet hold the view the note names.
 bool target_view_to_pc(unsigned long long handle, D3D12_CPU_DESCRIPTOR_HANDLE& pc) {
     unsigned long long position = 0;
-    if (!cpu_handle_in_heap(handle, position) || !is_target_view(position)) {
+    if (!cpu_handle_in_heap(handle, position)) {
+        return false;
+    }
+    unsigned long long title = 0, heap_pc = 0, end = 0;
+    RtvNote note{};
+    if (target_heap_of_handle(handle, title, heap_pc, end) && read_rtv_note(title, end, note)) {
+        if (!rehydrate_rtv(heap_pc, note.view)) {
+            return false;
+        }
+        pc.ptr = static_cast<SIZE_T>(heap_pc);
+        return true;
+    }
+    if (!is_target_view(position)) {
         return false;
     }
     pc.ptr = static_cast<SIZE_T>(position);
@@ -948,8 +1168,9 @@ void __stdcall w_list_set_render_targets(Wrap* self, unsigned int count, const u
         const unsigned step = ok ? static_cast<ID3D12Device*>(g_device->pc)->GetDescriptorHandleIncrementSize(
                                        D3D12_DESCRIPTOR_HEAP_TYPE_RTV)
                                  : 0u;
+        D3D12_CPU_DESCRIPTOR_HANDLE next{};
         for (unsigned int i = 1; ok && i < count; ++i) {
-            ok = is_target_view(pc_targets[0].ptr + static_cast<unsigned long long>(i) * step);
+            ok = target_view_to_pc(pc_targets[0].ptr + static_cast<unsigned long long>(i) * step, next);
         }
     }
     if (ok && depth) {
@@ -2588,6 +2809,7 @@ HRESULT __stdcall w_device_slot14(Wrap* self, const D3D12_DESCRIPTOR_HEAP_DESC* 
     }
     HeapRange range{};
     const unsigned step = device->GetDescriptorHandleIncrementSize(desc->Type);
+    range.type = static_cast<unsigned>(desc->Type);
     range.bytes = static_cast<unsigned long long>(desc->NumDescriptors) * step;
     range.pc_cpu = heap->GetCPUDescriptorHandleForHeapStart().ptr;
     if (desc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
