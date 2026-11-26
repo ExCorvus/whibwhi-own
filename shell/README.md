@@ -48,6 +48,14 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
   out differently.
 - `shader_shape.hpp` / `shader_shape.cpp` — what a decoded program expects and uses: registers read
   before they are written, what it exports, and where each image, sampler and buffer descriptor comes from.
+- `shader_flow.hpp` / `shader_flow.cpp` — the control flow of a decoded program: its blocks, branches,
+  dominators and loops, and a tree of nested ifs and loops when the flow can be written that way. It says
+  so, with a reason, when it cannot. Run in memory on the game's programs: 701 of 927 analysed (the rest are
+  vertex programs that call through a register), 538 of those written as a tree.
+- `shader_meaning.hpp` / `shader_meaning.cpp` — what the most used arithmetic, move, compare and bit
+  instructions compute, written as a one-lane reference interpreter and checked on hand-built words. It
+  refuses memory, image, interpolation, export and branch instructions, and every case its public sources
+  do not state. `docs/SHADER-MEANINGS.md` lists each instruction with its source.
 - `shader_translate.hpp` / `shader_translate.cpp` — translates a console shader to SPIR-V, kept in memory. Today
   it handles straight-line compute shaders of a handful of instructions and refuses everything else.
 - `spirv.hpp` / `spirv.cpp` — our own small SPIR-V writer.
@@ -92,8 +100,8 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 
 ## Tests
 
-`tests/` holds 21 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
-shader_container, shader_program, shader_walk, shader_names, shader_shape, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
+`tests/` holds 23 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
+shader_container, shader_program, shader_walk, shader_names, shader_shape, shader_flow, shader_meaning, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
 game files, no GPU.
 
 ## Build and test
