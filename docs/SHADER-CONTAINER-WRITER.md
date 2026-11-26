@@ -370,3 +370,23 @@ Nothing is written to disk, and no shader state is kept between calls.
 - **Proof is disassembly, not execution.** `D3DDisassemble` accepting a container proves the bytes parse as
   the intended program. It does not prove the PC driver accepts the container for pipeline creation, because
   that needs a device and a GPU run, which this work did not do.
+
+## 9. Added for the pass that writes a PC shader for a console program
+
+- **An instruction from a stored list of operands** (`emit(opcode, flags, operands, count)`), beside the form
+  that takes a braced list.
+- **More opcodes in the enumeration:** nop, rcp, f32tof16, f16tof32, ubfe, ibfe, bfi, bfrev, countbits,
+  firstbit_hi, firstbit_lo, firstbit_shi, uaddc, usubb, swapc, sincos, deriv_rtx, deriv_rty, resinfo, lod,
+  gather4, ld_ms, sample_c, sample_c_lz, sample_d. The numbers were read in the opcode list of the PC graphics
+  library's own shader reader (dxbc-spirv, `dxbc_types.h`). Checked by the system disassembler in the test:
+  nop, rcp, f32tof16, f16tof32, ubfe and `discard_z`. The others are numbers only so far: no test writes them.
+- **One component of a constant buffer element** as a source (`constant_buffer_scalar`): the operand's
+  selection mode is "one component" instead of the swizzle. Disassembles as `CB0[500][0].y`.
+- **A sampler or a resource taken from its declared range at run time** (`sampler_source_indexed`,
+  `resource_source_indexed`): the second index is given as "a number plus the value of a register component" -
+  the three bits at 22 + 3n of the operand token say how index n is given, 0 for a number and 3 for a number
+  plus a relative operand, which follows the number (read in the same reader, `dxbc_parser.h`). With a sampler
+  declared over a range without an upper end this disassembles as `dcl_sampler S0[0:*], mode_default,
+  space=22344` and `S0[r1.x + 0]`. Checked for the sampler; the resource form is written the same way and not
+  checked.
+- Still true of all of it: the proof is disassembly, not a graphics device.
