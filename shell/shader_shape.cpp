@@ -181,6 +181,13 @@ ProgramShape shape_of(const DecodedShader& decoded) {
             case WalkFormat::kVopc:
             case WalkFormat::kVop3:
             case WalkFormat::kVop3p: {
+                // A no-operation reads and writes nothing, whatever its operand fields hold (public tables:
+                // VOP1 0 and its VOP3 form 384 are v_nop). Every program of the game begins with two of them
+                // carrying constant words (an identification); their fields are not register uses.
+                if ((ins.format == WalkFormat::kVop1 && ins.opcode == 0) ||
+                    (ins.format == WalkFormat::kVop3 && ins.opcode == 384)) {
+                    break;
+                }
                 const unsigned width = is_64_bit(name) ? 2 : 1;
                 for (unsigned i = 0; i < ins.source_count; ++i) {
                     const Operand& src = ins.src[i];
