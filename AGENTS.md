@@ -6,8 +6,8 @@ instead of assuming.**
 
 ## What this is
 
-A shell that runs the original Grand Theft Auto VI executable (Xbox Series 1.0.2.1) on a PC. The game file is used
-unmodified from the user's own copy. The shell (`shell/`, our own C++17 code) places the game in memory, answers
+A shell-based weave that runs the original Grand Theft Auto VI executable (Xbox Series 1.0.2.1) on a PC. The game file is used
+unmodified from the user's own copy. The weave (`weave/`, our own C++17 code) places the game in memory, answers
 the console-only libraries the game imports, and is meant to show the game's memory to the PC's GPU. It is not an
 emulator: no console hardware is recreated.
 
@@ -25,7 +25,7 @@ What works today, and where a run currently stops, is in the **Current state** b
 4. **Host the game; do not rewrite it.** When the game fails because something it expects is missing, provide
    that thing (a library function, memory, a file path). Do not change the game's own checks so that a failure
    looks like success, and do not return success from a library function for work that was not done.
-   The one place the shell changes game code is `shell/loader.cpp` (`nop_loader_stubs`): in its in-memory copy
+   The one place the weave changes game code is `weave/loader.cpp` (`nop_loader_stubs`): in its in-memory copy
    only, it replaces breakpoint bytes in stubs that the game's tables point at, and a breakpoint that directly
    follows an indirect call. Do not add other changes to game code without ExCorvus's decision.
 5. **Keep it in memory.** Do not copy the game's memory or its whole shader set to disk. Shaders are translated
@@ -38,19 +38,19 @@ What works today, and where a run currently stops, is in the **Current state** b
    `VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT`. The earlier ban on building pipelines on another thread
    was withdrawn by ExCorvus on 2026-11-26. It was not a measured crash: it came from an instruction in the earlier
    attempt to have its helpers build pipelines one at a time. The game asks for its pipelines from its worker
-   threads, and the shell
+   threads, and the weave
    builds each one on the thread that asks, side by side (4,800 built one at a time in boots b160-b161 without a
    fault). If the driver or the machine fails during a run, write it down in FINDINGS.md before anything else.
 8. **No third-party code in the repository.** vkd3d-proton (LGPL-2.1) is built separately by the user and loaded
    as a DLL; see [docs/BUILD-AND-RUN.md](docs/BUILD-AND-RUN.md) and [NOTICE.md](NOTICE.md).
-9. **The earlier attempt is not a reference.** Before this shell there was an attempt built on another project's
+9. **The earlier attempt is not a reference.** Before this weave there was an attempt built on another project's
    runtime ([docs/EARLY-HISTORY.md](docs/EARLY-HISTORY.md)). None of its code is here. Do not reuse it, and do not
    treat what it reached as progress of this project.
 10. **Measure against the game file, not against how far a run gets.** What the executable itself imports, calls
     and checks is the reference. Say what was measured and what is a guess.
-11. **Every test of the shell runs on the game's own code, read fresh** (ExCorvus, 2026-11-26: "every test of the
+11. **Every test of the weave runs on the game's own code, read fresh** (ExCorvus, 2026-11-26: "every test of the
     shell needs to run on the game's own new code, otherwise we are gonna be looping forever"). A test that says
-    something about the shell takes its input from the user's game copy at the time it runs: the game's real
+    something about the weave takes its input from the user's game copy at the time it runs: the game's real
     shaders, files and calls, read-only and in memory. Hand-made sample programs and earlier results are not proof
     that something works. Rules 1, 2 and 5 still hold: nothing of the game is written to the repository or to disk.
 
@@ -60,7 +60,7 @@ What works today, and where a run currently stops, is in the **Current state** b
   the last message next to each file). Commits are pushed to GitHub as the work goes. The project is on GitHub
   only.
 - **Running the game:** only the coordinating agent starts the game's entry point, and only one run at a time.
-- **The game test before every code commit:** a change under `shell/` or `scripts/` is committed only after
+- **The game test before every code commit:** a change under `weave/` or `scripts/` is committed only after
   `scripts\game_test.ps1` has passed on that exact build (docs/BUILD-AND-RUN.md, "The game test").
 - **Subagents:** allowed when ExCorvus has agreed to it. A subagent never starts the game, never uses the GPU and
   never pushes.
@@ -70,7 +70,7 @@ What works today, and where a run currently stops, is in the **Current state** b
 
 ## Where things are
 
-- [`shell/`](shell/) — the runtime, its tools and tests; [shell/README.md](shell/README.md) lists every file.
+- [`weave/`](weave/) — the runtime, its tools and tests; [weave/README.md](weave/README.md) lists every file.
 - [docs/BUILD-AND-RUN.md](docs/BUILD-AND-RUN.md) — how to build, test and run.
 - [docs/exe-map/](docs/exe-map/) — what the executable does: memory model, watchdog, graphics calls.
 - [docs/console-libs/](docs/console-libs/) — what the executable asks of each console-only library.
@@ -81,9 +81,9 @@ What works today, and where a run currently stops, is in the **Current state** b
 ## Build and test
 
 ```
-shell\build.cmd
+weave\build.cmd
 ```
 
-Builds the shell, the console libraries and the tools, and runs the 27 tests. No game files and no GPU are needed
-for them. They check pieces on hand-made sample programs and are not proof that the shell works with the game
+Builds the weave, the console libraries and the tools, and runs the 27 tests. No game files and no GPU are needed
+for them. They check pieces on hand-made sample programs and are not proof that the weave works with the game
 (rule 11): that is tested only on the game's own code, read from the user's copy when the test runs.
