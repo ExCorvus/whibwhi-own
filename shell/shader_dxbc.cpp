@@ -125,7 +125,7 @@ std::uint32_t operand_dwords(const Operand& operand) {
         case OperandFile::kImmediate32:
             return 1 + operand.immediate.count;
         case OperandFile::kConstantBuffer:
-            return 4;
+            return operand.relative_index ? 6 : 4;
         case OperandFile::kResource:
         case OperandFile::kSampler:
             // A run-time index adds the operand that names the temporary: its token and its register number.
@@ -324,6 +324,16 @@ Operand constant_buffer_scalar(std::uint32_t id, std::uint32_t reg, std::uint32_
     return o;
 }
 
+Operand constant_buffer_source_indexed(std::uint32_t id, std::uint32_t reg, std::uint32_t element,
+                                       std::uint32_t temp, std::uint8_t component, std::uint8_t components) {
+    Operand o = constant_buffer_source(id, reg, element);
+    o.swizzle = components;
+    o.relative_index = true;
+    o.relative_temp = temp;
+    o.relative_component = component;
+    return o;
+}
+
 Operand sampler_source_indexed(std::uint32_t id, std::uint32_t array_index, std::uint32_t temp,
                                std::uint8_t component) {
     Operand o = sampler_source(id, array_index);
@@ -485,10 +495,22 @@ void DxbcBuilder::push_operand(const Operand& operand) {
             const std::uint32_t selection =
                 operand.select_one ? (2u << 2) | (static_cast<std::uint32_t>(operand.select_component & 3u) << 4)
                                    : (1u << 2) | swizzle_bits;
-            instructions_.push_back((3u << 20) | (type << 12) | 2u | selection);
+            // The element may be taken at run time: its number plus one component of a temporary register
+            // (the "number plus relative" form of the third index; see the resource case below).
+            std::uint32_t token = (3u << 20) | (type << 12) | 2u | selection;
+            if (operand.relative_index) {
+                token |= 3u << (22 + 3 * 2);
+            }
+            instructions_.push_back(token);
             instructions_.push_back(operand.index0);
             instructions_.push_back(operand.index1);
             instructions_.push_back(operand.index2);
+            if (operand.relative_index) {
+                instructions_.push_back((1u << 20) | (static_cast<std::uint32_t>(OperandFile::kTemp) << 12) |
+                                        (2u << 2) | 2u |
+                                        (static_cast<std::uint32_t>(operand.relative_component & 3u) << 4));
+                instructions_.push_back(operand.relative_temp);
+            }
             break;
         }
         case OperandFile::kResource:
