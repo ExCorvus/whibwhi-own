@@ -72,6 +72,28 @@ int main() {
         }
     }
 
+    // The Xbox Game Runtime skeleton: the five names the game resolves, initialize/uninitialize success,
+    // QueryApiImpl not-provided.
+    const HMODULE xgr = LoadLibraryA("xgameruntime.dll");
+    CHECK(xgr != nullptr);
+    if (xgr) {
+        const char* names[] = {"InitializeApiImpl", "InitializeApiImplEx", "InitializeApiImplEx2", "QueryApiImpl",
+                               "UninitializeApiImpl"};
+        for (const char* n : names) {
+            CHECK(GetProcAddress(xgr, n) != nullptr);
+        }
+        const auto init = reinterpret_cast<long (*)(void*, void*)>(GetProcAddress(xgr, "InitializeApiImpl"));
+        const auto query = reinterpret_cast<long (*)(const void*, void**)>(GetProcAddress(xgr, "QueryApiImpl"));
+        if (init) {
+            CHECK(init(nullptr, nullptr) == 0);
+        }
+        if (query) {
+            void* out = reinterpret_cast<void*>(static_cast<size_t>(1));
+            CHECK(query(nullptr, &out) == 0x80004001L);
+            CHECK(out == nullptr);
+        }
+    }
+
     if (failures == 0) {
         std::printf("all checks passed\n");
     }
