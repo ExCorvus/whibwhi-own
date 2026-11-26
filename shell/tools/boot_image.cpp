@@ -17,10 +17,13 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <set>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -50,6 +53,34 @@ std::uintptr_t on_unprovided(const UnprovidedImport& which) {
     return 0;
 }
 
+namespace {
+
+// Dumps a COM-ish object's vtable (called from the exception handler; no C++ objects here so __try is allowed).
+void dump_vtable(std::uintptr_t rcx) {
+    if (rcx <= 0x10000 || rcx >= 0x7FFFFFFFFFFF) {
+        return;
+    }
+    __try {
+        std::fprintf(stderr, " [rcx] 0x%llx bytes:", static_cast<unsigned long long>(rcx));
+        for (int i = 0; i < 0x20; ++i) {
+            std::fprintf(stderr, " %02x", *reinterpret_cast<const unsigned char*>(rcx + i));
+        }
+        const std::uintptr_t vt = *reinterpret_cast<const std::uintptr_t*>(rcx);
+        if (vt > 0x10000 && vt < 0x7FFFFFFFFFFF) {
+            std::fprintf(stderr, " [rcx] 0x%llx vt 0x%llx:", static_cast<unsigned long long>(rcx),
+                         static_cast<unsigned long long>(vt));
+            for (int i = 0; i < 24; ++i) {
+                std::fprintf(stderr, " +0x%02x=0x%llx", i * 8,
+                             static_cast<unsigned long long>(
+                                 *reinterpret_cast<const std::uintptr_t*>(vt + i * 8)));
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+} // namespace
+
 LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
     const ULONG code = info->ExceptionRecord->ExceptionCode;
     // Only the exceptions that end or mark a run: breakpoint, single step, access violation, in-page error,
@@ -58,6 +89,25 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
                              code == 0xC00000FD || code == 0xC0000374 || code == 0xC0000409;
     if (!interesting) {
         return EXCEPTION_CONTINUE_SEARCH;  // the image handles these itself
+    }
+    if (code == 0x80000004) {
+        // Hardware watchpoint hit: log where the watched byte was written, then continue.
+        std::lock_guard<std::mutex> lock(g_log);
+        const std::uintptr_t wrip = info->ContextRecord->Rip;
+        std::fprintf(stderr, "[boot] watchpoint hit at 0x%llx", static_cast<unsigned long long>(wrip));
+        if (g_loaded && g_loaded->base) {
+            const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(g_loaded->base);
+            if (wrip >= base && wrip < base + g_loaded->size) {
+                std::fprintf(stderr, " (image+0x%llx)", static_cast<unsigned long long>(wrip - base));
+            }
+        }
+        std::fprintf(stderr, ", rcx 0x%llx rdx 0x%llx rax 0x%llx\n",
+                     static_cast<unsigned long long>(info->ContextRecord->Rcx),
+                     static_cast<unsigned long long>(info->ContextRecord->Rdx),
+                     static_cast<unsigned long long>(info->ContextRecord->Rax));
+        std::fflush(stderr);
+        info->ContextRecord->Dr6 = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
     }
     const std::uintptr_t at = reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
     const std::uintptr_t rip = info->ContextRecord->Rip;
@@ -90,6 +140,8 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
         if (ret >= base && ret < base + g_loaded->size) {
             std::fprintf(stderr, " (return image+0x%llx)", static_cast<unsigned long long>(ret - base));
         }
+        // If rcx looks like a COM-ish object, dump its vtable pointer and first slots.
+        dump_vtable(info->ContextRecord->Rcx);
     }
     std::fprintf(stderr, "\n");
     // Poor-man's backtrace: scan the top of the faulting stack for return addresses into the image.
@@ -109,8 +161,14 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
     }
     std::fflush(stderr);
     if (code == 0x80000003) {
-        // The image's own breakpoint (its fatal stop, or the watchdog firing): logged; end the boot cleanly.
-        TerminateProcess(GetCurrentProcess(), 5);
+        // A breakpoint may be handled by the image's own SEH (debug probes); let the process decide. Only when
+        // it comes back as unhandled (second chance, seen before at the same address) do we end the boot.
+        static std::set<std::pair<unsigned long, std::uintptr_t>> seen_bp;
+        const auto key = std::make_pair(code, rip);
+        std::lock_guard<std::mutex> lock2(g_log);
+        if (!seen_bp.insert(key).second) {
+            TerminateProcess(GetCurrentProcess(), 5);
+        }
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -245,12 +303,31 @@ int main(int argc, char** argv) {
         std::fflush(stderr);
     } else {
         HANDLE thread = CreateThread(nullptr, image.stack_reserve() ? image.stack_reserve() : 0x100000, &run_entry,
-                                     &ctx, 0, nullptr);
+                                     &ctx, CREATE_SUSPENDED, nullptr);
         if (!thread) {
             std::printf("could not start the entry thread\n");
             unload_image(loaded);
             return 1;
         }
+        // Watch the pool object's flag byte at image+0x71c1578 on the entry thread (WHIWHI_WATCH=rva to change
+        // it): a 1-byte write watchpoint, so a boot shows who sets the flag that routes an allocation to the
+        // image's own int3 slot.
+        {
+            const char* w = std::getenv("WHIWHI_WATCH");
+            if (w && *w) {
+                CONTEXT c{};
+                c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                if (GetThreadContext(thread, &c)) {
+                    c.Dr0 = reinterpret_cast<std::uintptr_t>(loaded.base) + std::strtoull(w, nullptr, 16);
+                    c.Dr7 = 0x1 | (0x1ul << 16);  // local enable, write, 1 byte
+                    SetThreadContext(thread, &c);
+                    std::fprintf(stderr, "[boot] watchpoint on image+0x%llx\n",
+                                 static_cast<unsigned long long>(std::strtoull(w, nullptr, 16)));
+                    std::fflush(stderr);
+                }
+            }
+        }
+        ResumeThread(thread);
         const DWORD wait = WaitForSingleObject(thread, static_cast<DWORD>(seconds) * 1000);
         if (wait == WAIT_TIMEOUT) {
             std::lock_guard<std::mutex> lock(g_log);
