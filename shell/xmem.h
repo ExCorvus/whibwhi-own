@@ -58,7 +58,15 @@ WHIWHI_XMEM_API void* XMemMapPhysicalPages(void* address, unsigned long long cou
 WHIWHI_XMEM_API int XMemMapPhysicalPagesScatter(void* const* addresses, unsigned long long count,
                                                 const unsigned long long* entries);
 
-// A zero-filled allocation aligned to 64 KiB. `attributes` is kept in the record; its layout is not known.
+// XMemAllocDefault is the allocation itself: zero-filled, aligned to 64 KiB. `attributes` is kept in the record;
+// its layout is not known beyond what the image's own routines read from it.
+//
+// XMemAlloc and XMemFree go through the image's allocation routines when the image has them (see
+// whiwhi_xmem_set_allocation_hooks below), and are the same as the Default pair when it has not. An image
+// exports its two routines as the data symbol __XMemAllocationHooks__; its routines decide per request and end
+// in XMemAllocDefault / XMemFreeDefault. That the console's library calls those routines from XMemAlloc and
+// XMemFree is inferred from the export's name and from how the image's routines are built, not read from the
+// console's library.
 WHIWHI_XMEM_API void* XMemAlloc(unsigned long long size, unsigned long long attributes);
 WHIWHI_XMEM_API void XMemFree(void* pointer, unsigned long long attributes);
 WHIWHI_XMEM_API void* XMemAllocDefault(unsigned long long size, unsigned long long attributes);
@@ -82,6 +90,13 @@ WHIWHI_XMEM_API unsigned long long XMemVirtualQuery(const void* address, void* b
 // A release of one of this library's regions is carried out here (size 0 or the region's size); every other
 // call goes to Windows unchanged.
 WHIWHI_XMEM_API int __stdcall whiwhi_xmem_virtual_free(void* address, unsigned long long size, unsigned long type);
+
+// The image's allocation routines (the two it exports in __XMemAllocationHooks__). From then on XMemAlloc and
+// XMemFree call them. Pass two nulls to go back to the plain allocation; one null clears both.
+typedef void* (*WhiwhiXmemAllocRoutine)(unsigned long long size, unsigned long long attributes);
+typedef void (*WhiwhiXmemFreeRoutine)(void* pointer, unsigned long long attributes);
+WHIWHI_XMEM_API void whiwhi_xmem_set_allocation_hooks(WhiwhiXmemAllocRoutine alloc,
+                                                       WhiwhiXmemFreeRoutine free_routine);
 
 typedef struct WhiwhiXmemRegion {
     void* base;
@@ -116,6 +131,7 @@ typedef struct WhiwhiXmemStatistics {
     unsigned long long calls_tools_mem_available;
     unsigned long long calls_transfer_memory;
     unsigned long long calls_virtual_query;
+    unsigned long long calls_through_image_routines; // XMemAlloc / XMemFree calls handed to the image's routines
 } WhiwhiXmemStatistics;
 
 WHIWHI_XMEM_API void whiwhi_xmem_statistics(WhiwhiXmemStatistics* out);
