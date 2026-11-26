@@ -22,19 +22,23 @@ extern "C" {
 #endif
 
 // The description as the image fills it (measured; offsets +0x04 and +0x34 are not written by the image).
+// It is the image's resource description: the same block, from the same builder, is what the image hands to the
+// graphics device when it asks how much memory a texture needs (measured), and field for field it has the shape
+// of the public D3D12_RESOURCE_DESC.
 typedef struct WhiwhiXgDescription {
     unsigned type;                 // +0x00  2 = one-dimensional, 3 = two-dimensional, 4 = volume
     unsigned not_written_04;       // +0x04
-    unsigned long long zero_08;    // +0x08
+    unsigned long long alignment;  // +0x08  0, or 0x1000 when the image asks for a small texture's alignment
     unsigned long long width;      // +0x10
     unsigned height;               // +0x18
     unsigned short depth_or_array; // +0x1c
     unsigned short mips;           // +0x1e
     unsigned format;               // +0x20  format code; the public DXGI_FORMAT numbers up to 99
-    unsigned element_bytes;        // +0x24  1, 2, 4, 8 or 16; not bytes per pixel for block formats
-    unsigned zero_28;              // +0x28
-    unsigned swizzle_mode;         // +0x2c  the image's own number, or what XGSuggestSwizzleMode writes
-    unsigned flags;                // +0x30  console-only bits
+    unsigned samples;              // +0x24  samples per pixel: 1, 2, 4, 8 or 16
+    unsigned sample_quality;       // +0x28
+    unsigned layout;               // +0x2c  a console tiling number (0x100 and up; the image itself writes 0x105
+                                   //        for a volume), or what XGSuggestSwizzleMode writes; not used here
+    unsigned flags;                // +0x30  the public resource flags plus console-only bits
     unsigned not_written_34;       // +0x34
 } WhiwhiXgDescription;
 
@@ -58,7 +62,7 @@ typedef struct WhiwhiXgDescription {
 WHIWHI_XG_XS_API long XGCreateTextureComputer(const WhiwhiXgDescription* description, void** object);
 
 // Asks which tiling mode a format should use; the image passes the description, 0, and the address of the
-// description's own swizzle_mode field. Refused, nothing written: the numbering of the modes is not known, and
+// description's own layout field. Refused, nothing written: the numbering of the modes is not known, and
 // the image does not depend on the answer.
 WHIWHI_XG_XS_API long XGSuggestSwizzleMode(const WhiwhiXgDescription* description, unsigned second,
                                            unsigned* mode);
@@ -85,6 +89,12 @@ WHIWHI_XG_XS_API unsigned whiwhi_xg_bits_per_pixel(unsigned format);
 // Everything else in the block is zero: the image was not seen to read it, and what the console writes there is
 // not known. For block-compressed formats a "row" is a row of 4 x 4 blocks.
 WHIWHI_XG_XS_API int whiwhi_xg_layout(const WhiwhiXgDescription* description, void* block);
+
+// Bytes the whole texture takes in this library's layout: every mip of every array slice, times the samples per
+// pixel. 0 for a description that is not answered. The graphics library answers the image's "how much memory
+// does this texture need" with this number, so that the memory the image sets aside is the memory this layout
+// fills.
+WHIWHI_XG_XS_API unsigned long long whiwhi_xg_total_bytes(const WhiwhiXgDescription* description);
 
 #ifdef __cplusplus
 }
