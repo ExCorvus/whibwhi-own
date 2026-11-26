@@ -55,7 +55,7 @@ and 60** (which keeps `ExecuteIndirect` at 61). §3's argument that the shapes "
 assumed methods are only inserted; with four inserted and two absent everything measured fits. Which two are
 absent, and what console slots 27, 28, 31 and 32 are, is unknown.
 
-What this means for the shell (design choice, option 2 of §3): keep the list's write position equal to its end,
+What this means for the weave (design choice, option 2 of §3): keep the list's write position equal to its end,
 so the image never writes records itself and every command arrives as a method call that can be answered with
 the same public call on the PC list. The fields the image writes without checking (`+0x140`, `+0x544`,
 `+0x554`) must exist in the object it is given.
@@ -103,7 +103,7 @@ lives at the same field: the image hands it to a function of the game's own ship
 decoration names the parameter type — `…BuildRaytracingAccelerationStructureBatched2X(…, ID3D12GraphicsCommandList6 *,
 unsigned int, …)` — at 0x24902ac, and then calls `+0xd0` on the same register (0x24902d2) (**V**).
 
-**A consequence the shell has to deal with (V, from our own source):** `shell/d3d12_xs.cpp` wraps a PC object in
+**A consequence the weave has to deal with (V, from our own source):** `weave/d3d12_xs.cpp` wraps a PC object in
 `struct Wrap { void** vt; void* pc; std::atomic<long> refs; int kind_id; const char* kind; … }`, so for a list
 wrapper `[wrapper+0x18]` is `kind_id` (=3) and `[wrapper+0x30]` is `title_bytes` (=0). Because 3 >= 0, the image's
 `jb` test always fails and the image takes the emit-method path instead of writing inline — no out-of-bounds
@@ -321,7 +321,7 @@ All three are on the **device** (`[0x8759d00]`), not on a list. Arguments were r
 
 In the order that removes the most doubt per line:
 
-1. **Every call on a list, with its offset and all registers** (the shell already does this for unknown slots).
+1. **Every call on a list, with its offset and all registers** (the weave already does this for unknown slots).
    What is needed beyond that: for slots `+0xa0`…`+0x258`, log the *values*, not just the addresses, and log
    `[list+0x18]`, `[list+0x30]`, `[list+0x140]`, `[list+0x548]` **before** the call. The image's own shadow
    fields (`ctx+0x12310`, `ctx+0x12338`, `ctx+0x12390`, `ctx+0x12520`) can be logged from the arguments alone.
