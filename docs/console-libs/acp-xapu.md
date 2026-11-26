@@ -1,9 +1,9 @@
 # AcpHal.dll and xapu.dll — the console's audio libraries, mapped from the image's own call sites
 
 Every statement is marked: **V** = verified (read in the listing named), **I** = inferred from it,
-**U** = unknown. RVAs are image-relative. Listings: `E:\Leonida\exe-map\funcs\<rva>.txt` (private, never
-committed). Tool: `tools\exe_map.py`. Nothing here comes from any other build: only the original executable's
-call sites, plus public Windows SDK names.
+**U** = unknown. RVAs are image-relative. The listings are private working files (disassembly of the game); they
+are not in this repository and never will be. Nothing here comes from any other build: only the original
+executable's call sites, plus public Windows SDK names.
 
 The image imports **9 functions from `AcpHal.dll`** and **5 from `xapu.dll`** (14 imports, 17 call sites).
 They are the console's audio stack: `AcpHal` is the hardware/driver side (APU heap, the shape contexts the DSP
