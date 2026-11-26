@@ -157,3 +157,8 @@ add_test(NAME xcrdapi COMMAND test_xcrdapi)
 add_executable(test_gfx_stubs tests/test_gfx_stubs.cpp)
 add_dependencies(test_gfx_stubs xg_xs XboxBvhBuilder xmem xgameruntime)
 add_test(NAME gfx_stubs COMMAND test_gfx_stubs)
+
+# The texture layout library: layout numbers worked out by hand, and copies in and out of made-up memory.
+add_executable(test_xg tests/test_xg.cpp)
+add_dependencies(test_xg xg_xs)
+add_test(NAME xg COMMAND test_xg)
