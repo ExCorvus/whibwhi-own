@@ -18,10 +18,15 @@
 //   device slot 74   pool registration     the pool's own memory is opened as a heap on the PC device (no copy)
 //   device slots 78, 79, 80  the frame clock (interval, event offsets, waiting for a frame event)
 //   device slot 133  a buffer placed at an address of the image's memory: that memory opened as a heap, a PC
-//                                          buffer placed in it (no copy); textures refused
+//                                          buffer placed in it (no copy); a texture is a PC texture of its own
+//   queue  slot 16   Signal; slot 18 GetTimestampFrequency; slot 35 the console's submission of command lists
 //   queue  slot 31   CopyPageMappingsBatchX  recorded exactly (which pool page each page of the GPU-only view
 //                                          shows); nothing reads the record yet
-//   queue  slots 30/32  PresentX            nothing is shown yet: logged, answered not implemented
+//   queue  slot 32   PresentX              the image's display surface is copied into a swap chain on the
+//                                          window the image created and presented, one picture per interval
+//                                          of the frame clock
+//   command list     slots written out one by one, each checking its arguments; draws are held while no
+//                                          pipeline state is set (shaders are not translated yet)
 //
 // The slot numbers are the public D3D12 method indices, which is what the image's own calls use (its call sites
 // were read and matched: 8 queue, 9 allocator, 14 descriptor heap, 26 custom heap properties, 41 command
@@ -41,6 +46,7 @@
 #undef D3D12SerializeVersionedRootSignature
 #undef D3D12CreateRootSignatureDeserializer
 
+#include <dxgi1_2.h>  // the swap chain description the PC library takes
 #include <intrin.h>
 
 #include <atomic>
@@ -151,6 +157,9 @@ struct Wrap {
     std::atomic<bool> compute_root{false};
     std::atomic<bool> graphics_root{false};
     std::atomic<bool> pipeline_set{false};
+    // Whether the last primitive topology the image set on the list is one the PC library has. Draws are held
+    // while it is not: the PC library would draw them as something else.
+    std::atomic<bool> topology_known{true};
 
     Wrap(void* pc_object, int kind_number, const char* kind_name)
         : vt(nullptr), image_area{}, pc(pc_object), refs(1), kind_id(kind_number), kind(kind_name) {}
@@ -371,7 +380,7 @@ Wrap* wrap_object(void* pc, int kind_id, const char* kind, int forward_last,
 
 // ---- the console-only slots that are implemented ------------------------------------------------------
 
-HRESULT __stdcall w_presentx(Wrap*, void*, void*, void*, void*, void*, void*, void*, void*);
+HRESULT __stdcall w_presentx(Wrap*, unsigned int, const unsigned char*, const void*);
 HRESULT __stdcall w_queue_slot31(Wrap*, void*, void*, void*, void*, void*, void*, void*, void*);
 unsigned long long __stdcall w_resource_gpu_address(Wrap* self);
 HRESULT __stdcall w_resource_map(Wrap* self, unsigned int subresource, const D3D12_RANGE* range, void** data);
@@ -1021,11 +1030,50 @@ void __stdcall w_list_set_pipeline(Wrap* self, void* state) {
     }
 }
 
+// List slot 20, IASetPrimitiveTopology(number), in the part of the order shared with the public list. The image
+// also passes numbers the public list of topologies does not have (0x11 measured in a run; what it draws on the
+// console is not known). Only a number the PC library has is passed on; for any other, draws on this list are
+// held until a known one is set, because the PC library would draw them as something else.
+bool public_topology(unsigned int number) {
+    return (number >= 1 && number <= 6) || (number >= 10 && number <= 13) || (number >= 33 && number <= 64);
+}
+
+std::atomic<unsigned long long> g_draws_with_unknown_topology{0};
+
+void __stdcall w_list_topology(Wrap* self, unsigned int number) {
+    static SRWLOCK lock = SRWLOCK_INIT;
+    static std::set<unsigned int> seen;
+    if (public_topology(number)) {
+        static_cast<ID3D12GraphicsCommandList*>(self->pc)->IASetPrimitiveTopology(
+            static_cast<D3D12_PRIMITIVE_TOPOLOGY>(number));
+        self->topology_known.store(true);
+        return;
+    }
+    self->topology_known.store(false);
+    AcquireSRWLockExclusive(&lock);
+    const bool first = seen.insert(number).second;
+    ReleaseSRWLockExclusive(&lock);
+    if (first) {
+        logf("command list slot 20: primitive topology number 0x%x is not one the PC library has - not passed on; "
+             "draws are held while it is set (returns to %p)\n",
+             number, _ReturnAddress());
+    }
+}
+
 // Draws and dispatches asked while the list has no pipeline state: counted, said at the first and at every power
 // of two, never passed on.
 std::atomic<unsigned long long> g_draws_without_pipeline{0};
 
 bool pipeline_ready(Wrap* self, const char* what) {
+    if (self->pipeline_set.load() && !self->topology_known.load()) {
+        const unsigned long long nth = g_draws_with_unknown_topology.fetch_add(1) + 1;
+        if ((nth & (nth - 1)) == 0) {
+            logf("command list: %s asked while a primitive topology the PC library does not have is set (time "
+                 "%llu) - NOT DRAWN\n",
+                 what, nth);
+        }
+        return false;
+    }
     if (self->pipeline_set.load()) {
         return true;
     }
@@ -1342,6 +1390,13 @@ void watch_fence(Wrap* fence, unsigned long long value) {
     }
 }
 
+// Fence slot 8: called with the fence alone, the result compared with all ones (device lost) and returned
+// (measured, +0x4dad098) - the public GetCompletedValue, at the public slot.
+long long __stdcall w_fence_completed_value(Wrap* self) {
+    refresh_fence(self);
+    return self->live_value;
+}
+
 long long* __stdcall w_fence_value_address(Wrap* self) {
     refresh_fence(self);
     static std::atomic<int> shown{0};
@@ -1383,11 +1438,14 @@ HRESULT __stdcall w_queue_signal(Wrap* self, void* fence, unsigned long long val
 //    again through slot 139), while the PC queue only takes closed lists and treats a recording one as a fatal
 //    error of the whole device. So a list that is still recording is closed on the PC here, at submission.
 //  - The frame token is not something a PC queue takes. It is shown in the log and not used.
-// A last argument other than 0 has not been seen and is refused.
+// The last argument is 0 where the image submits its frame lists (+0x2482689) and 3 where its present function
+// submits the lists its threads recorded, up to 256 at a time (+0x24821dd). What the number tells the console
+// is not known; both calls are submissions and both are carried out the same way, and the number is shown in
+// the log. Any other number is refused.
 HRESULT __stdcall w_queue_submit(Wrap* self, unsigned int count, void* const* lists, unsigned long long token,
                                  unsigned int last) {
-    static std::atomic<int> shown{0}, refused{0}, closed_shown{0};
-    bool ok = last == 0 && count >= 1 && count <= 256 && can_read(lists, count * sizeof(void*));
+    static std::atomic<int> shown{0}, refused{0}, closed_shown{0}, shown3{0};
+    bool ok = (last == 0 || last == 3) && count >= 1 && count <= 256 && can_read(lists, count * sizeof(void*));
     for (unsigned int i = 0; ok && i < count; ++i) {
         ok = kind_of(lists[i]) == kList;
     }
@@ -1416,10 +1474,10 @@ HRESULT __stdcall w_queue_submit(Wrap* self, unsigned int count, void* const* li
         }
     }
     static_cast<ID3D12CommandQueue*>(self->pc)->ExecuteCommandLists(count, pc.data());
-    if (few(shown, 3) || (closed_here && few(closed_shown, 6))) {
+    if (few(shown, 3) || (closed_here && few(closed_shown, 6)) || (last == 3 && few(shown3, 3))) {
         logf("queue slot 35: %u command list(s) submitted to the PC queue (%u of them closed here first); frame "
-             "token %llu not used\n",
-             count, closed_here, token);
+             "token %llu and last argument %u not used\n",
+             count, closed_here, token, last);
     }
     return 0;
 }
@@ -1441,7 +1499,6 @@ Wrap* wrap_kind(void* pc, int kind) {
                            {{7, get_device},
                             {16, reinterpret_cast<void*>(&w_queue_signal)},
                             {18, reinterpret_cast<void*>(&w_queue_timestamp_frequency)},
-                            {30, reinterpret_cast<void*>(&w_presentx)},
                             {31, reinterpret_cast<void*>(&w_queue_slot31)},
                             {32, reinterpret_cast<void*>(&w_presentx)},
                             {35, reinterpret_cast<void*>(&w_queue_submit)}});
@@ -1468,6 +1525,7 @@ Wrap* wrap_kind(void* pc, int kind) {
                  {14, reinterpret_cast<void*>(&w_list_draw<14>)},
                  {15, reinterpret_cast<void*>(&w_list_copy_buffer)},
                  {16, reinterpret_cast<void*>(&w_list_copy_texture)},
+                 {20, reinterpret_cast<void*>(&w_list_topology)},
                  {25, reinterpret_cast<void*>(&w_list_set_pipeline)},
                  {26, reinterpret_cast<void*>(&w_list_barrier)},
                  {32, reinterpret_cast<void*>(&w_list_set_heaps)},
@@ -1509,7 +1567,9 @@ Wrap* wrap_kind(void* pc, int kind) {
         return wrap_object(pc, kRootSignature, "root signature", 7, {{7, get_device}});
     case kFence:
         return wrap_object(pc, kFence, "fence", 7,
-                           {{7, get_device}, {12, reinterpret_cast<void*>(&w_fence_value_address)}});
+                           {{7, get_device},
+                            {8, reinterpret_cast<void*>(&w_fence_completed_value)},
+                            {12, reinterpret_cast<void*>(&w_fence_value_address)}});
     case kQueryHeap:
         return wrap_object(pc, kQueryHeap, "query heap", 7, {{7, get_device}});
     default:
@@ -1764,6 +1824,7 @@ struct FrameClock {
     unsigned offset_us[kFrameEventTypes] = {};
     bool scheduled[kFrameEventTypes] = {};
     unsigned long long handed_out[kFrameEventTypes] = {};  // frame number + 1 of the last event handed out
+    unsigned long long next_free = 0;  // the first frame no presented picture has been shown in yet
 };
 FrameClock g_clock;
 
@@ -1785,6 +1846,35 @@ void sleep_until_us(long long target_us) {
             SwitchToThread();
         }
     }
+}
+
+// One presented picture per interval of the frame clock: a present that comes while the current interval has
+// already shown one waits for the start of the next free interval (at most two intervals), and takes it.
+// Returns the frame it was given, or all ones when the image has not set an interval.
+//
+// This is the shell's choice, not measured console behaviour. What is measured is that the image does not
+// pace itself where it presents: at a frame's start it only asks for the current frame without waiting
+// (+0x2482448), and before a present it waits for event type 2 of the frame two back (+0x2482405), which has
+// long passed on this clock. Left alone it presented several hundred times a second. A display shows one
+// picture per interval, so that is what the present is held to.
+unsigned long long take_display_interval() {
+    AcquireSRWLockExclusive(&g_clock.lock);
+    const unsigned interval = g_clock.interval_us;
+    if (interval == 0) {
+        ReleaseSRWLockExclusive(&g_clock.lock);
+        return ~0ull;
+    }
+    const unsigned long long current = static_cast<unsigned long long>(clock_now_us()) / interval;
+    unsigned long long frame = current > g_clock.next_free ? current : g_clock.next_free;
+    if (frame > current + 2) {
+        frame = current + 2;
+    }
+    g_clock.next_free = frame + 1;
+    ReleaseSRWLockExclusive(&g_clock.lock);
+    if (frame > current) {
+        sleep_until_us(static_cast<long long>(frame) * interval);
+    }
+    return frame;
 }
 
 HRESULT __stdcall w_set_frame_interval(Wrap*, void* output, void* length_us, void* period, void* flags, void*,
@@ -2670,19 +2760,361 @@ HRESULT __stdcall w_queue_slot31(Wrap*, void* batch_count, void* batches, void* 
     return hr;
 }
 
-// Queue slots 30/32 (PresentX): nothing is shown on screen yet, so the call answers not implemented. The image
-// passes the result to its device-lost check only, which lets this answer through.
-HRESULT __stdcall w_presentx(Wrap*, void* plane_count, void* planes, void* parameters, void*, void*, void*, void*,
-                             void*) {
-    static std::atomic<unsigned long long> calls{0};
-    if (calls.fetch_add(1) == 0) {
-        logf("queue PresentX: first call, %llu planes at 0x%llx, parameters 0x%llx - nothing is shown on screen "
-             "yet, answered not implemented\n",
-             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(plane_count)),
-             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(planes)),
-             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(parameters)));
+// ---- presentation -------------------------------------------------------------------------------------------
+//
+// Queue slot 32 (PresentX), measured at the image's call (+0x24824c1): (queue, plane count, plane records,
+// present parameters); the result only goes to the image's device-lost check. A plane record is 0x48 bytes:
+// +0x00 the frame token, +0x08 a 32-bit 1 (number of surfaces), +0x10 a pointer to the surface pointer,
+// +0x18 a pointer to a 16-byte rectangle {0, 0, width, height}, +0x20 a pointer to 16 more bytes (not read
+// here), +0x28 a 32-bit colour-space number.
+//
+// What is done with it: the surface the image names is a real PC texture (the image made it through device
+// slot 127). It is copied into the next buffer of a swap chain on the window the image itself created, and that
+// buffer is presented. The swap chain is the PC library's own (it hands one out through the command queue); its
+// buffers have the surface's size and format and the library scales them to the window. So what reaches the
+// window is exactly what the image's own commands left in its surface - nothing is drawn by the shell.
+//
+// Stated limits: only the first plane is shown (more than one is logged); the rectangle, the colour space, the
+// frame token and the present parameters are not used; one picture is shown per interval of the frame clock
+// (see take_display_interval - the shell's choice). The image's surface is copied without a state change of
+// its own: which state the image left it in is not tracked.
+const GUID kVkSwapChainFactoryId = {0xe7d6c3ca, 0x23a0, 0x4e08, {0x9f, 0x2f, 0xea, 0x52, 0x31, 0xdf, 0x66, 0x33}};
+const GUID kVkSurfaceFactoryId = {0x1e7895a1, 0x1bc3, 0x4f9c, {0xa6, 0x70, 0x29, 0x0a, 0x4b, 0xc9, 0x58, 0x1a}};
+
+// The three interfaces of the PC library this uses, declared from its published interface description
+// (method order only; no code of the library is in this file).
+struct VkSurfaceFactoryInterface : IUnknown {
+    virtual int __stdcall CreateSurface(void* instance, void* adapter, unsigned long long* surface) = 0;
+};
+
+struct VkSwapChainInterface : IUnknown {
+    virtual HRESULT __stdcall GetDesc(DXGI_SWAP_CHAIN_DESC1* desc) = 0;
+    virtual HRESULT __stdcall GetAdapter(REFIID id, void** out) = 0;
+    virtual HRESULT __stdcall GetDevice(REFIID id, void** out) = 0;
+    virtual HRESULT __stdcall GetImage(UINT buffer, REFIID id, void** out) = 0;
+    virtual UINT __stdcall GetImageIndex() = 0;
+    virtual UINT __stdcall GetFrameLatency() = 0;
+    virtual HANDLE __stdcall GetFrameLatencyEvent() = 0;
+    virtual HRESULT __stdcall ChangeProperties(const DXGI_SWAP_CHAIN_DESC1* desc, const UINT* masks,
+                                               IUnknown* const* queues) = 0;
+    virtual HRESULT __stdcall SetPresentRegion(const RECT* region) = 0;
+    virtual HRESULT __stdcall SetGammaControl(UINT count, const void* points) = 0;
+    virtual HRESULT __stdcall SetFrameLatency(UINT latency) = 0;
+    virtual HRESULT __stdcall Present(UINT interval, UINT flags, const DXGI_PRESENT_PARAMETERS* parameters) = 0;
+};
+
+struct VkSwapChainFactoryInterface : IUnknown {
+    virtual HRESULT __stdcall CreateSwapChain(VkSurfaceFactoryInterface* surface, const DXGI_SWAP_CHAIN_DESC1* desc,
+                                              VkSwapChainInterface** out) = 0;
+};
+
+// Gives the PC library a Vulkan surface for one window, through the Vulkan loader's own function.
+class WindowSurface final : public VkSurfaceFactoryInterface {
+public:
+    explicit WindowSurface(HWND window) : window_(window) {}
+
+    HRESULT __stdcall QueryInterface(REFIID id, void** out) override {
+        if (!out) {
+            return 0x80004003L;
+        }
+        if (IsEqualGUID(id, __uuidof(IUnknown)) || IsEqualGUID(id, kVkSurfaceFactoryId)) {
+            *out = this;
+            AddRef();
+            return 0;
+        }
+        *out = nullptr;
+        return 0x80004002L;
     }
-    return 0x80004001L;  // E_NOTIMPL
+    ULONG __stdcall AddRef() override { return refs_.fetch_add(1) + 1; }
+    ULONG __stdcall Release() override {
+        const ULONG left = refs_.fetch_sub(1) - 1;
+        if (left == 0) {
+            delete this;
+        }
+        return left;
+    }
+
+    int __stdcall CreateSurface(void* instance, void*, unsigned long long* surface) override {
+        const int kNotReady = -3;  // VK_ERROR_INITIALIZATION_FAILED
+        const HMODULE loader = GetModuleHandleA("vulkan-1.dll");
+        if (!loader || !surface) {
+            return kNotReady;
+        }
+        using Lookup = void* (__stdcall*)(void*, const char*);
+        const auto lookup = reinterpret_cast<Lookup>(GetProcAddress(loader, "vkGetInstanceProcAddr"));
+        if (!lookup) {
+            return kNotReady;
+        }
+        struct Request {  // VkWin32SurfaceCreateInfoKHR
+            int type;
+            const void* next;
+            unsigned flags;
+            HINSTANCE module;
+            HWND window;
+        };
+        using Create = int(__stdcall*)(void*, const Request*, const void*, unsigned long long*);
+        const auto create = reinterpret_cast<Create>(lookup(instance, "vkCreateWin32SurfaceKHR"));
+        if (!create) {
+            return kNotReady;
+        }
+        const Request request{1000009000, nullptr, 0,
+                              reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window_, GWLP_HINSTANCE)), window_};
+        return create(instance, &request, nullptr, surface);
+    }
+
+private:
+    HWND window_;
+    std::atomic<ULONG> refs_{1};
+};
+
+// The window the image created: the top-level window of this process with the largest client area.
+HWND find_image_window() {
+    struct Best {
+        HWND window = nullptr;
+        long long area = -1;
+    } best;
+    EnumWindows(
+        [](HWND window, LPARAM parameter) -> BOOL {
+            auto* b = reinterpret_cast<Best*>(parameter);
+            DWORD process = 0;
+            GetWindowThreadProcessId(window, &process);
+            if (process != GetCurrentProcessId() || GetWindow(window, GW_OWNER)) {
+                return TRUE;
+            }
+            char name[64] = {};
+            GetClassNameA(window, name, sizeof(name));
+            if (std::strstr(name, "IME") || std::strstr(name, "ConsoleWindowClass")) {
+                return TRUE;
+            }
+            RECT r{};
+            GetClientRect(window, &r);
+            const long long area = static_cast<long long>(r.right - r.left) * (r.bottom - r.top);
+            if (area > b->area) {
+                b->area = area;
+                b->window = window;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&best));
+    return best.window;
+}
+
+struct Presenter {
+    std::mutex lock;
+    bool given_up = false;  // set when the swap chain could not be made; said once
+    HWND window = nullptr;
+    VkSwapChainInterface* chain = nullptr;
+    unsigned long long width = 0;
+    unsigned height = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    ID3D12CommandAllocator* allocator = nullptr;
+    ID3D12GraphicsCommandList* list = nullptr;
+    ID3D12Fence* fence = nullptr;
+    HANDLE reached = nullptr;
+    unsigned long long copies = 0;
+    unsigned long long shown = 0;
+};
+Presenter g_presenter;
+
+// Makes the swap chain and the objects for the copy. Called with the presenter's lock held.
+bool presenter_start(Presenter& p, Wrap* queue, const D3D12_RESOURCE_DESC& surface) {
+    if (!g_device) {
+        return false;
+    }
+    p.window = find_image_window();
+    if (!p.window) {
+        logf("PresentX: this process has no window to show the picture in - not shown\n");
+        return false;
+    }
+    char name[64] = {};
+    GetClassNameA(p.window, name, sizeof(name));
+    RECT r{};
+    GetClientRect(p.window, &r);
+    const bool hidden = !IsWindowVisible(p.window);
+    logf("PresentX: the image's window is %p (class \"%s\", client area %ld x %ld, %s)\n",
+         static_cast<void*>(p.window), name, r.right - r.left, r.bottom - r.top,
+         hidden ? "hidden - the shell shows it, because the window is where the picture goes" : "visible");
+    if (hidden) {
+        ShowWindowAsync(p.window, SW_SHOWNOACTIVATE);
+    }
+
+    VkSwapChainFactoryInterface* factory = nullptr;
+    HRESULT hr = static_cast<IUnknown*>(queue->pc)->QueryInterface(kVkSwapChainFactoryId,
+                                                                   reinterpret_cast<void**>(&factory));
+    if (hr != 0 || !factory) {
+        logf("PresentX: the PC queue hands out no swap chain (0x%lx) - not shown\n", static_cast<unsigned long>(hr));
+        return false;
+    }
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    desc.Width = static_cast<UINT>(surface.Width);
+    desc.Height = surface.Height;
+    desc.Format = surface.Format;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 3;
+    desc.Scaling = DXGI_SCALING_STRETCH;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    auto* surface_factory = new WindowSurface(p.window);
+    hr = factory->CreateSwapChain(surface_factory, &desc, &p.chain);
+    surface_factory->Release();
+    factory->Release();
+    if (hr != 0 || !p.chain) {
+        logf("PresentX: the PC library made no swap chain of %u x %u, format %u, on the window (0x%lx) - not shown\n",
+             desc.Width, desc.Height, static_cast<unsigned>(desc.Format), static_cast<unsigned long>(hr));
+        p.chain = nullptr;
+        return false;
+    }
+    auto* device = static_cast<ID3D12Device*>(g_device->pc);
+    hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&p.allocator));
+    if (hr == 0) {
+        hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, p.allocator, nullptr, IID_PPV_ARGS(&p.list));
+    }
+    if (hr == 0) {
+        p.list->Close();
+        hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&p.fence));
+    }
+    p.reached = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (hr != 0 || !p.reached) {
+        logf("PresentX: the PC device made no command list for the copy (0x%lx) - not shown\n",
+             static_cast<unsigned long>(hr));
+        return false;
+    }
+    p.width = surface.Width;
+    p.height = surface.Height;
+    p.format = surface.Format;
+    logf("PresentX: a swap chain of %u x %u, format %u, is on the image's window; the image's surface is copied "
+         "into it at every present\n",
+         desc.Width, desc.Height, static_cast<unsigned>(desc.Format));
+    return true;
+}
+
+HRESULT __stdcall w_presentx(Wrap* self, unsigned int plane_count, const unsigned char* planes,
+                             const void* parameters) {
+    static std::atomic<int> refused{0}, more_planes{0};
+    const unsigned long long kPlaneBytes = 0x48;
+    void* surface = nullptr;
+    unsigned long long token = 0;
+    bool ok = plane_count >= 1 && plane_count <= 8 && can_read(planes, plane_count * kPlaneBytes);
+    if (ok) {
+        std::memcpy(&token, planes, 8);
+        unsigned int surfaces = 0;
+        void* const* list = nullptr;
+        std::memcpy(&surfaces, planes + 0x08, 4);
+        std::memcpy(&list, planes + 0x10, 8);
+        ok = surfaces == 1 && can_read(list, sizeof(void*));
+        if (ok) {
+            surface = list[0];
+            ok = kind_of(surface) == kResource;
+        }
+    }
+    if (!ok) {
+        if (few(refused, 6)) {
+            logf("PresentX: (planes %u at %p, parameters %p) is not the call that was measured, or names no surface "
+                 "of this library - not shown, answered not implemented (returns to %p)\n",
+                 plane_count, static_cast<const void*>(planes), parameters, _ReturnAddress());
+        }
+        return 0x80004001L;
+    }
+    if (plane_count > 1 && few(more_planes, 2)) {
+        logf("PresentX: %u planes given - only the first is shown\n", plane_count);
+    }
+    auto* source = static_cast<ID3D12Resource*>(static_cast<Wrap*>(surface)->pc);
+    const D3D12_RESOURCE_DESC desc = source->GetDesc();
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.SampleDesc.Count != 1) {
+        if (few(refused, 6)) {
+            logf("PresentX: the surface named is not a plain two-dimensional texture - not shown\n");
+        }
+        return 0x80004001L;
+    }
+
+    Presenter& p = g_presenter;
+    std::lock_guard<std::mutex> guard(p.lock);
+    if (p.given_up) {
+        return 0x80004001L;
+    }
+    if (!p.chain && !presenter_start(p, self, desc)) {
+        p.given_up = true;
+        return 0x80004001L;
+    }
+    if (desc.Width != p.width || desc.Height != p.height || desc.Format != p.format) {
+        if (few(refused, 6)) {
+            logf("PresentX: a surface of %llu x %u, format %u, where the swap chain was made for %llu x %u, format "
+                 "%u - not shown\n",
+                 desc.Width, desc.Height, static_cast<unsigned>(desc.Format), p.width, p.height,
+                 static_cast<unsigned>(p.format));
+        }
+        return 0x80004001L;
+    }
+
+    // The copy before this one has to be done before its allocator is used again.
+    if (p.copies && p.fence->GetCompletedValue() < p.copies) {
+        if (p.fence->SetEventOnCompletion(p.copies, p.reached) == 0) {
+            WaitForSingleObject(p.reached, 2000);
+        }
+        if (p.fence->GetCompletedValue() < p.copies) {
+            if (few(refused, 6)) {
+                logf("PresentX: the copy of the frame before has not finished after two seconds - this frame is "
+                     "not shown\n");
+            }
+            return 0x80004001L;
+        }
+    }
+    const unsigned long long display_frame = take_display_interval();
+    ID3D12Resource* back = nullptr;
+    HRESULT hr = p.chain->GetImage(p.chain->GetImageIndex(), IID_PPV_ARGS(&back));
+    if (hr == 0) {
+        hr = p.allocator->Reset();
+    }
+    if (hr == 0) {
+        hr = p.list->Reset(p.allocator, nullptr);
+    }
+    if (hr != 0 || !back) {
+        if (back) {
+            back->Release();
+        }
+        if (few(refused, 6)) {
+            logf("PresentX: no buffer to copy into (0x%lx) - not shown\n", static_cast<unsigned long>(hr));
+        }
+        return hr ? hr : 0x80004005L;
+    }
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = back;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    p.list->ResourceBarrier(1, &barrier);
+    p.list->CopyResource(back, source);
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    p.list->ResourceBarrier(1, &barrier);
+    hr = p.list->Close();
+    back->Release();
+    if (hr != 0) {
+        if (few(refused, 6)) {
+            logf("PresentX: the copy could not be recorded (0x%lx) - not shown\n", static_cast<unsigned long>(hr));
+        }
+        return hr;
+    }
+    auto* queue = static_cast<ID3D12CommandQueue*>(self->pc);
+    ID3D12CommandList* const lists[1] = {p.list};
+    queue->ExecuteCommandLists(1, lists);
+    queue->Signal(p.fence, ++p.copies);
+    const DXGI_PRESENT_PARAMETERS none{};
+    hr = p.chain->Present(0, 0, &none);
+    if (hr == 0) {
+        ++p.shown;
+    }
+    if (hr != 0 || (p.shown & (p.shown - 1)) == 0) {
+        logf("PresentX: frame token %llu - the image's surface (%llu x %u) copied and presented to the window in "
+             "interval %llu of the frame clock, 0x%lx; %llu frame(s) presented so far; the window is %s (its "
+             "thread %lu, this thread %lu)\n",
+             token, desc.Width, desc.Height, display_frame, static_cast<unsigned long>(hr), p.shown,
+             IsWindowVisible(p.window) ? "visible" : "still hidden", GetWindowThreadProcessId(p.window, nullptr),
+             GetCurrentThreadId());
+    }
+    return hr;
 }
 
 } // namespace
