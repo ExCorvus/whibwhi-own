@@ -11,7 +11,9 @@
 #include "shader_emit_flow.hpp"
 #include "shader_flow.hpp"
 #include "shader_names.hpp"
+#include "shader_shape.hpp"
 
+#include <array>
 #include <bitset>
 #include <cstdio>
 #include <cstring>
@@ -54,10 +56,13 @@ const PcCovered kCovered[] = {
     {kV2, 17, "v_min_i32"}, {kV2, 18, "v_max_i32"}, {kV2, 19, "v_min_u32"}, {kV2, 20, "v_max_u32"},
     {kV2, 22, "v_lshrrev_b32"}, {kV2, 24, "v_ashrrev_i32"}, {kV2, 26, "v_lshlrev_b32"},
     {kV2, 27, "v_and_b32"}, {kV2, 28, "v_or_b32"}, {kV2, 29, "v_xor_b32"}, {kV2, 30, "v_xnor_b32"},
+    {kV2, 31, "v_mac_f32"},
     {kV2, 37, "v_add_nc_u32"}, {kV2, 38, "v_sub_u32"}, {kV2, 39, "v_subrev_u32"}, {kV2, 43, "v_fmac_f32"},
     {kV2, 44, "v_fmamk_f32"}, {kV2, 45, "v_fmaak_f32"}, {kV2, 47, "v_cvt_pkrtz_f16_f32"},
     {kV1, 0, "v_nop"}, {kV1, 1, "v_mov_b32"}, {kV1, 5, "v_cvt_f32_i32"}, {kV1, 6, "v_cvt_f32_u32"},
     {kV1, 7, "v_cvt_u32_f32"}, {kV1, 8, "v_cvt_i32_f32"}, {kV1, 11, "v_cvt_f32_f16"}, {kV1, 32, "v_fract_f32"},
+    {kV1, 17, "v_cvt_f32_ubyte0"}, {kV1, 18, "v_cvt_f32_ubyte1"}, {kV1, 19, "v_cvt_f32_ubyte2"},
+    {kV1, 20, "v_cvt_f32_ubyte3"},
     {kV1, 33, "v_trunc_f32"}, {kV1, 34, "v_ceil_f32"}, {kV1, 35, "v_rndne_f32"}, {kV1, 36, "v_floor_f32"},
     {kV1, 37, "v_exp_f32"}, {kV1, 39, "v_log_f32"}, {kV1, 42, "v_rcp_f32"}, {kV1, 46, "v_rsq_f32"},
     {kV1, 51, "v_sqrt_f32"}, {kV1, 55, "v_not_b32"},
@@ -69,7 +74,9 @@ const PcCovered kCovered[] = {
     {kV3, 0x116, "v_lshrrev_b32"}, {kV3, 0x118, "v_ashrrev_i32"}, {kV3, 0x11A, "v_lshlrev_b32"},
     {kV3, 0x11B, "v_and_b32"}, {kV3, 0x11C, "v_or_b32"}, {kV3, 0x11D, "v_xor_b32"}, {kV3, 0x11E, "v_xnor_b32"},
     {kV3, 0x125, "v_add_nc_u32"}, {kV3, 0x126, "v_sub_u32"}, {kV3, 0x127, "v_subrev_u32"},
-    {kV3, 0x12F, "v_cvt_pkrtz_f16_f32"},
+    {kV3, 0x12F, "v_cvt_pkrtz_f16_f32"}, {kV3, 0x11F, "v_mac_f32"}, {kV3, 0x12B, "v_fmac_f32"},
+    {kV3, 0x191, "v_cvt_f32_ubyte0"}, {kV3, 0x192, "v_cvt_f32_ubyte1"}, {kV3, 0x193, "v_cvt_f32_ubyte2"},
+    {kV3, 0x194, "v_cvt_f32_ubyte3"},
     {kV3, 0x180, "v_nop"}, {kV3, 0x181, "v_mov_b32"}, {kV3, 0x185, "v_cvt_f32_i32"},
     {kV3, 0x186, "v_cvt_f32_u32"}, {kV3, 0x187, "v_cvt_u32_f32"}, {kV3, 0x188, "v_cvt_i32_f32"},
     {kV3, 0x18B, "v_cvt_f32_f16"}, {kV3, 0x1A0, "v_fract_f32"}, {kV3, 0x1A1, "v_trunc_f32"},
@@ -101,8 +108,19 @@ bool compare_number(unsigned opcode) {
     return opcode <= 15 || (opcode >= 128 && opcode <= 135) || (opcode >= 192 && opcode <= 199);
 }
 
+// The compares that write the execution mask instead of the condition mask: the same sixteen and twice eight
+// predicates, each number 16 higher (the public table builds the number as predicate | 16 | the type's base).
+// "On GFX10 and newer, v_cmpx always writes just exec" (Mesa, aco_assembler.cpp). Covered in the one-word
+// format only.
+bool exec_compare_number(unsigned opcode) {
+    return opcode >= 16 && compare_number(opcode - 16) && !compare_number(opcode);
+}
+
 bool covered(WalkFormat format, unsigned opcode) {
-    if (format == WalkFormat::kVopc || (format == WalkFormat::kVop3 && opcode < 0x100)) {
+    if (format == WalkFormat::kVopc) {
+        return compare_number(opcode) || exec_compare_number(opcode);
+    }
+    if (format == WalkFormat::kVop3 && opcode < 0x100) {
         return compare_number(opcode);
     }
     for (const PcCovered& row : kCovered) {
@@ -155,11 +173,16 @@ struct Pair {
     DOp lo, hi;
 };
 
-// Something the pass knows about scalar registers: where it was learned, so that a use in another block can be
-// checked.
+// Something the pass knows about scalar registers. A fact belongs to the write that made it: it holds at a later
+// place only if, on every way the program can get there, that write is still the last one to each register the
+// fact is about (see Writer::compute_writers).
+constexpr int kWriterInitial = -1;   // the value the register had when the program started
+constexpr int kWriterSeveral = -2;   // different writes, depending on the way taken
+constexpr int kWriterUnknown = -3;   // not reached yet
+constexpr unsigned kTracked = 102;   // the general scalar registers
+
 struct Fact {
-    bool initial = false;  // true of the registers a program starts with
-    int block = 0;
+    int writer = kWriterInitial;  // the instruction (its number in the program) whose write made the fact
 };
 
 struct Origin : Fact {
@@ -201,9 +224,13 @@ private:
     std::uint32_t scc_ = 0, live_ = 0, next_ = 0, a_ = 0, b_ = 0, c_ = 0, d_ = 0, m_[3] = {}, coord_ = 0, texel_ = 0;
     std::bitset<128> written_s_, opaque_s_;
     std::bitset<256> written_v_;
-    unsigned writes_[128] = {};
-    std::map<unsigned, Origin> origin_;
-    std::map<unsigned, Desc> desc_;
+    // Facts by (first register, the write that made them).
+    std::map<std::pair<unsigned, int>, Origin> origin_;
+    std::map<std::pair<unsigned, int>, Desc> desc_;
+    std::vector<std::array<int, kTracked>> writer_in_;  // for each block: the last write to each register on entry
+    int cur_writer_[kTracked] = {};                     // the same at the instruction being carried over
+    int cur_ins_ = kWriterInitial;                      // that instruction's number, while one is carried over
+    unsigned cur_first_ = 0, cur_count_ = 0;            // the scalar registers it writes
     struct Waiting {
         unsigned attr, chan;
     };
@@ -213,6 +240,8 @@ private:
     std::map<std::uint32_t, std::uint32_t> cond_temp_;
     std::map<std::uint32_t, std::uint8_t> input_decl_;   // register -> mask
     std::map<std::uint32_t, bool> input_float_;          // pixel inputs: register -> its elements are float
+    bool position_input_ = false;                        // a pixel program is given the position's x and y
+    std::uint32_t position_register_ = 0;
     std::map<std::uint32_t, std::uint8_t> output_decl_;  // register -> mask
     std::uint32_t cb_count_ = 0, texture_count_ = 0, sampler_count_ = 0;
 
@@ -293,13 +322,10 @@ private:
             written_s_.set(reg);
             opaque_s_.reset(reg);
         }
-        origin_.erase(reg);
-        for (auto it = desc_.begin(); it != desc_.end();) {
-            if (reg >= it->first && reg < it->first + it->second.words) {
-                it = desc_.erase(it);
-            } else {
-                ++it;
-            }
+        // The facts about a register follow its last write (compute_writers). That bookkeeping reads the
+        // instruction's words on its own; a write it did not foresee would leave a fact standing wrongly.
+        if (reg < kTracked && cur_ins_ >= 0 && !(reg >= cur_first_ && reg < cur_first_ + cur_count_)) {
+            refuse_register("the pass writes s%u for an instruction whose writes it did not foresee", reg);
         }
         if (reg == kExecLo) {
             op(Opcode::kAnd, {D(live_), T(ts(kExecLo)), U(1)});
@@ -397,52 +423,111 @@ private:
 
     // ---- facts ---------------------------------------------------------------------------------------------
 
-    bool dominates(int above, int below) const {
-        int at = below;
-        for (std::size_t guard = 0; guard <= graph_.blocks.size(); ++guard) {
-            if (at == above) {
-                return true;
+    // The general scalar registers an instruction writes, read from its words alone.
+    static void scalar_writes(const Instruction& ins, unsigned& first, unsigned& count) {
+        first = 0;
+        count = 0;
+        if (ins.format == WalkFormat::kSmem) {
+            const AccessInfo access = access_of(ins);
+            if (access.found) {
+                first = access.first_destination;
+                count = access.words;
             }
-            if (at < 0 || static_cast<std::size_t>(at) >= graph_.blocks.size()) {
-                return false;
+        } else if (ins.has_destination && ins.dst.kind == OperandKind::kSgpr) {
+            first = ins.dst.index;
+            count = 1;
+            const unsigned opcode = ins.opcode;
+            const bool wide =
+                (ins.format == WalkFormat::kSop1 &&
+                 (opcode == 4 || opcode == 8 || opcode == 10 || opcode == 33 || opcode == 36 || opcode == 37 ||
+                  opcode == 39 || opcode == 40 || opcode == 55)) ||
+                (ins.format == WalkFormat::kSop2 && (opcode == 11 || opcode == 15 || opcode == 17 ||
+                                                     opcode == 19 || opcode == 21 || opcode == 23)) ||
+                ins.format == WalkFormat::kVop3 || ins.format == WalkFormat::kVopc;
+            if (wide) {
+                count = 2;
             }
-            const int up = graph_.blocks[at].immediate_dominator;
-            if (up == at) {
-                return false;
-            }
-            at = up;
         }
-        return false;
     }
 
-    bool usable(const Fact& fact, unsigned first, unsigned count) const {
-        if (!fact.initial && fact.block == cur_block_) {
-            return true;
+    // For every block, which write is the last one to each general scalar register when the block is entered:
+    // the start of the program, one instruction, or "it depends on the way taken". Worked out over the graph
+    // until nothing changes.
+    void compute_writers() {
+        const std::size_t blocks = graph_.blocks.size();
+        std::array<int, kTracked> unknown;
+        unknown.fill(kWriterUnknown);
+        writer_in_.assign(blocks, unknown);
+        std::vector<std::array<int, kTracked>> out(blocks, unknown);
+        const auto meet = [](int a, int b) {
+            return a == kWriterUnknown ? b : b == kWriterUnknown || a == b ? a : kWriterSeveral;
+        };
+        bool changed = true;
+        for (std::size_t round = 0; changed && round < 4 * blocks + 16; ++round) {
+            changed = false;
+            for (std::size_t b = 0; b < blocks; ++b) {
+                std::array<int, kTracked> in = unknown;
+                if (b == graph_.entry_block) {
+                    in.fill(kWriterInitial);
+                }
+                for (const std::uint32_t pred : graph_.blocks[b].predecessors) {
+                    if (pred < blocks) {
+                        for (unsigned reg = 0; reg < kTracked; ++reg) {
+                            in[reg] = meet(in[reg], out[pred][reg]);
+                        }
+                    }
+                }
+                std::array<int, kTracked> after = in;
+                if (in[0] != kWriterUnknown) {
+                    const FlowBlock& block = graph_.blocks[b];
+                    for (std::size_t i = 0; i < block.instruction_count; ++i) {
+                        const std::size_t number = block.first_instruction + i;
+                        unsigned first = 0, count = 0;
+                        scalar_writes(prog_.instructions[number], first, count);
+                        for (unsigned reg = first; reg < first + count && reg < kTracked; ++reg) {
+                            after[reg] = static_cast<int>(number);
+                        }
+                    }
+                }
+                if (in != writer_in_[b] || after != out[b]) {
+                    writer_in_[b] = in;
+                    out[b] = after;
+                    changed = true;
+                }
+            }
         }
-        const unsigned wanted = fact.initial ? 0u : 1u;
-        bool settled = true;
-        for (unsigned reg = first; reg < first + count && reg < 128; ++reg) {
-            settled = settled && writes_[reg] == wanted;
+        if (changed) {
+            refuse("the last writes to the scalar registers did not settle");
         }
-        if (fact.initial) {
-            const bool at_start = cur_block_ == static_cast<int>(graph_.entry_block) &&
-                                  graph_.blocks[graph_.entry_block].predecessors.empty();
-            return settled || at_start;
+    }
+
+    // Is the write that made a fact still the last one to each of its registers, here?
+    bool stands(int writer, unsigned first, unsigned count) const {
+        if (first + count > kTracked) {
+            return false;
         }
-        return settled && dominates(fact.block, cur_block_);
+        for (unsigned reg = first; reg < first + count; ++reg) {
+            if (cur_writer_[reg] != writer) {
+                return false;
+            }
+        }
+        return true;
     }
 
     const Origin* origin_of(unsigned reg) const {
-        const auto found = origin_.find(reg);
-        if (found == origin_.end() || !usable(found->second, reg, 1)) {
+        if (reg >= kTracked) {
             return nullptr;
         }
-        return &found->second;
+        const auto found = origin_.find({reg, cur_writer_[reg]});
+        return found == origin_.end() ? nullptr : &found->second;
     }
 
     const Desc* desc_at(unsigned reg) const {
-        const auto found = desc_.find(reg);
-        if (found == desc_.end() || !usable(found->second, reg, found->second.words)) {
+        if (reg >= kTracked) {
+            return nullptr;
+        }
+        const auto found = desc_.find({reg, cur_writer_[reg]});
+        if (found == desc_.end() || !stands(found->second.writer, reg, found->second.words)) {
             return nullptr;
         }
         return &found->second;
@@ -513,36 +598,6 @@ private:
 
     // ---- start of the program ------------------------------------------------------------------------------
 
-    void count_writes() {
-        for (const Instruction& ins : prog_.instructions) {
-            unsigned first = 0, count = 0;
-            if (ins.format == WalkFormat::kSmem) {
-                const AccessInfo access = access_of(ins);
-                if (access.found) {
-                    first = access.first_destination;
-                    count = access.words;
-                }
-            } else if (ins.has_destination && ins.dst.kind == OperandKind::kSgpr) {
-                first = ins.dst.index;
-                count = 1;
-                const unsigned opcode = ins.opcode;
-                const bool wide =
-                    (ins.format == WalkFormat::kSop1 &&
-                     (opcode == 4 || opcode == 8 || opcode == 10 || opcode == 33 || opcode == 36 || opcode == 37 ||
-                      opcode == 39 || opcode == 40 || opcode == 55)) ||
-                    (ins.format == WalkFormat::kSop2 && (opcode == 11 || opcode == 15 || opcode == 17 ||
-                                                         opcode == 19 || opcode == 21 || opcode == 23)) ||
-                    ins.format == WalkFormat::kVop3 || ins.format == WalkFormat::kVopc;
-                if (wide) {
-                    count = 2;
-                }
-            }
-            for (unsigned reg = first; reg < first + count && reg < 128; ++reg) {
-                ++writes_[reg];
-            }
-        }
-    }
-
     void start() {
         scc_ = new_temp();
         live_ = new_temp();
@@ -579,20 +634,62 @@ private:
                             ts(reg);
                         }
                     }
-                    if (entry.scalar_register < 102 && origin_.find(entry.scalar_register) == origin_.end()) {
+                    if (entry.scalar_register < kTracked) {
                         Origin origin;
-                        origin.initial = true;
-                        origin.block = static_cast<int>(graph_.entry_block);
+                        origin.writer = kWriterInitial;
                         origin.root = entry.scalar_register;
-                        origin_[entry.scalar_register] = origin;
+                        origin_[{entry.scalar_register, kWriterInitial}] = origin;
                     }
                 }
             }
         }
         if (in_.stage == PcStage::kVertex) {
             start_vertex_inputs();
+        } else {
+            start_pixel_position();
         }
         out_ = &body_;
+    }
+
+    // A pixel program whose shader reads the x and y of its position input finds them in v2 and v3.
+    // Measured on the game's programs (boot b129): of the 146 pixel programs that declare the position, the 68
+    // whose input list says the shader reads exactly x and y read exactly v2 and v3 before writing them, and
+    // the 78 whose shader reads none of it read nothing past v1. Which of the two is x is the hardware's order
+    // of a pixel program's starting registers as the public driver declares it (Mesa radv_shader_args.c,
+    // declare_ps_input_vgprs: the interpolation weights first, then the position's x, y, z, w, each present
+    // only when used). The order means v2 and v3 only when the centre weights in v0 and v1 are all that comes
+    // before, so the registers are given only to a program that reads nothing past v3 before writing it and
+    // whose shader reads exactly x and y. Taken to be so: the value is the pixel centre's window coordinate on
+    // both sides (the public driver hands the register on as the fragment coordinate unchanged).
+    void start_pixel_position() {
+        if (in_.inputs == nullptr || !in_.inputs->found) {
+            return;
+        }
+        const SignatureElement* position = nullptr;
+        for (const SignatureElement& element : in_.inputs->elements) {
+            if (element.system_value == 1) {
+                if (position != nullptr) {
+                    return;
+                }
+                position = &element;
+            }
+        }
+        if (position == nullptr || (position->use_mask & 0xF) != 0x3 || (position->mask & 0x3) != 0x3) {
+            return;
+        }
+        const ProgramShape shape = shape_of(prog_);
+        for (unsigned reg = 4; reg < 256; ++reg) {
+            if (shape.vector_inputs[reg]) {
+                return;
+            }
+        }
+        position_input_ = true;
+        position_register_ = position->shader_register;
+        input_decl_[position_register_] = dxbc::kMaskXY;
+        for (unsigned c = 0; c < 2; ++c) {
+            op(Opcode::kMov, {D(tv(2 + c)), dxbc::input_scalar(position_register_, static_cast<std::uint8_t>(c))});
+            written_v_.set(2 + c);
+        }
     }
 
     // Values the root signature holds directly: the registers are filled from a constant buffer at the declared
@@ -801,6 +898,16 @@ private:
             case 7: op(Opcode::kFtou, {D(a_), a}); return {T(a_), false};
             case 8: op(Opcode::kFtoi, {D(a_), a}); return {T(a_), false};
             case 11: op(Opcode::kF16toF32, {D(a_), a}); return {T(a_), true};
+            case 17:
+            case 18:
+            case 19:
+            case 20:
+                // One byte of the source as a float: byte 0 is the lowest (LLVM's SIISelLowering.cpp folds
+                // "cvt_f32_ubyte0 (srl x, 8)" into "cvt_f32_ubyte1 x").
+                op(Opcode::kUshr, {D(a_), a, U(8 * (opcode - 17))});
+                op(Opcode::kAnd, {D(a_), T(a_), U(0xFFu)});
+                op(Opcode::kUtof, {D(a_), T(a_)});
+                return {T(a_), true};
             case 32: op(Opcode::kFrc, {D(a_), a}); return {T(a_), true};
             case 33: op(Opcode::kRoundZ, {D(a_), a}); return {T(a_), true};
             case 34: op(Opcode::kRoundPi, {D(a_), a}); return {T(a_), true};
@@ -895,17 +1002,25 @@ private:
         } else if (opcode < 0x140) {
             // The two-word form of a two-operand instruction.
             const unsigned base = opcode - 0x100;
+            const bool accumulates = base == 31 || base == 43;
             const bool is_float = base == 3 || base == 4 || base == 5 || base == 7 || base == 8 || base == 15 ||
-                                  base == 16;
+                                  base == 16 || accumulates;
             if (!is_float && has_modifiers(ins)) {
                 refuse(not_written(ins, "a float modifier on an integer instruction"));
+            }
+            if (accumulates && ((ins.vop3.abs_or_neg_hi | ins.vop3.neg) & 4) != 0) {
+                refuse(not_written(ins, "a modifier on the value that is added to"));
             }
             DOp a = r32(ins, 0), b = r32(ins, 1);
             if (is_float) {
                 a = modified(ins, 0, a);
                 b = modified(ins, 1, b);
             }
-            result = vector2(ins, base, a, b);
+            if (accumulates) {
+                multiply_add_to(base == 43, a, b, destination);
+            } else {
+                result = vector2(ins, base, a, b);
+            }
             if (is_float) {
                 finish_float(ins);
             }
@@ -1084,10 +1199,9 @@ private:
                 }
                 const bool had_origin = origin != nullptr;
                 set_s(low, r32(ins, 0));
-                if (had_origin && low < 102) {
-                    copy.initial = false;
-                    copy.block = cur_block_;
-                    origin_[low] = copy;
+                if (had_origin && low < kTracked) {
+                    copy.writer = cur_ins_;
+                    origin_[{low, cur_ins_}] = copy;
                 }
                 return;
             }
@@ -1309,21 +1423,36 @@ private:
         set_scc(T(a_));
     }
 
+    // The two instructions that add a product to what their destination holds; the result is left in a_.
+    // The encoding has two source fields and the public table lists three operands: the third is the
+    // destination. v_fmac_f32 is the fused form; v_mac_f32 rounds the product first. (The console's v_mac_f32
+    // also turns denormal numbers into zero, as Mesa's aco_ir.h notes; the PC instructions here do not.)
+    void multiply_add_to(bool fused, const DOp& a, const DOp& b, unsigned destination) {
+        const DOp old = rv(destination);
+        if (fused) {
+            op(Opcode::kMad, {D(a_), a, b, old});
+        } else {
+            op(Opcode::kMul, {D(a_), a, b});
+            op(Opcode::kAdd, {D(a_), T(a_), old});
+        }
+    }
+
     void vop2(const Instruction& ins) {
         const unsigned opcode = ins.opcode;
         const unsigned destination = vdst(ins);
         switch (opcode) {
+            case 31:
+                multiply_add_to(false, r32(ins, 0), r32(ins, 1), destination);
+                break;
             case 1: {
                 const DOp a = r32(ins, 0), b = r32(ins, 1);
                 op(Opcode::kAnd, {D(b_), T(ts(kVccLo)), U(1)});
                 op(Opcode::kMovc, {D(a_), T(b_), b, a});
                 break;
             }
-            case 43: {
-                const DOp a = r32(ins, 0), b = r32(ins, 1);
-                op(Opcode::kMad, {D(a_), a, b, rv(destination)});
+            case 43:
+                multiply_add_to(true, r32(ins, 0), r32(ins, 1), destination);
                 break;
-            }
             case 44:
             case 45: {
                 if (!ins.has_constant_word) {
@@ -1354,8 +1483,11 @@ private:
     }
 
     void vopc(const Instruction& ins) {
-        compare_value(ins.opcode, r32(ins, 0), r32(ins, 1));
-        store_mask(kVccLo);
+        // A compare into the condition mask, or (the numbers 16 higher) into the execution mask: the lanes
+        // that fail it stop running.
+        const bool into_exec = exec_compare_number(ins.opcode);
+        compare_value(into_exec ? ins.opcode - 16u : ins.opcode, r32(ins, 0), r32(ins, 1));
+        store_mask(into_exec ? kExecLo : kVccLo);
     }
 
     // ---- memory, images, inputs, outputs -------------------------------------------------------------------
@@ -1405,12 +1537,12 @@ private:
                 opaque_s_.set(access.first_destination + i);
             }
             Desc fact;
-            fact.block = cur_block_;
+            fact.writer = cur_ins_;
             fact.kind = DescKind::kSamplerNumber;
             fact.words = 4;
             fact.layout = *heap;
             fact.number_temp = number;
-            desc_[access.first_destination] = fact;
+            desc_[{access.first_destination, cur_ins_}] = fact;
             return;
         }
         if (!table) {
@@ -1437,12 +1569,12 @@ private:
             const unsigned size = resource != nullptr && resource->descriptor_words == 8 ? 8u : 4u;
             if (resource != nullptr && position + size <= access.words) {
                 Desc fact;
-                fact.block = cur_block_;
+                fact.writer = cur_ins_;
                 fact.kind = DescKind::kTable;
                 fact.words = size;
                 fact.layout = *entry;
                 fact.resource = *resource;
-                desc_[access.first_destination + position] = fact;
+                desc_[{access.first_destination + position, cur_ins_}] = fact;
             }
             position += size;
         }
@@ -1529,14 +1661,52 @@ private:
         }
     }
 
-    void buffer_load(const Instruction& ins, const AccessInfo& access) {
-        if (access.idxen) {
-            refuse(not_written(ins, "an element index"));
+    // A load by element number from a constant buffer: the PC's own way of reading a constant buffer at a place
+    // computed at run time, whose element is 16 bytes. That the console's element is 16 bytes too is inferred:
+    // the game gives no element size when it makes a constant buffer view, the program loads four words for
+    // each number, and the public rule for such a read counts in 16-byte rows.
+    void indexed_constant_load(const Instruction& ins, const AccessInfo& access, const BufferSource& source) {
+        if (access.offen || !access.soffset_is_zero) {
+            refuse(not_written(ins, "an element index together with a byte offset register"));
         }
+        const unsigned first = (access.immediate_offset_buffer % 16) / 4;
+        if (access.immediate_offset_buffer % 4 != 0 || first + access.components > 4) {
+            refuse(not_written(ins, "an element index with words that cross a 16-byte element"));
+        }
+        if (access.index_register >= 256 || !written_v_[access.index_register]) {
+            refuse_register("reads v%u before any write, and nothing is known to provide it", access.index_register);
+        }
+        for (PcBinding& binding : result_.bindings) {
+            if (binding.kind == PcBindingKind::kConstantBuffer && binding.id == source.id) {
+                binding.indexed = true;
+            }
+        }
+        const auto component = [first](unsigned i) {
+            return static_cast<std::uint8_t>(first + i > 3 ? 3 : first + i);
+        };
+        const std::uint8_t mask = static_cast<std::uint8_t>((1u << access.components) - 1u);
+        op(Opcode::kMov,
+           {dxbc::temp_dest(texel_, mask),
+            dxbc::constant_buffer_source_indexed(source.id, source.shader_register, access.immediate_offset_buffer / 16,
+                                                 tv(access.index_register), 0,
+                                                 dxbc::swizzle(component(0), component(1), component(2), component(3)))});
+        for (unsigned i = 0; i < access.components; ++i) {
+            set_v(access.first_data_register + i, dxbc::temp_scalar(texel_, static_cast<std::uint8_t>(i)));
+        }
+    }
+
+    void buffer_load(const Instruction& ins, const AccessInfo& access) {
         if (access.components == 0 || access.components > 4) {
             refuse(not_written(ins, "a number of words the pass does not carry"));
         }
         const BufferSource source = buffer_source(ins, access.descriptor_register_buffer);
+        if (access.idxen) {
+            if (!source.constant_buffer) {
+                refuse(not_written(ins, "an element index into a buffer that is not a constant buffer"));
+            }
+            indexed_constant_load(ins, access, source);
+            return;
+        }
         const bool fixed = !access.offen && access.soffset_is_zero;
         if (!access.soffset_is_zero && !access.soffset_is_register) {
             refuse(not_written(ins, "an offset of a form the pass does not carry"));
@@ -1879,9 +2049,19 @@ private:
             --count;  // the control word the block ends with
             ++result_.console_instructions;
         }
-        for (std::size_t i = 0; i < count; ++i) {
-            instruction(prog_.instructions[flow_block.first_instruction + i]);
+        for (unsigned reg = 0; reg < kTracked; ++reg) {
+            cur_writer_[reg] = writer_in_[number][reg];
         }
+        for (std::size_t i = 0; i < count; ++i) {
+            const Instruction& ins = prog_.instructions[flow_block.first_instruction + i];
+            cur_ins_ = static_cast<int>(flow_block.first_instruction + i);
+            scalar_writes(ins, cur_first_, cur_count_);
+            instruction(ins);
+            for (unsigned reg = cur_first_; reg < cur_first_ + cur_count_ && reg < kTracked; ++reg) {
+                cur_writer_[reg] = cur_ins_;
+            }
+        }
+        cur_ins_ = kWriterInitial;
         if (flow_block.end == FlowEnd::kConditionalBranch) {
             const std::uint32_t condition = new_temp();
             cond_temp_[number] = condition;
@@ -1970,7 +2150,7 @@ private:
         if (!flow.ok) {
             refuse("control flow: " + flow.reason);
         }
-        count_writes();
+        compute_writers();
         start();
         if (flow.needs_next) {
             prologue_.push_back(PcInstruction{Opcode::kMov, {}, {D(next_), U(flow.next_entry)}});
@@ -2028,7 +2208,7 @@ private:
                     break;
                 case PcBindingKind::kConstantBuffer:
                     builder.declare_constant_buffer(binding.id, binding.shader_register, binding.shader_register,
-                                                    4096, binding.space);
+                                                    4096, binding.space, binding.indexed);
                     break;
                 default:
                     break;
@@ -2061,7 +2241,10 @@ private:
                     }
                 }
             }
-            if (pixel) {
+            if (pixel && position_input_ && input.first == position_register_) {
+                builder.declare_input_ps_siv(input.first, input.second, dxbc::InterpolationMode::kLinearNoPerspective,
+                                             dxbc::SystemValue::kPosition);
+            } else if (pixel) {
                 // Float inputs with perspective at the pixel centre (taken to be so); others are not
                 // interpolated.
                 const auto kind = input_float_.find(input.first);
