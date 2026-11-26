@@ -22,15 +22,15 @@ namespace {
 struct Description {  // the 0x38 bytes the game fills
     unsigned type;
     unsigned not_written_04;
-    unsigned long long zero_08;
+    unsigned long long alignment;
     unsigned long long width;
     unsigned height;
     unsigned short depth_or_array;
     unsigned short mips;
     unsigned format;
-    unsigned element_bytes;
-    unsigned zero_28;
-    unsigned swizzle_mode;
+    unsigned samples;
+    unsigned sample_quality;
+    unsigned layout;
     unsigned flags;
     unsigned not_written_34;
 };
@@ -242,9 +242,9 @@ int main() {
     // The mode question is refused and the caller's value left as it was.
     {
         Description d = describe(3, 64, 32, 1, 1, 28);
-        d.swizzle_mode = 0x1234;
-        CHECK(suggest(&d, 0, &d.swizzle_mode) == static_cast<long>(0x80004001L));
-        CHECK(d.swizzle_mode == 0x1234);
+        d.layout = 0x1234;
+        CHECK(suggest(&d, 0, &d.layout) == static_cast<long>(0x80004001L));
+        CHECK(d.layout == 0x1234);
         unsigned long long creates = 0, suggestions = 0;
         counts(&creates, &suggestions);
         CHECK(creates == 9 && suggestions == 1);
