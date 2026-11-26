@@ -26,7 +26,7 @@ using namespace whiwhi::shell;
 // A thread-local variable in the shell's own executable makes Windows assign storage index 0 to this process's
 // main module, the way the console assigns it to the game (see boot_image.cpp). Non-zero initialised so the
 // linker keeps the storage directory; touched once in main so it is not stripped.
-__declspec(thread) unsigned char whiwhi_tls_seat[16] = {1};
+// The per-thread storage block comes from tls_seat.cpp (linked in): the exe owns TLS index 0.
 
 static std::string lower(std::string s) {
     for (char& c : s) {
@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
         std::printf("usage: connect_imports <image file> [folder with the image's own libraries] [--names]\n");
         return 2;
     }
-    whiwhi_tls_seat[0] = 0;  // keep the storage directory alive
+    // The exe's own thread-local block (tls_seat.cpp) owns index 0; nothing to keep alive here.
     std::ifstream file(image_path, std::ios::binary);
     if (!file) {
         std::printf("cannot open %s\n", image_path);
