@@ -2655,6 +2655,7 @@ struct PackedCensus {
     std::map<std::string, unsigned long long> inputs;       // "<kind>: scalar registers read before written"
     std::map<std::string, unsigned long long> exports;      // "<kind>: kinds of export target"
     std::map<std::string, unsigned long long> origins;      // "<kind>: <use>: <where its descriptor comes from>"
+    std::map<std::string, unsigned long long> tables;       // "<kind>: <a statement about the module's two tables>"
 };
 PackedCensus g_packed;
 
@@ -2711,6 +2712,7 @@ void log_packed_census(const char* when) {
     const auto inputs = c.inputs;
     const auto exports = c.exports;
     const auto origins = c.origins;
+    const auto tables = c.tables;
     ReleaseSRWLockShared(&g_packed.lock);
     if (!containers) {
         return;
@@ -2734,6 +2736,181 @@ void log_packed_census(const char* when) {
     log_packed_counted("scalar registers read before written", inputs, 40);
     log_packed_counted("exports", exports, 16);
     log_packed_counted("descriptor origin", origins, 48);
+    log_packed_counted("tables", tables, 200);
+}
+
+// What the two tables after a module's code say (shader_program.hpp), checked against what the program does
+// and against the resources the container's 'PSV0' part declares. Every statement is counted per kind of
+// shader; none holds a byte of the game. `first_register` is the scalar register the reading expects the
+// first root parameter in.
+void table_statements(const std::uint8_t* container, std::uint32_t bytes, const std::vector<std::uint8_t>& block,
+                      const whiwhi::shell::ModuleProgram& found, const whiwhi::shell::ProgramShape& shape,
+                      std::vector<std::string>& say) {
+    using namespace whiwhi::shell;
+    char text[160];
+    const ModuleTables tables = read_module_tables(block.data(), block.size(), found);
+    if (!tables.found) {
+        say.push_back("tables not read: " + tables.reason.substr(0, 96));
+        // The numbers the record holds, so that a layout the reader does not accept can be worked out.
+        if (static_cast<std::size_t>(found.record_offset) + 0x70 <= block.size()) {
+            const auto at = [&block, &found](std::size_t offset) {
+                std::uint32_t value = 0;
+                std::memcpy(&value, block.data() + found.record_offset + offset, 4);
+                return value;
+            };
+            const long long first = at(0x28), second = at(0x30), name = at(0x60);
+            const long long first_count = at(0x38), second_count = at(0x3C);
+            std::snprintf(text, sizeof(text),
+                          "tables not read: %lld + %lld entries; %lld byte(s) between the first table's end and the "
+                          "second's start; %lld between the second's end and the name record; name record of %u "
+                          "bytes; word at +0x68 = %u",
+                          first_count, second_count, second - first - first_count * 20,
+                          name - second - second_count * 20, at(0x6C), at(0x68));
+            say.push_back(text);
+        }
+        return;
+    }
+    say.push_back("tables read");
+    if (!tables.understood) {
+        say.push_back("an entry is of a kind not seen before: " + tables.not_understood.substr(0, 96));
+    }
+    std::snprintf(text, sizeof(text), "first table has %zu entr%s, second %zu", tables.layout.size(),
+                  tables.layout.size() == 1 ? "y" : "ies", tables.resources.size());
+    say.push_back(text);
+
+    // The first table, entry by entry.
+    std::bitset<128> named;  // scalar registers the first table names, each parameter with `count` registers
+    std::map<unsigned, unsigned> parameter;  // first scalar register -> registers taken
+    for (const ModuleLayoutEntry& entry : tables.layout) {
+        std::snprintf(text, sizeof(text), "first table: kind %u, count word %u%s", entry.kind, entry.count,
+                      entry.kind != 4 && (entry.last >> 8) ? ", bits above the low byte of the last word" : "");
+        say.push_back(text);
+        if (entry.kind == 4) {
+            continue;
+        }
+        const unsigned taken = entry.count ? entry.count : 1;
+        for (unsigned r = entry.scalar_register; r < entry.scalar_register + taken && r < 128; ++r) {
+            named[r] = true;
+        }
+        auto at = parameter.find(entry.scalar_register);
+        if (at == parameter.end()) {
+            parameter[entry.scalar_register] = taken;
+        } else if (at->second != taken) {
+            say.push_back("first table: two entries with the same scalar register disagree on the count word");
+        }
+        if ((entry.kind == 3 || entry.kind == 6) && entry.offset_words % 4 != 0) {
+            say.push_back("first table: a descriptor offset that is not a multiple of four words");
+        }
+    }
+    if (!parameter.empty()) {
+        bool consecutive = true;
+        unsigned expected = parameter.begin()->first;
+        for (const auto& item : parameter) {
+            consecutive = consecutive && item.first == expected;
+            expected = item.first + item.second;
+        }
+        std::snprintf(text, sizeof(text),
+                      "first table: its scalar registers start at s%u and %s when each parameter takes its count "
+                      "word of registers",
+                      parameter.begin()->first, consecutive ? "follow one another without a gap" : "do NOT follow on");
+        say.push_back(text);
+    }
+
+    // The second table against the first: every resource has to arrive the way the first table says.
+    for (const ModuleResourceEntry& entry : tables.resources) {
+        std::snprintf(text, sizeof(text), "second table: class %u, arrival %u, descriptor of %u word(s), word 3 = %u",
+                      entry.resource_class, entry.arrival, entry.descriptor_words, entry.word3);
+        say.push_back(text);
+        bool backed = false;
+        for (const ModuleLayoutEntry& layout : tables.layout) {
+            if (layout.shader_register != entry.shader_register) {
+                continue;
+            }
+            if (entry.arrival == 3) {
+                backed = backed || ((layout.kind == 3 || layout.kind == 6) &&
+                                    layout.scalar_register == entry.scalar_register &&
+                                    layout.offset_words == entry.offset_words);
+            } else if (entry.arrival == 4) {
+                backed = backed || (layout.kind == 4 && layout.fixed_index == entry.fixed_index);
+            } else {
+                backed = backed || (layout.kind == entry.arrival && layout.scalar_register == entry.scalar_register);
+            }
+        }
+        std::snprintf(text, sizeof(text), "second table: an entry of arrival %u %s", entry.arrival,
+                      backed ? "has its entry in the first table" : "has NO matching entry in the first table");
+        say.push_back(text);
+    }
+
+    // The second table against what the container declares.
+    const ShaderContainer parts = read_shader_container(container, bytes);
+    const ShaderChunk* validation = nullptr;
+    for (const ShaderChunk& chunk : parts.chunks) {
+        if (chunk.fourcc == 0x30565350u) {  // 'PSV0'
+            validation = &chunk;
+        }
+    }
+    if (!parts.ok() || !validation) {
+        say.push_back("the container has no 'PSV0' part to compare with");
+    } else {
+        const DeclaredResources declared = read_declared_resources(container + validation->offset + 8, validation->size);
+        if (!declared.found) {
+            say.push_back("the 'PSV0' part's resources were not read: " + declared.reason.substr(0, 80));
+        } else {
+            say.push_back(declared.resources.size() == tables.resources.size()
+                              ? "second table has as many entries as the container declares resources"
+                              : "second table and the container's declared resources differ in number");
+            for (const DeclaredResource& resource : declared.resources) {
+                const std::uint8_t wanted = declared_resource_class(resource.type);
+                bool present = false;
+                for (const ModuleResourceEntry& entry : tables.resources) {
+                    present = present || (entry.resource_class == wanted && entry.shader_register == resource.lower);
+                }
+                std::snprintf(text, sizeof(text), "declared resource of type %u (%s register): %s", resource.type,
+                              resource.lower == resource.upper ? "one" : "a range of",
+                              present ? "in the second table with the same class and register"
+                                      : "NOT in the second table");
+                say.push_back(text);
+            }
+        }
+    }
+
+    // What the program does against the first table.
+    for (const ResourceReference& ref : shape.resources) {
+        const char* const use = resource_use_name(ref.use);
+        if (ref.origin.level == RegisterOrigin::kLoaded) {
+            unsigned kinds = 0;  // bit per kind of a first-table entry at that register and offset
+            for (const ModuleLayoutEntry& layout : tables.layout) {
+                if ((layout.kind == 3 || layout.kind == 6) && layout.scalar_register == ref.origin.root &&
+                    static_cast<std::uint64_t>(layout.offset_words) * 4 == ref.origin.offset1) {
+                    kinds |= 1u << layout.kind;
+                }
+            }
+            std::snprintf(text, sizeof(text), "program loads a descriptor for %s from a table: %s", use,
+                          kinds == (1u << 3)   ? "the first table has a kind 3 entry at that register and offset"
+                          : kinds == (1u << 6) ? "the first table has a kind 6 entry at that register and offset"
+                          : kinds              ? "the first table has entries of both kinds there"
+                                               : "the first table has NO entry at that register and offset");
+            say.push_back(text);
+        } else if (ref.origin.level == RegisterOrigin::kInput) {
+            unsigned kinds = 0;
+            for (const ModuleLayoutEntry& layout : tables.layout) {
+                if (layout.kind != 4 && layout.scalar_register == ref.origin.root) {
+                    kinds |= 1u << layout.kind;
+                }
+            }
+            std::snprintf(text, sizeof(text), "program uses input s%u directly for %s: first-table kinds there 0x%x",
+                          static_cast<unsigned>(ref.origin.root), use, kinds);
+            say.push_back(text);
+        } else {
+            std::snprintf(text, sizeof(text), "program's %s comes %s", use,
+                          ref.origin.level == RegisterOrigin::kLoadedTwice ? "through two loads"
+                                                                           : "from somewhere the pass does not follow");
+            say.push_back(text);
+        }
+    }
+    std::bitset<128> unnamed = shape.scalar_inputs & ~named;
+    say.push_back("scalar registers the program reads before writing that the first table does not name: " +
+                  register_set_text(unnamed));
 }
 
 void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
@@ -2797,13 +2974,14 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
     std::uint32_t second = 0, third = 0, fifth = 0;
     std::size_t header_place = 0;     // the header place (a module) that led to the code
     std::string not_found;
+    whiwhi::shell::ModuleProgram found;
     if (module) {
         second = words[1];
         third = words[2];
         fifth = words[4];
         // The module reader (shader_program.*) finds the code through the header or refuses with a reason; it
         // never guesses a place. Which header place names the code is counted per kind of shader.
-        const whiwhi::shell::ModuleProgram found = whiwhi::shell::find_module_program(block.data(), size);
+        found = whiwhi::shell::find_module_program(block.data(), size);
         if (found.found) {
             place_ok = true;
             header_place = found.header_place;
@@ -2849,6 +3027,10 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
         AcquireSRWLockShared(&g_programs.lock);
         same = g_programs.word_sums.count(sum) != 0;
         ReleaseSRWLockShared(&g_programs.lock);
+    }
+    std::vector<std::string> table_says;
+    if (module && lands && decoded_ok) {
+        table_statements(container, bytes, block, found, shape, table_says);
     }
 
     char text[128];
@@ -2906,6 +3088,9 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
                                               ": " + origin_class_text(ref.origin));
             }
         }
+    }
+    for (const std::string& statement : table_says) {
+        bounded(g_packed.tables, std::string(kind_name) + ": " + statement);
     }
     const unsigned long long shown = g_packed.unpacked;
     ReleaseSRWLockExclusive(&g_packed.lock);
