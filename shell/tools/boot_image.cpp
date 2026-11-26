@@ -492,7 +492,33 @@ int main(int argc, char** argv) {
         ResumeThread(thread);
         std::fprintf(stderr, "[boot] entry thread resumed\n");
         std::fflush(stderr);
-        const DWORD wait = WaitForSingleObject(thread, static_cast<DWORD>(seconds) * 1000);
+        // The image's watchdog compares the time of the last progress report (image+0x71b6338, written by one
+        // function of the image only; docs/exe-map/MAP.md section 2.2) once a second and stops the image after
+        // about 30 passes without a new one. That value is only read here, every half second, to show how long it
+        // went unchanged - how close the image's loop came to the watchdog's limit. Nothing is written.
+        const auto* progress = reinterpret_cast<const volatile unsigned long long*>(loaded.base + 0x71b6338);
+        const ULONGLONG started = GetTickCount64();
+        ULONGLONG changed_at = started;
+        ULONGLONG longest = 0;
+        unsigned long long last = *progress;
+        unsigned long long changes = 0;
+        DWORD wait = WAIT_TIMEOUT;
+        while (wait == WAIT_TIMEOUT && GetTickCount64() - started < static_cast<ULONGLONG>(seconds) * 1000) {
+            wait = WaitForSingleObject(thread, 500);
+            const ULONGLONG now = GetTickCount64();
+            const unsigned long long value = *progress;
+            if (value != last) {
+                last = value;
+                changed_at = now;
+                ++changes;
+            } else if (value != 0 && now - changed_at > longest) {
+                longest = now - changed_at;
+            }
+        }
+        std::fprintf(stderr, "[boot] the watchdog's progress stamp (read only): %llu new reports, longest unchanged "
+                             "%.1f s (the watchdog stops the image after about 30 s)\n",
+                     changes, static_cast<double>(longest) / 1000.0);
+        std::fflush(stderr);
         if (wait == WAIT_TIMEOUT) {
             std::lock_guard<std::mutex> lock(g_log);
             std::fprintf(stderr, "[boot] still running after %us - the image is alive; ending the boot\n", seconds);
