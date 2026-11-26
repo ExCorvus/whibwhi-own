@@ -55,6 +55,8 @@
 #undef D3D12SerializeVersionedRootSignature
 #undef D3D12CreateRootSignatureDeserializer
 
+#include "shader_root.hpp"  // the PC root signature built for a pipeline (after d3d12.h, so its types are seen)
+
 #include <dxgi1_2.h>  // the swap chain description the PC library takes
 #include <intrin.h>
 
@@ -5160,6 +5162,222 @@ void compare_stream_binding(const std::uint8_t* stream, std::size_t size) {
     }
 }
 
+// ---- preparing a real PC pipeline from a request -----------------------------------------------------------
+//
+// Translation (shader_pc.*) and root-signature building (shader_root.*) are CPU work and run on the thread that
+// asks. The PC device's own pipeline build is the part rule 7 governs. ExCorvus decided (after boot b136 showed
+// the device's own thread does not call back into the shell each frame) that the build runs on the RENDER thread
+// - the one that presents frames and waits on the frame clock - serialized with drawing, fed by a queue the
+// worker threads fill. This section prepares the request; the queue and the render-thread build are below.
+
+// Translates one shader container into a PC shader (its container and bindings), or refuses with a reason. The
+// same reading the census does (read_packed_program -> find_module_program -> decode_shader -> the tables, the
+// signatures and the declared resources), kept here so a pipeline request can use the result.
+whiwhi::shell::PcShader translate_shader_container(const std::uint8_t* container, std::uint32_t bytes,
+                                                   whiwhi::shell::PcStage stage) {
+    using namespace whiwhi::shell;
+    PcShader refused;
+    const PackedProgram program = read_packed_program(container, bytes);
+    if (!program.ok()) {
+        refused.reason = "the packed program: " + program.reason;
+        return refused;
+    }
+    const std::vector<std::uint8_t>& block = program.bytes;
+    const ModuleProgram found = find_module_program(block.data(), block.size());
+    if (!found.found) {
+        refused.reason = "the module: " + found.reason;
+        return refused;
+    }
+    const DecodedShader decoded =
+        decode_shader(block.data() + found.code_offset, found.program_bytes, ShaderStage::kUnknown);
+    if (!decoded.ok) {
+        refused.reason = "the decode: " + decoded.bad_reason;
+        return refused;
+    }
+    const ModuleTables tables = read_module_tables(block.data(), block.size(), found);
+    const ShaderContainer parts = read_shader_container(container, bytes);
+    const Signature in = signature_of(parts, container, bytes, "ISG1");
+    const Signature out = signature_of(parts, container, bytes, "OSG1");
+    DeclaredResources declared;
+    const ShaderChunk* validation = parts.ok() ? chunk_named(parts, "PSV0") : nullptr;
+    if (validation && static_cast<std::uint64_t>(validation->offset) + 8 + validation->size <= bytes) {
+        declared = read_declared_resources(container + validation->offset + 8, validation->size);
+    }
+    PcShaderInput input;
+    input.stage = stage;
+    input.program = &decoded;
+    input.tables = &tables;
+    input.inputs = &in;
+    input.outputs = &out;
+    input.declared = &declared;
+    return write_pc_shader(input);
+}
+
+bool root_layout_of(const void* signature, RootLayout& layout) {
+    AcquireSRWLockShared(&g_root_layouts_lock);
+    const auto found = g_root_layouts.find(static_cast<const Wrap*>(signature));
+    const bool ok = found != g_root_layouts.end();
+    if (ok) {
+        layout = found->second;
+    }
+    ReleaseSRWLockShared(&g_root_layouts_lock);
+    return ok;
+}
+
+// A request made ready for the PC device: the stream with its shaders translated and its root signature replaced
+// by a serialized PC one (the render thread creates the object and patches the pointer). The translated shader
+// containers are kept here so the stream's pointers into them stay valid until the build is done.
+struct PreparedPipeline {
+    bool ok = false;
+    std::string reason;
+    std::string what;
+    std::vector<std::uint8_t> stream;
+    std::vector<std::uint8_t> root_blob;
+    std::size_t root_pointer_at = 0;
+    bool root_pointer_present = false;
+    std::vector<std::vector<std::uint8_t>> shaders;
+};
+
+PreparedPipeline prepare_stream_pipeline(const std::uint8_t* stream, std::size_t size) {
+    using namespace whiwhi::shell;
+    PreparedPipeline prep;
+    prep.stream.assign(stream, stream + size);
+    const void* game_signature = nullptr;
+    std::vector<PcShader> translated;
+    bool any_shader = false;
+    for (std::size_t at = 0; at < prep.stream.size();) {
+        unsigned type = 0;
+        std::memcpy(&type, prep.stream.data() + at, 4);
+        std::size_t payload_at = 0, payload_bytes = 0, whole = 0;
+        if (!stream_subobject_shape(type, payload_at, payload_bytes, whole) || whole == 0 ||
+            at + whole > prep.stream.size()) {
+            prep.reason = "the stream does not walk by the public subobject shapes";
+            return prep;
+        }
+        std::uint8_t* payload = prep.stream.data() + at + payload_at;
+        if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE) {
+            std::memcpy(&game_signature, payload, 8);
+            prep.root_pointer_at = at + payload_at;
+            prep.root_pointer_present = true;
+        } else if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS || type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS) {
+            D3D12_SHADER_BYTECODE code;
+            std::memcpy(&code, payload, sizeof(code));
+            if (code.pShaderBytecode && code.BytecodeLength) {
+                any_shader = true;
+                const bool vertex = type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS;
+                PcShader shader = translate_shader_container(static_cast<const std::uint8_t*>(code.pShaderBytecode),
+                                                             static_cast<std::uint32_t>(code.BytecodeLength),
+                                                             vertex ? PcStage::kVertex : PcStage::kPixel);
+                if (!shader.ok) {
+                    prep.reason = std::string(vertex ? "vertex" : "pixel") + " shader: " + shader.reason;
+                    return prep;
+                }
+                prep.shaders.push_back(std::move(shader.container));
+                const std::vector<std::uint8_t>& bytes = prep.shaders.back();
+                D3D12_SHADER_BYTECODE pc_code{bytes.data(), bytes.size()};
+                std::memcpy(payload, &pc_code, sizeof(pc_code));
+                translated.push_back(std::move(shader));
+            }
+        } else if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS || type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS ||
+                   type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS || type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS ||
+                   type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS || type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS) {
+            D3D12_SHADER_BYTECODE code;
+            std::memcpy(&code, payload, sizeof(code));
+            if (code.pShaderBytecode || code.BytecodeLength) {
+                prep.reason = "a shader stage the pass does not write yet";
+                return prep;
+            }
+        } else if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO) {
+            std::memset(payload, 0, payload_bytes);  // a cached blob would be the console's
+        }
+        at += whole;
+    }
+    if (!any_shader) {
+        prep.reason = "the stream names no vertex or pixel shader";
+        return prep;
+    }
+    if (!game_signature) {
+        prep.reason = "the stream names no root signature";
+        return prep;
+    }
+    if (kind_of(const_cast<void*>(game_signature)) != kRootSignature) {
+        prep.reason = "the root signature named is not one of this library's";
+        return prep;
+    }
+    RootLayout layout;
+    if (!root_layout_of(game_signature, layout)) {
+        prep.reason = "the root signature's parameters were not read";
+        return prep;
+    }
+    RootBuildInput root_input;
+    for (std::size_t i = 0; i < layout.type.size(); ++i) {
+        RootParameterShape shape;
+        shape.type = layout.type[i];
+        shape.constants = layout.constants[i];
+        shape.shader_register = layout.shader_register[i];
+        root_input.parameters.push_back(shape);
+    }
+    root_input.flags = layout.flags;
+    root_input.graphics = true;
+    std::vector<const PcBinding*> bindings;
+    for (const PcShader& shader : translated) {
+        for (const PcBinding& binding : shader.bindings) {
+            bindings.push_back(&binding);
+        }
+    }
+    root_input.bindings = bindings;
+    const RootSignature signature = build_root_signature(root_input);
+    if (!signature.ok) {
+        prep.reason = "root signature: " + signature.reason;
+        return prep;
+    }
+    std::string why;
+    if (!serialize_root_signature(signature, prep.root_blob, why)) {
+        prep.reason = "root signature serialize: " + why;
+        return prep;
+    }
+    prep.ok = true;
+    char what[96];
+    std::snprintf(what, sizeof what, "%zu shader(s), a root signature of %zu bytes", translated.size(),
+                  prep.root_blob.size());
+    prep.what = what;
+    return prep;
+}
+
+// Counts how whole pipeline requests prepare (both shaders translated and a root signature built), by reason.
+SRWLOCK g_pipeline_prep_lock = SRWLOCK_INIT;
+std::map<std::string, unsigned long long> g_pipeline_prep;
+unsigned long long g_pipeline_prep_ok = 0;
+
+void note_pipeline_prep(const PreparedPipeline& prep) {
+    AcquireSRWLockExclusive(&g_pipeline_prep_lock);
+    if (prep.ok) {
+        ++g_pipeline_prep_ok;
+    } else {
+        ++g_pipeline_prep["refused: " + prep.reason.substr(0, 120)];
+    }
+    ReleaseSRWLockExclusive(&g_pipeline_prep_lock);
+}
+
+void log_pipeline_prep(const char* when) {
+    AcquireSRWLockShared(&g_pipeline_prep_lock);
+    const auto counted = g_pipeline_prep;
+    const unsigned long long ok = g_pipeline_prep_ok;
+    ReleaseSRWLockShared(&g_pipeline_prep_lock);
+    if (ok == 0 && counted.empty()) {
+        return;
+    }
+    logf("pipeline preparation (%s): %llu whole request(s) ready (shaders translated and a root signature built)\n",
+         when, ok);
+    unsigned shown = 0;
+    for (const auto& item : counted) {
+        if (shown++ >= 40) {
+            break;
+        }
+        logf("pipeline preparation (%s): %llu x  %s\n", when, item.second, item.first.c_str());
+    }
+}
+
 // Slot 86: ({stream size, stream}, identifier, out) - the public "pipeline state from a stream" argument list.
 HRESULT __stdcall w_device_slot86(Wrap* self, const void* desc, const GUID*, void** out, void*, void*, void*, void*,
                                   void*) {
@@ -5179,6 +5397,7 @@ HRESULT __stdcall w_device_slot86(Wrap* self, const void* desc, const GUID*, voi
                                          "multiple of eight below 64 KiB");
     }
     compare_stream_binding(stream, static_cast<std::size_t>(size));
+    note_pipeline_prep(prepare_stream_pipeline(stream, static_cast<std::size_t>(size)));
     if (!on_device_thread()) {
         return pipeline_other_thread(where);
     }
@@ -7797,6 +8016,7 @@ unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
     log_packed_census("whole run");
     log_address_outcomes();
     log_sampler_places();
+    log_pipeline_prep("whole run");
     return written;
 }
 
