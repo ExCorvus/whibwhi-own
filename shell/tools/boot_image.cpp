@@ -49,11 +49,17 @@ LoadedImage* g_loaded = nullptr;
 // The game test's record of the import calls (WHIWHI_CALL_LEDGER=<file>): one line per import of the image, in
 // the order of its import table: how often the game called it during the run and whether the shell provides it.
 // Written once, at the end of the run, to a file on the user's PC (it holds names and counts only).
-void write_call_ledger() {
-    static std::atomic<bool> written{false};
-    if (!g_loaded || !g_loaded->call_counts || written.exchange(true)) {
+// Written again every few seconds while the run lasts (see start_call_ledger): a run can end where nothing gets to
+// write a last report - the game sets its own unhandled-exception filter, and its breakpoint then ends the process.
+std::mutex g_ledger_lock;
+
+void write_call_ledger(bool final_report = true) {
+    std::lock_guard<std::mutex> hold(g_ledger_lock);
+    static bool finished = false;
+    if (!g_loaded || !g_loaded->call_counts || finished) {
         return;
     }
+    finished = final_report;
     char path[MAX_PATH] = {};
     if (GetEnvironmentVariableA("WHIWHI_CALL_LEDGER", path, sizeof(path)) == 0) {
         return;
@@ -83,6 +89,9 @@ void write_call_ledger() {
         }
     }
     std::fclose(out);
+    if (!final_report) {
+        return;
+    }
     std::fprintf(stderr, "[boot] call ledger: %zu of %zu imports called (%llu calls), %zu of them not provided; "
                          "written to %s\n",
                  called, g_loaded->counted.size(), calls, called_unprovided, path);
@@ -394,6 +403,15 @@ int main(int argc, char** argv) {
         return 1;
     }
     g_loaded = &loaded;
+    if (loaded.call_counts) {
+        // The ledger is written again every 5 seconds, so a run that ends without a last report still leaves one.
+        CreateThread(nullptr, 0, [](void*) -> DWORD {
+            for (;;) {
+                Sleep(5000);
+                write_call_ledger(false);
+            }
+        }, nullptr, 0, nullptr);
+    }
     // The game derives its install dir from GetModuleFileNameW(NULL). By default we run from a staged work
     // folder that holds our binaries plus links to the game files, so the natural path is already right.
     // WHIWHI_PEB_GAME=1 forces the PEB image path to the game exe instead (for a bare game-folder layout).
