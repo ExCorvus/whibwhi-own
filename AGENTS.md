@@ -1,71 +1,75 @@
 # whiwhi — agent guide
 
-This is **our** project. Read this before changing anything. [CONTRIBUTING.md](CONTRIBUTING.md) has the safety and
-code conventions. **The only source here is our own files; no upstream code enters this project.**
+Read this before changing anything. This file and [CONTRIBUTING.md](CONTRIBUTING.md) are the complete rule set.
+**If something is not written in this repository, it is not a rule and not a fact about the project: ask ExCorvus
+instead of assuming.**
 
-## What we are building
+## What this is
 
-A **shell based on the original game executable, nothing else** — Grand Theft Auto VI, Xbox Series 1.0.2.1. The
-original game files are the source we host; our runtime (`shell/`) is entirely our own code that wires the game into
-one singular piece of software. The game's whole flat memory and code are laid out as-is; the shell only wires the
-environment: the GPU reads the game's memory directly, the frame cadence, the liveness. **The shell is the entire
-game, flat out.** Not an emulator. See [docs/EARLY-HISTORY.md](docs/EARLY-HISTORY.md) for the candid restart note.
+A shell that runs the original Grand Theft Auto VI executable (Xbox Series 1.0.2.1) on a PC. The game file is used
+unmodified from the user's own copy. The shell (`shell/`, our own C++17 code) places the game in memory, answers
+the console-only libraries the game imports, and is meant to show the game's memory to the PC's GPU. It is not an
+emulator: no console hardware is recreated.
 
-## The footing (binding — ExCorvus)
-
-- **Outward, not from within.** Observe what the game *does* and host the exact environment it expects (memory,
-  frame cadence, liveness). Never patch the game's allocations, refusals or error paths into success — the heap-fix
-  line is **stopped**. **No heap conversion.** The shell leads; the game follows.
-- **Going outside the game's scope is allowed when it serves the port** (host/guide via mapped memory). The trap is
-  fixing the game's own logic, not touching its memory. The game folder on disk is **read-only**.
-- **Do not build an OS around the game.** No mirroring the game's memory to disk, no eagerly materializing the whole
-  shader/asset corpus. Host **in memory, zero-copy**; translate **on demand**; keep the disk lean.
-- **Flat-out zero-copy.** Preserve the game's flat unified-VA layout whole; expose it to the GPU with one flat
-  backing and a uniform `heap_base` shift, binding real pages on demand, so every V# resolves directly to the game's
-  own RAM. No piecemeal imports, shadow copies, "waiting for a copy", or disk mirror.
-- **Shaders:** translate the game's own shaders faithfully (RDNA2 → SPIR-V), on demand. Fix only our translator's
-  fidelity; never reconstruct or "fix" shader logic.
-- **The watchdog stays armed** (a liveness relay of the frame-pacing loop). Never disable or outrun it.
-- **BANNED** (crash the AMD driver / whole system): sparse `VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT`;
-  off-thread async pipeline builds.
-- **Subagents are allowed with ExCorvus's go-ahead** (2026-11-26 amendment; the earlier "no subagents" line was
-  temporary): pass the model explicitly and never send a follow-up message to a running subagent (it cancels
-  it). Only the coordinator seat may boot — no subagent starts the game's entry point or its callbacks, runs
-  the GPU, or pushes; those still need ExCorvus's word. **ExCorvus gates every push and boot.** One GPU run at a time.
-- **Game-specific facts may live in the shell code** (2026-11-26 amendment): the game's base address, import
-  and library names, the TLS index and similar measured facts belong in `shell/` where hosting needs them.
-  What stays banned is game **data**: the executable, archives, shaders in any form, textures, audio,
-  disassembly — the `scripts/check_no_game_data.py` gate runs before every commit.
-- **Source of truth:** `C:\Users\user\AppData\Local\Temp\opencode\leonida-submission\shared\FACTS.md` + the
-  `fix-ledger.md` tail. Nothing is pushed until ExCorvus says.
-
-## Our project (only our own files)
-
-- [`shell/`](shell/) — our own runtime: the original-exe image mapper (`image.*`) + the flat-out hosting model
-  (`hosting.*`) + our tests. Build with `shell\build.cmd`.
-- [docs/exe-map/MAP.md](docs/exe-map/MAP.md) + [CHANNELS.md](docs/exe-map/CHANNELS.md) — the outward map of the
-  original exe (memory model, GPU-address channels, the decoded boot-36 fault §5, the flat-out footing §6).
-- [FINDINGS.md](FINDINGS.md) — the living findings log.
-- [docs/EARLY-HISTORY.md](docs/EARLY-HISTORY.md) — the candid restart note.
-- [docs/RENDERING-PIPELINE.md](docs/RENDERING-PIPELINE.md) — rendering-pipeline map (placeholder).
-- [ATTRIBUTION.md](ATTRIBUTION.md) / [NOTICE.md](NOTICE.md) / [LICENSE](LICENSE) — the credit.
-- Game folder (read-only): `C:\XboxGames\GTA6.Xbox.v1.0.2.1`. The original exe is the source we host.
+What works today, and where a run currently stops, is in the **Current state** block at the top of
+[FINDINGS.md](FINDINGS.md). Nothing has been drawn on screen yet.
 
 ## Rules
 
-- **No game data ever** in commits or fixtures: archives, the executable, carved files, shaders in any form (DXBC,
-  FSSM, disassembly, SPIR-V), textures, audio, or logs/reports quoting them. The exe-map `funcs/*.txt` listings are
-  private. Our no-game-data gate must pass before any push.
-- **No keys, decryption or protection workarounds. Nothing online** (no Xbox Live / Rockstar services or domains).
-- **Fix, don't disable:** a shader the translator rejects gets a rule, not a skip list.
-- **The game folder on disk is read-only.** Never write it.
-- **No upstream code.** Do not vendor, link or build upstream source here. Our runtime is our own.
+1. **The game folder is read-only.** Never write, rename or delete anything in the user's game folder.
+2. **No game data in the repository.** No executable, archives, shaders in any form (binary, disassembly,
+   translated), textures, audio, or disassembly listings. Addresses inside the executable and prose about what
+   the code does are fine. Before every commit run `python -I scripts/check_no_game_data.py <files>`; it must
+   print `clean` and exit 0.
+3. **No keys, decryption or protection workarounds. Nothing online** (no Xbox Live or Rockstar services).
+4. **Host the game; do not rewrite it.** When the game fails because something it expects is missing, provide
+   that thing (a library function, memory, a file path). Do not change the game's own checks so that a failure
+   looks like success, and do not return success from a library function for work that was not done.
+   The one place the shell changes game code is `shell/loader.cpp` (`nop_loader_stubs`): in its in-memory copy
+   only, it replaces breakpoint bytes in stubs that the game's tables point at, and a breakpoint that directly
+   follows an indirect call. Do not add other changes to game code without ExCorvus's decision.
+5. **Keep it in memory.** Do not copy the game's memory or its whole shader set to disk. Shaders are translated
+   when the game asks for them, and kept in memory.
+6. **Leave the game's hang watchdog alone.** The game runs its own watchdog thread (described in
+   [docs/exe-map/MAP.md](docs/exe-map/MAP.md) section 4). Do not disable it and do not report progress to it that
+   did not happen.
+7. **Two Vulkan paths are banned** because they crashed the graphics driver and the whole machine (AMD RX 9070 XT,
+   measured during the earlier attempt): sparse buffers created with
+   `VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT`, and building pipelines on another thread.
+8. **No third-party code in the repository.** vkd3d-proton (LGPL-2.1) is built separately by the user and loaded
+   as a DLL; see [docs/BUILD-AND-RUN.md](docs/BUILD-AND-RUN.md) and [NOTICE.md](NOTICE.md).
+9. **The earlier attempt is not a reference.** Before this shell there was an attempt built on another project's
+   runtime ([docs/EARLY-HISTORY.md](docs/EARLY-HISTORY.md)). None of its code is here. Do not reuse it, and do not
+   treat what it reached as progress of this project.
+10. **Measure against the game file, not against how far a run gets.** What the executable itself imports, calls
+    and checks is the reference. Say what was measured and what is a guess.
 
-## Build / verify our work
+## How work is done
+
+- **Commits:** one file per commit; the message says what the file is, in plain words (the repository page shows
+  the last message next to each file). Commits are pushed to GitHub as the work goes. The project is on GitHub
+  only.
+- **Running the game:** only the coordinating agent starts the game's entry point, and only one run at a time.
+- **Subagents:** allowed when ExCorvus has agreed to it. A subagent never starts the game, never uses the GPU and
+  never pushes.
+- **ExCorvus decides** the scope of the project and anything that changes how it is described in public.
+- **Write down what you measure** in [FINDINGS.md](FINDINGS.md): a dated entry, and update the Current state
+  block when the state changes.
+
+## Where things are
+
+- [`shell/`](shell/) — the runtime, its tools and tests; [shell/README.md](shell/README.md) lists every file.
+- [docs/BUILD-AND-RUN.md](docs/BUILD-AND-RUN.md) — how to build, test and run.
+- [docs/exe-map/](docs/exe-map/) — what the executable does: memory model, watchdog, graphics calls.
+- [docs/console-libs/](docs/console-libs/) — what the executable asks of each console-only library.
+- [docs/SHADER-TRANSLATOR.md](docs/SHADER-TRANSLATOR.md) — the shader translation plan.
+- [FINDINGS.md](FINDINGS.md) — current state and the dated log of measurements.
+- [ATTRIBUTION.md](ATTRIBUTION.md), [NOTICE.md](NOTICE.md), [LICENSE](LICENSE) — credit and licence.
+
+## Build and test
 
 ```
 shell\build.cmd
 ```
 
-Builds the shell core (`whiwhi_shell`) and runs our tests (`test_hosting`, `test_image`) via CTest. No game data, no
-GPU needed.
+Builds the shell, the console libraries and the tools, and runs the 13 tests. No game files and no GPU are needed.
