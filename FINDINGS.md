@@ -1554,3 +1554,27 @@ description; the image creates no resource object for it (measured earlier, devi
 that start inside an element. Not measured: whether the filled textures show the right picture (nothing is drawn
 yet). Not covered: textures the GPU writes, and texture bytes that reach memory without the library (e.g. read
 straight from a file in the console's tiled layout) - none was seen in this run.
+
+## 2026-11-26 - textures the game writes through Map are carried to the PC device (measured, boots b153-b157)
+
+**What was refused.** Map of a texture the game placed at an address of its memory (two per run, returning to
+image+0x5121894). Measured (b155/b156): 2048 x 2048 and 1024 x 1024, format 65 (A8_UNORM), one mip, subresource
+0, read range 0..0 (the game will not read), made in barrier layout 6 (shader resource).
+
+**What the game does (read in the exe).** fn 0x5121690 (17 callers) gets the texture's layout from the texture
+library (fn 0x5121980 calls `XGCreateTextureComputer` and the object's layout method), maps subresource 0, adds
+the subresource's offset from that layout to the pointer; callers copy pixels in with memcpy. fn 0x5121550 picks
+one of two or three copies of the texture by the frame number. Unmap follows from elsewhere (b157: returns to
+image+0x20a8f54, no range). On the console the mapped memory is the texture the GPU reads.
+
+**What the shell does now.** Map answers with the memory the game set aside at the texture's address (sized by
+the texture library, device slot 25). Before the game's lists are submitted to a direct queue (queue slot 35),
+each mapped texture whose memory changed since it was last carried over is copied into its PC texture on that
+same queue, ahead of the game's lists: an upload buffer at the PC footprints, a barrier from the shader-resource
+layout to copy destination, the copies, and back. Unchanged memory costs one comparison. Refused, with the reason
+logged: a read range (carrying pixels back is not provided), a subresource other than 0, a texture made in another
+layout.
+
+**Measured (b157, 40 s, no exception, game folder unchanged).** Both textures mapped, Unmap seen, both carried
+into their PC textures once (2 copies). b153 and b154 stopped at the game's own watchdog at image+0x2215c35 before
+graphics started (the known slow start; the new code was not reached).
