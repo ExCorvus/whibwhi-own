@@ -23,9 +23,9 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 - **Not built:** anything that draws. The texture layout library. Pipeline states (the shader translator
   handles only straight-line compute test shaders). Command-list methods above slot 26, except indirect
   execution. Views made from raw descriptor words (device slot 70), device slots 61 and 86, presentation
-  (nothing is shown), the page-mapping batch on the queue (slot 31). The game runtime library answers every
-  interface query with "no such interface". The audio device and the ray-tracing builder are skeletons that
-  answer failure.
+  (nothing is shown). The queue's page-mapping call (slot 31) is recorded exactly, but nothing reads the record
+  yet and no run has reached that call. The game runtime library answers every interface query with "no such
+  interface". The audio device and the ray-tracing builder are skeletons that answer failure.
 - **Answers that are less than the full work** are listed in the entry "answers that say yes" below; each one
   is a place to look first when the game behaves wrongly later.
 - **Nothing has been drawn on screen.**
@@ -522,6 +522,7 @@ place in the code as well. They are the first places to look when the game later
 | d3d12_xs.dll, display surfaces (slot 127) | real PC surfaces | the memory block the game budgets for them is requested but not used |
 | d3d12_xs.dll, command signature with argument type 105 | an object | a description only; executing it draws nothing |
 | fences | real PC fences | the PC library ignores the "shared" flag the game sets |
+| d3d12_xs.dll, the queue's page-mapping call (slot 31) | success | the record of which pool page each view page shows is exact, but nothing reads it yet |
 | shell/loader.cpp | - | breakpoint bytes in stubs are replaced in memory (the one stated exception in rule 4) |
 
 Outside the repository: one registry value was set on the development PC with ExCorvus's agreement
@@ -531,3 +532,27 @@ Outside the repository: one registry value was set on the development PC with Ex
 the two HTTP libraries shipped with the game) are connected to the real libraries, and the shell does not yet
 refuse or log network calls at its boundary. No run so far has got past the graphics start-up, but nothing
 stops a later run from opening a connection. A refusal at the boundary is the next thing to build here.
+
+## 2026-11-26 - the queue's page-mapping call is recorded (measured layout; not yet reached by a run)
+
+- What the game passes, read in its page mapper (fn 0xf2c470, the call is at 0xf2cc7f): the number of batches,
+  the batches, the pool address, the pool size in 64 KiB pages as a 32-bit number, and a 32-bit 0. A batch is
+  24 bytes: the destination address in the GPU-only view, the number of ranges, a pointer to the ranges. A range
+  is 12 bytes: a kind, a pool page number, a count. The game builds two shapes only: to show pages, one range of
+  kind 1 with count 1 per page, naming the pool page; to stop showing pages, one range of kind 2 with page 0 and
+  the number of pages. The ranges of a batch follow each other from the destination.
+- The shell's graphics library now keeps that as a record: for every 64 KiB page of the view, the pool page it
+  shows (shell/d3d12_xs.cpp). A call is checked completely before anything changes. A shape the game was not
+  seen to build (another kind, a showing range with a count above 1) is refused and logged, not guessed. The pool
+  named must be the one the game registered with the device.
+- Why a record and not more: the console's graphics processor has page tables for this view. A PC one does not
+  share the process's addresses. The pool is already open on the PC device as a heap, so a pool page is an offset
+  in that heap, and the record is what turns an address in the view into such an offset.
+- What is missing: nothing reads the record yet. Views made from raw descriptor words (device slot 70) and
+  translated shaders will have to. One open design point is recorded here so it is not lost: a span of the view
+  is contiguous for the game but its pool pages are not, so a PC buffer over such a span needs either a sparse
+  resource whose pieces are bound to pool pages, or the same pages mapped a second time in the process and
+  opened as a heap. Neither is built or tested.
+- Tested without a device (shell/tests/test_d3d12_xs.cpp) with made-up addresses: showing, showing again,
+  removing, two batches in one call, and every refusal leaving the record unchanged. No run has reached this
+  call: the latest run stops earlier, at the texture layout library.
