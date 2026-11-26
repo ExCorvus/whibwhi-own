@@ -1,109 +1,33 @@
-# Findings — GTA VI Xbox 1.0.2.1 → PC (our own port)
+# Findings
 
-Private working notes. No game bytes/offsets here; RVAs appear only as named constants already in our
-source. See `docs/exe-map/MAP.md` (the executable map) and `docs/exe-map/CHANNELS.md` (every channel that
-hands a heap address to the GPU). Attribution of ideas vs implementation: `ATTRIBUTION.md`.
+What has been measured about the game and about the shell. The **Current state** block is always the latest;
+below it is the dated log, oldest entry first. A later entry overrides an earlier one. Addresses written as
+`fn 0x...` or `image+0x...` are offsets inside the game's executable.
 
-## The footing (ExCorvus, 2026-11-25): a shell — outward, not from within
+## Current state (2026-11-26)
 
-The entire project is a **shell** that hosts the original exe (not an emulator; we do not recreate hardware). The
-AI trap is looking at the code **from within instead of outward**: patching the game's allocations/refusals into
-success (the heap "fixes") vs observing what the game does from outside and hosting the exact environment it
-expects. The heap-fix line (committed-RAM host imports, region-anchor, contiguous coverage) is **stopped** as
-trap-1; it advanced the boot but never reached the world. Next: map the exe's real heap/memory setup and write our
-own hosting model from it. See `docs/EARLY-HISTORY.md`. Going outside the game's scope is allowed when it serves
-the porting project (host/guide via mapped memory); the trap is fixing the game's own logic, not touching its memory.
+- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 13 tests pass.
+- **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
+  functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
+  index 0.
+- **Running:** the game's entry point is started. The furthest a run has got (boots b26/b27) is through the
+  game's memory start-up (two 24 GiB address ranges and its fixed pools) and into creating its file-read queues.
+- **Latest runs** (boots b43-b45, started from a staged folder): they stop earlier, with a read of address 0
+  inside the shell's own graphics library during the game's first graphics call. The cause is not established.
+- **Not built:** anything that draws. The graphics library hands the game a wrapped PC device, but the
+  console-only device functions answer "not implemented". The shader translator handles only straight-line
+  compute test shaders. The audio device, the ray-tracing builder and the texture layout library are skeletons
+  that answer failure.
+- **Proven separately:** the GPU in this machine can read ordinary host memory without a copy
+  (`shell/tools/vkhost_probe.cpp`).
+- **Nothing has been drawn on screen.**
 
-## The memory model (verified in the exe)
+## 2026-11-25 - the project restarts as its own shell
 
-- At start-up the game reserves two 24 GiB views: a CPU-mappable one and a GPU-only one (paired).
-- It keeps **one linear pool of 64 KiB pages** (~6 GiB, 99,776 pages) and shows pool pages in the views:
-  - CPU view via `XMemMapPhysicalPagesScatter`,
-  - GPU-only view via console queue **slot 31** (`CopyPageMappingsBatchX`), one pool page per view page.
-- **There is no address-conversion table.** A view page number means the same page in both views; the page
-  mapping itself is the whole mechanism. A GPU address is valid exactly when a pool page has been mapped there.
-- The game also places buffers/textures at its own addresses (device slot 133) and commits fixed pools
-  (`XMemVirtualAlloc`, often `PAGE_READWRITE | PAGE_NOCACHE`). These allocations mix committed-private runs
-  with mapped/reserved **holes**.
-
-## Why the PC GPU faulted
-
-A discrete PC GPU does not share the Xbox APU's unified memory. The game's shaders compute
-`heap_base + address` and follow raw title addresses (descriptor V#s and pointers embedded in buffers).
-Where the layer had not made that memory GPU-visible, the GPU read/wrote a dead address → page fault.
-
-- ~100,000 descriptors were translated correctly; ~25,000 were left "waiting".
-- The world-start crash was an **untranslated WRITE descriptor** in committed placed RAM: the page had an
-  arena mirror, but the shader used the raw title address. A read-only mirror cannot accept a write, so the
-  fix is to share the game's actual committed page (writable host import).
-- The committed import initially refused these allocations because it walked from the allocation base and
-  stopped at the first mapped/reserved hole before the target page. **Fix:** anchor the extent at the page's
-  own homogeneous `VirtualQuery` region and extend forward through adjacent same-allocation runs.
-
-## The rendering / timing / fps system (one system)
-
-- The fps cap **is** the frame-event cadence: `SetFrameIntervalX` / `ScheduleFrameEventX` /
-  `WaitFrameEventX` / `PresentX`. The loop waits on a frame event, submits GPU work, presents.
-- The world is GPU-driven instanced mesh via `ExecuteIndirect(DISPATCH_MESH)`; thread-group counts and
-  per-instance data come from buffers the game's compute fills each frame. These must be GPU-resident.
-- `ExecuteIndirect(DISPATCH_MESH)` was dropped by the replay; it is now recorded as a mesh draw
-  (`vkCmdDrawMeshTasksIndirect(Count)EXT`), built from scratch (not the upstream replay).
-- Amplification/task shaders remain a separate gap.
-
-## Driver stability (hard-won)
-
-- Sparse buffers with `VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT` and off-thread (async) pipeline
-  builds **reset the AMD driver / whole system**. Both are banned.
-- Ordinary (non-sparse) host imports of committed memory are safe.
-- The driver can also enter a state where it stops reading imported host memory at all (every build then
-  dies at ~11 s, even the untouched plain one). A one-second capability test (`vk_host_region_import_test`)
-  detects it; the boot runner runs it as a preflight and software-resets the driver after each boot.
-
-## Status
-
-Intro / loading / story scenes render. The mesh draws are delivered and the committed-residency fix is in.
-Validation of the world frame is ongoing. Acceptance remains: actually in the playable world.
-
-## Update (helper findings, folded)
-
-- Mesh-indirect replay (from scratch): ExecuteIndirect(DISPATCH_MESH) recorded as a mesh draw; dropped lists 12 -> 0. See docs/reports/mesh-indirect-report.md.
-- Committed-RAM residency: extent anchored at the page's own region; and a contiguous title chunk now covers committed spans that cross region holes (no capture/replay). See docs/reports/committed-contig-report.md.
-- Boot 32 cleared the world-start WRITE fault; a hole-crossing READ span remained, addressed by the contiguous chunk. Validation ongoing.
-
-## Watchdog relay (mapped + implemented)
-
-The watchdog is the liveness relay of the loop that paces the frame: a time-critical thread (fn 0x2215a60) that watches the run loop's progress reporter (fn 0x22159f0 = QPC store). A long block in our shim is a 30 s gap -> fire. It does NOT drive the frame events/present directly. Implemented: a relay that calls the game's own reporter only while our layer holds the title thread, so the watchdog stays armed but survives our compiles. See docs/reports/watchdog-relay-report.md and docs/exe-map/MAP.md section 4.
-
-## The shell footing (ExCorvus)
-
-The runtime is a SHELL hosting a game that wants the shell to keep it alive. The watchdog is the game's heartbeat check on the shell; the heaps and frame cadence are what it expects the shell to provide. The AI trap is treating this as 'fix the game' instead of 'be the shell it expects'.
-
-Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no device loss; frames render and brighten. The shell keeps the game alive. Remaining gap: BVH ray-tracing rehydration (E_NOTIMPL).
-
-## Live status (kept current)
-
-- Boot 35 (watchdog ARMED + liveness relay, full memory+mesh system): **no watchdog fire, no GPU fault, no device loss**; frames render and brighten. The shell keeps the game alive.
-- World stops at BVH ray-tracing rehydration (`RehydrateRaytracingAccelerationStructureBatched2X` E_NOTIMPL). Implementation in progress.
-- Earlier: boot 32 cleared the world-start WRITE fault (committed-memory region-anchor fix); a hole-crossing READ span remains (contiguous coverage being reworked to avoid over-import).
-- Driver safety: preflight host-import check + conditional driver reset after each boot; sparse capture/replay and async pipeline builds remain banned.
-
-- BVH ray-tracing rehydration implemented (rebuild from element geometry via the XDXR builder; BOX16; size-guarded). Boot 36 verifying. See docs/reports/bvh-rehydrate-report.md.
-
-- Shell footing refined (ExCorvus): the shell GUIDES the game - it is the active host driving frame cadence, memory and liveness, not a passive reverse-and-check harness. The shell leads; the game follows.
-
-- Boot 36: BVH ray-tracing rehydration WORKS (rebuilt by the layer's builder); watchdog armed satisfied; frames render brighter. Remaining: a hole-crossing READ descriptor in committed placed RAM (the contiguous coverage must be lazy/on-demand to avoid over-import).
-
-## 2026-11-25 — the scrape + the port begins (our own code only)
-
-- ExCorvus's directive: scrape everything from Leonida; **no upstream code enters the project**. The only source is our
-  own files; only the credit for the idea stays, with our runtime. It is a **shell based on the original EXE, nothing
-  else**. No more heap conversion.
-- Removed all Leonida source from whiwhi (runtime/, tools/, tests/, third_party/, viewer/, the upstream scripts and
-  docs, make_game.py). The Leonida tree stays safe in E:\Leonida as referenced prior art; none of it is vendored here.
-- Started our own runtime (shell/): the original-exe image mapper (image.*) + the flat-out zero-copy hosting model
-  (hosting.*) + our own tests. Builds and both tests pass (shell\build.cmd). The flat-out model resolves hole-crossing
-  spans directly (the boot-36 fix) — no piecemeal import, no heap conversion.
-- Our own no-game-data gate (scripts/check_no_game_data.py) replaces the upstream one.
+- All code of the earlier attempt was removed from the repository; see docs/EARLY-HISTORY.md. From here on the
+  only code is our own, in shell/.
+- The first two pieces: a reader for the game's executable format (shell/image.*) and an address model for
+  showing the game's memory to the GPU (shell/hosting.*), each with a test.
 
 ## 2026-11-26 - what the original executable imports (measured)
 
@@ -160,6 +84,8 @@ Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no de
   in storage index 1; the 2 callbacks were not called. Imports unchanged at 520 of 587. The game folder listing was
   identical before and after.
 - Not done yet: the console-only libraries, and starting the image.
+- Superseded: whiwhi_tls.dll was later replaced by a block in the tools' own thread-local section
+  (shell/tls_seat.cpp); see the entry on thread storage at index 0.
 
 ## 2026-11-26 - the memory library, xmem.dll (our own; measured)
 
@@ -213,7 +139,7 @@ Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no de
 
 ## 2026-11-26 - first boot of the image inside the shell (measured)
 
-- New tool shell/tools/boot_image.cpp (run by Temp\opencode\boot_shell.ps1): loads the image, connects imports,
+- New tool shell/tools/boot_image.cpp (run by a local runner script that is not in the repository): loads the image, connects imports,
   runs its 2 thread-storage callbacks, then calls its entry point on a new thread with its own 1 MiB stack. An
   import the shell does not provide is logged and answered with failure (0); the image's own error handling
   decides what happens. Exceptions are logged with their image-relative address.
@@ -233,161 +159,9 @@ Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no de
   display actually supporting variable refresh). It changes the frame cadence the game's watchdog sees, so it is
   a deliberate later change with her sign-off, not something to fold into the current boot work.
 
-## 2026-11-26 - the remaining console libraries, mapped and stubbed (helper agents, reviewed and folded)
-
-Three helpers mapped the remaining console-only libraries from the exe's own call sites (docs/console-libs/,
-reports in the private candidates folder) and each shipped an honest skeleton DLL whose exports log once and
-answer "not provided" - never a faked success:
-
-- **AcpHal.dll (9) + xapu.dll (5)** - the audio hardware/APU libraries (shell/acp_hal.*, shell/xapu.*). The image
-  tests most of these with `js` (negative = failure), so the skeletons answer E_NOTIMPL there, 0 for the count
-  and bool returns, null for address returns. A boot that reaches audio bring-up stops at the image's own int3
-  (fn 0x43ad8b0's failure path) - the game's own error handling, not routed around. There is no PC equivalent of
-  the APU heap / shape contexts / 32-bit APU address window; real audio needs a DSP stand-in or stays unprovided.
-- **chad.dll (5)** - the audio co-processor command channel (shell/chad.*): 4096-byte command blocks in/out, one
-  handle per stream (shell/chad.*, docs/console-libs/chad.md).
-- **XCRDAPI.dll (1)** - DStorageGetFactory (shell/xcrdapi.*). Key finding: straight forwarding to the PC
-  dstorage.dll cannot be the final answer - the image asks for a console IID and a longer factory vtable
-  (CreateQueue at +0x50, SetStagingBufferSize 32 MiB at +0x40). Every read request's destination is a plain
-  unified VA in the CPU view / GPU view / page pool (the xmem-owned memory), so the PC answer is our own
-  factory/queue doing a plain file read into that address - no GPU resource, no staging copy. Stage 0 (forward
-  to PC dstorage.dll if installed) is in place; the PC has no dstorage.dll installed here, so the image int3s at
-  0x1d8e505 until the wrapper exists. Next step: the wrapper (OpenFile->CreateFileW, always-complete status
-  array, synchronous read into the destination).
-
-All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's gate, GitHub only).
-
-## 2026-11-26 - TLS slot 0, the COM layout bug, and the storage wrapper (measured)
-
-- **TLS slot 0.** Parts of the image read the per-thread storage array entry 0 directly (`gs:[0x58]` then entry
-  0), at offsets up to 0x13a8 - on the console the game is the main module, so its storage owns index 0. With a
-  small foreign block at entry 0 that crashes (boot b8's AV); with the game's own data block there it corrupts
-  whatever else owns entry 0 on Windows (kernelbase; the 0xC0000374 in ntdll). Fix: entry 0 is redirected to
-  the zeroed upper half of our own per-thread 64 KiB block (default on, WHIWHI_TLS_REDIRECT=0 to disable), so
-  the image's entry-0 accesses land in bounds and other slot-0 users see zeros (measured safe in a probe).
-  The image's index variable still points at the full block. Covered in test_thread_storage.
-- **COM layout bug** (found by the xcrdapi test segfaulting): the vtable pointer must be the object's FIRST
-  field - both our xcrdapi objects and the d3d12_xs wrapper had it second. Fixed in both; this was also the
-  likely cause of the earlier boot AV inside a wrapper thunk.
-- **XCRDAPI stage 1/2 (the storage wrapper).** DStorageGetFactory now returns OUR factory in the console
-  vtable layout (+0x20 OpenFile, +0x28 CreateStatusArray, +0x40 SetStagingBufferSize, +0x50 CreateQueue). The
-  queue reads each request synchronously straight into the request's destination address - host memory the
-  xmem library owns - validating the destination is committed writable first (an unmapped destination is
-  logged and skipped, never written). Status array reports IsComplete=true / GetHResult=S_OK, which is honest
-  because the read really finished. Paths are logged and mapped onto the read-only game folder
-  (WHIWHI_GAME_DIR). 12/12 tests pass, including a functional test that reads a temp file into a buffer through
-  the queue. Not yet measured on the real image: which paths reach OpenFile and whether RPF member offsets
-  arrive as file offsets - that needs a boot.
-
-## 2026-11-26 - the install folder and xgameruntime (measured)
-
-- The game derives its install dir from GetModuleFileNameW(NULL) (fn 0x55e2910): it takes the exe's folder and
-  appends the string at 0x67e2008 ("xgameruntime.dll"), then GetFileAttributesW on that. The xgameruntime load
-  (fn 0x55e29dc) uses mode 2 (app-dir search, 0xa00) only when that file EXISTS next to the exe and the
-  ForceUseLocalServices probe (fn 0x55e286c, HKLM GamingServices) is 1; otherwise mode 1 (System32-only, 0x800).
-  On a real PC GDK install the game folder holds exe + xgameruntime.dll + the package files together.
-- Our answer: stage a work folder that looks like that install - copy our binaries (boot_image.exe + the console
-  DLLs) into it and hard-link/junction every game-folder entry into it (game folder itself untouched, listing
-  hash unchanged). Then GetModuleFileNameW(NULL) is the work exe, xgameruntime.dll is present beside it (mode 2),
-  and the package reads resolve through the links. run_boot.ps1 does the staging; boot_image's PEB image-path
-  patch is now opt-in (WHIWHI_PEB_GAME=1) since the staged folder makes the natural path correct.
-- xgameruntime.dll skeleton answers InitializeApiImpl/Ex/Ex2 = 0, QueryApiImpl = E_NOTIMPL, Uninitialize = 0,
-  XErrorReport = 0; the game resolves these by name from the loaded module (fn 0x55e2a70) and calls InitEx2 with
-  version constants 0x633600002712 / 0x65f400001edd.
-
-## 2026-11-26 - install path and the Game Runtime (measured, boots b28/b29)
-
-- **Install path.** The game derives its install directory from GetModuleFileNameW(NULL) (fn 0x55e2910) and
-  appends a subdir; in our process that returned the tool's path, so no storage device registered and the
-  storage set-up asserted ([rsi+0xc]==0 at image+0x2237178). Fix: boot_image points the PEB main-module
-  FullDllName/BaseDllName and the process ImagePathName at the game exe (the environment the console gives the
-  game). After that the storage assert is gone and the game runs on to the next dependency.
-- **xgameruntime.dll.** The game LoadLibraryExW's "xgameruntime.dll" (fn 0x55e29dc) and resolves
-  InitializeApiImpl / InitializeApiImplEx / InitializeApiImplEx2 / QueryApiImpl / UninitializeApiImpl. It is not
-  on PC. Our skeleton (shell/xgameruntime.*) answers initialize/uninitialize with success (local-only runtime)
-  and QueryApiImpl with E_NOTIMPL; covered in test_gfx_stubs.
-- **The packaging probe.** fn 0x55e286c reads HKLM\Software\Microsoft\GamingServices!ForceUseLocalServices
-  (DWORD). Non-zero => the game uses the app-dir DLL search (mode 0xa00) and finds our xgameruntime.dll beside
-  the tool; zero => it searches System32 only (mode 0x800) and the load fails (boot b29). Setting that value to
-  1 is the standard PC-GDK local-services switch; it is an external registry write, so it needs ExCorvus's word.
-
-## 2026-11-26 - boots b12-b18: how far the image gets in our shell, and the current boundary (measured)
-
-- Boot b16/b17/b18 (boot_image, game folder as library folder): 578/587 imports connected (only xg_xs 2 and
-  XboxBvhBuilder 7 remain); image at its preferred base; TLS callbacks ran; entry point ran; D3D12ConfigureVirtualMemoryX
-  answered; memory start-up completed (24 GiB CPU view + 24 GiB GPU view reserved, five fixed pools committed);
-  the game reached the storage layer - DStorageGetFactory answered with our console-layout factory, SetStagingBufferSize
-  (32 MiB) answered - i.e. the game's own file layer started. Game folder listing unchanged after every boot.
-- The stop: an unhandled int3 at image+0x22106e0, reached as pool-object vtable slot +0x30 (vtable at .rdata
-  0x62fc060 -> thunk 0x2219be0 -> 0x22106e0, which is 0xCC in the file) when the game allocates from the first
-  fixed pool (fn 0x4fac3c0 -> fn 0x2219620). The flag that routes there (object byte +0x18 = 1) is set
-  unconditionally by fn 0x515970 during pool init, so this path is deterministic - on the console that slot must be
-  filled by the console's own loader. The byte is 0xCC in the retail file and nothing in the image writes it.
-- Per the standing rules we do not patch game code and do not bypass protection, so this stub is the current
-  boundary: the game runs its own start-up up to the file layer and stops at a slot the console loader fills.
-  Runtime tooling added for this: boot_image's exception handler now logs rcx/vtable on faults, continues once
-  through handled breakpoints (a second occurrence at the same address ends the boot), and WHIWHI_WATCH=<rva> arms a
-  1-byte write watchpoint on the entry thread (used to find the flag writer above). 12/12 tests pass.
-
-## 2026-11-26 - loader stub patch (the shell plays the console's loader) and the precise boundary
-
-- Census of the whole image: exactly **4** distinct int3 stub addresses are referenced from vtables
-  (0x22106e0 shared by 30 slots, plus 0xb883ff, 0xb98348, 0x486c766). All are `int3` followed by the release code
-  (`cc c3` = break-in-debug, ret) - slots the console's own loader fills at load time.
-- The shell now does that loader step on its in-memory copy only (shell/loader.cpp nop_loader_stubs): pointers
-  from data sections into executable gaps outside the exception-table functions that start with 0xCC get
-  0xCC -> 0x90 (nop) in memory; disk untouched; each patched address logged. Boot b19 confirms the mechanism:
-  the fault moved from the stub (0x22106e0) to the inline int3 right after the call (image+0x2219650).
-- That inline int3 is the game's own "this call must not return here" assert on the pool-allocation path
-  (fn 0x4fac3c0 -> fn 0x2219620 -> vtable slot +0x30). The slot's real body exists only in the console loader's
-  patch; it is not derivable from the image. So this path is the honest boundary: the shell fills every stub it
-  can derive, and stops where the game needs code only the console has.
-- Update (boot b22): the loader patch now also NOPs inline int3 traps that directly follow an indirect call
-  (the console loader overwrites those as well; the code after the trap is the normal continuation). Boot b22
-  got past image+0x2219650 and stopped at a null write at image+0x5be9387 inside the buddy allocator: the pool's
-  sub-allocator slot (obj+0x1280) is null because the real body of slot +0x30 (a lazy init) is exactly what the
-  console patch provides. Each converted slot reveals the next console-only body; the boundary is real.
-- APU side, per ExCorvus's point that a PC's memory is already unified: AcpHal.dll now answers the memory side for
-  real - ApuCreateHeap creates a committed heap below 4 GiB, ApuAlloc bump-allocates (aligned as asked), shape
-  contexts are a real zeroed array, ApuIsVirtualAddressValid checks real committed memory, and
-  ApuMapVirtualAddress/ApuMapApuAddress are the identity map (refused above 4 GiB, logged). AcpHalCreate still
-  answers E_NOTIMPL - the audio device itself is the one thing a PC cannot fake. The pool-trap path does not call
-  AcpHal (its call sites are the separate audio bring-up fn 0x43ad8b0), so this does not move the boot boundary.
-- vkd3d-proton (D3D12 on Vulkan, LGPL-2.1, ExCorvus-approved with notices) was cloned to E:\third_party\vkd3d-proton
-  and built with MSVC/meson (needed widl from the MSYS2 mingw-w64 tools; meson wants LC_ALL=C on this German-locale
-  machine). Its d3d12.dll/d3d12core.dll are deployed beside the tools as d3d12_vk.dll/d3d12core.dll, and d3d12_xs
-  now prefers them by explicit path, falling back to the system d3d12.dll. This is what will let the shell import
-  the game's own memory into the GPU zero-copy once the boot gets past start-up. NOT vendored into the repo; the
-  build recipe and license notice are in docs/BUILD-AND-RUN.md and NOTICE.md.
-
-## 2026-11-26 - all 587 imports connect (measured)
-
-- Added the last console libraries as honest skeletons: xg_xs.dll (XGCreateTextureComputer, XGSuggestSwizzleMode -
-  the PC driver computes textures itself) and XboxBvhBuilder.dll (the seven mangled exports, aliased via
-  /export, each logging once and answering failure; the BVH builder is real work for later). xmem.dll gained
-  XMemVirtualQuery (answers from the region registry with the console protect/type bits, else VirtualQuery),
-  which the shipped XboxBvhBuilder.dll needs to even load. test_gfx_stubs covers all of it; 13/13 tests pass.
-- Boot with these: 68 libraries, **587 of 587 functions connected**. The boot boundary is unchanged (start-up
-  stops at the console-patched pool stub, see above).
-- Host-memory import into the GPU proven on this machine (RX 9070 XT): shell/tools/vkhost_probe.cpp opens the
-  Vulkan device, imports a host buffer with VK_EXT_external_memory_host, and the GPU reads it back with zero
-  mismatches (64 MiB tested). So "what has to be mapped into VRAM" is: nothing is copied - the game's own RAM is
-  imported as device memory and the GPU reads it directly (the flat-out zero-copy model).
-- TLS slot 0 solved structurally: the per-thread block now lives in the EXE's own .tls section (shell/tls_seat.cpp,
-  linked into every tool/test), so Windows gives it index 0 - the same slot the console gives the game. The
-  game's hardcoded slot-0 reads (e.g. the pool object pointer at entry0+0x13a8) and its index-variable reads now
-  hit the SAME block; kernelbase takes index 1. At claim the exe's .tls template is rewritten with the image's
-  initial data so every thread Windows starts afterwards gets it; the calling thread's block is filled directly.
-  The old whiwhi_tls.dll + entry-0 redirect is removed (redirecting slot 0 to the real block heap-corrupted the
-  PC-side slot-0 owner, boot b25; the zeroed-mirror variant left the game's slot-0 reads seeing zeros).
-- With the exe-seat, boots b26/b27 get through memory start-up AND into DStorage queue creation, then stop at an
-  int3 at image+0x2237178: the storage set-up (fn 0x2236e00) calls fn 0x6170 (returns [rsi+0xc] != 0) and asserts
-  because [rsi+0xc] is 0 - a field our DStorage answers leave zero. test_thread_storage rewritten for the exe-seat
-  (index 0, claim fills the block + rewrites the template, new threads get the template); 13/13 tests pass.
-
 ## 2026-11-26 - booting the image in the shell; what the runs showed (measured)
 
-- shell/tools/boot_image.cpp (run by Temp\opencode\run_boot.ps1) loads the image, connects imports, optionally
+- shell/tools/boot_image.cpp (run by a local runner script that is not in the repository) loads the image, connects imports, optionally
   runs its thread-storage callbacks, and calls the entry point on a new thread with the image's own stack size.
   Unprovided imports are logged and answered with failure (0); exceptions are logged with instruction, data
   address, registers and a stack scan. The game folder listing was identical before and after every boot.
@@ -419,6 +193,8 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
 - Not done yet: the remaining console libraries (audio/APU, chad, xg_xs, XCRDAPI, XboxBvhBuilder), showing the
   regions to the GPU (the flat hosting model plugs in where graphics calls name memory), and a boot that reaches
   the game's run loop.
+- Superseded: the dummy variable and the entry-0 redirect described here were later removed; see the entry on
+  thread storage at index 0. The remaining console libraries listed here were added in later entries.
 
 ## 2026-11-26 — the graphics boundary, mapped from the image's own calls (measured, no boot)
 
@@ -452,3 +228,175 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
   graphics stages and texture tiling are refused for now. A generated module validates with the Khronos
   spirv-val (SPIR-V 1.0). Plan: docs/SHADER-TRANSLATOR.md. New test `shader`; all 9 CTest tests pass (the
   known thread-storage 0xc0000374 did not appear in these runs). No boot and no GPU run in this work.
+
+## 2026-11-26 - the remaining console libraries, mapped and stubbed (helper agents, reviewed and folded)
+
+Three helpers mapped the remaining console-only libraries from the exe's own call sites (docs/console-libs/) and each shipped an honest skeleton DLL whose exports log once and
+answer "not provided" - never a faked success:
+
+- **AcpHal.dll (9) + xapu.dll (5)** - the audio hardware/APU libraries (shell/acp_hal.*, shell/xapu.*). The image
+  tests most of these with `js` (negative = failure), so the skeletons answer E_NOTIMPL there, 0 for the count
+  and bool returns, null for address returns. A boot that reaches audio bring-up stops at the image's own int3
+  (fn 0x43ad8b0's failure path) - the game's own error handling, not routed around. There is no PC equivalent of
+  the APU heap / shape contexts / 32-bit APU address window; real audio needs a DSP stand-in or stays unprovided.
+- **chad.dll (5)** - the audio co-processor command channel (shell/chad.*): 4096-byte command blocks in/out, one
+  handle per stream (shell/chad.*, docs/console-libs/chad.md).
+- **XCRDAPI.dll (1)** - DStorageGetFactory (shell/xcrdapi.*). Key finding: straight forwarding to the PC
+  dstorage.dll cannot be the final answer - the image asks for a console IID and a longer factory vtable
+  (CreateQueue at +0x50, SetStagingBufferSize 32 MiB at +0x40). Every read request's destination is a plain
+  unified VA in the CPU view / GPU view / page pool (the xmem-owned memory), so the PC answer is our own
+  factory/queue doing a plain file read into that address - no GPU resource, no staging copy. Stage 0 (forward
+  to PC dstorage.dll if installed) is in place; the PC has no dstorage.dll installed here, so the image int3s at
+  0x1d8e505 until the wrapper exists. Next step: the wrapper (OpenFile->CreateFileW, always-complete status
+  array, synchronous read into the destination).
+
+All 12 tests passed at that point.
+
+## 2026-11-26 - TLS slot 0, the COM layout bug, and the storage wrapper (measured)
+
+- **TLS slot 0.** Parts of the image read the per-thread storage array entry 0 directly (`gs:[0x58]` then entry
+  0), at offsets up to 0x13a8 - on the console the game is the main module, so its storage owns index 0. With a
+  small foreign block at entry 0 that crashes (boot b8's AV); with the game's own data block there it corrupts
+  whatever else owns entry 0 on Windows (kernelbase; the 0xC0000374 in ntdll). Fix: entry 0 is redirected to
+  the zeroed upper half of our own per-thread 64 KiB block (default on, WHIWHI_TLS_REDIRECT=0 to disable), so
+  the image's entry-0 accesses land in bounds and other slot-0 users see zeros (measured safe in a probe).
+  The image's index variable still points at the full block. Covered in test_thread_storage.
+- **COM layout bug** (found by the xcrdapi test segfaulting): the vtable pointer must be the object's FIRST
+  field - both our xcrdapi objects and the d3d12_xs wrapper had it second. Fixed in both; this was also the
+  likely cause of the earlier boot AV inside a wrapper thunk.
+- **XCRDAPI stage 1/2 (the storage wrapper).** DStorageGetFactory now returns OUR factory in the console
+  vtable layout (+0x20 OpenFile, +0x28 CreateStatusArray, +0x40 SetStagingBufferSize, +0x50 CreateQueue). The
+  queue reads each request synchronously straight into the request's destination address - host memory the
+  xmem library owns - validating the destination is committed writable first (an unmapped destination is
+  logged and skipped, never written). Status array reports IsComplete=true / GetHResult=S_OK, which is honest
+  because the read really finished. Paths are logged and mapped onto the read-only game folder
+  (WHIWHI_GAME_DIR). 12/12 tests pass, including a functional test that reads a temp file into a buffer through
+  the queue. Not yet measured on the real image: which paths reach OpenFile and whether RPF member offsets
+  arrive as file offsets - that needs a boot.
+- Superseded: the entry-0 redirect described here was later removed; see the entry on thread storage at
+  index 0.
+
+## 2026-11-26 - boots b12-b18: how far the image gets in our shell, and the current boundary (measured)
+
+- Boot b16/b17/b18 (boot_image, game folder as library folder): 578/587 imports connected (only xg_xs 2 and
+  XboxBvhBuilder 7 remain); image at its preferred base; TLS callbacks ran; entry point ran; D3D12ConfigureVirtualMemoryX
+  answered; memory start-up completed (24 GiB CPU view + 24 GiB GPU view reserved, five fixed pools committed);
+  the game reached the storage layer - DStorageGetFactory answered with our console-layout factory, SetStagingBufferSize
+  (32 MiB) answered - i.e. the game's own file layer started. Game folder listing unchanged after every boot.
+- The stop: an unhandled int3 at image+0x22106e0, reached as pool-object vtable slot +0x30 (vtable at .rdata
+  0x62fc060 -> thunk 0x2219be0 -> 0x22106e0, which is 0xCC in the file) when the game allocates from the first
+  fixed pool (fn 0x4fac3c0 -> fn 0x2219620). The flag that routes there (object byte +0x18 = 1) is set
+  unconditionally by fn 0x515970 during pool init, so this path is deterministic - on the console that slot must be
+  filled by the console's own loader. The byte is 0xCC in the retail file and nothing in the image writes it.
+- At this point the shell did not change game code, so this stub was the boundary. The next entry changes
+  that: the loader now replaces such stubs in its in-memory copy.
+  Runtime tooling added for this: boot_image's exception handler now logs rcx/vtable on faults, continues once
+  through handled breakpoints (a second occurrence at the same address ends the boot), and WHIWHI_WATCH=<rva> arms a
+  1-byte write watchpoint on the entry thread (used to find the flag writer above). 12/12 tests pass.
+
+## 2026-11-26 - loader stub patch (the shell plays the console's loader) and the precise boundary
+
+- Census of the whole image: exactly **4** distinct int3 stub addresses are referenced from vtables
+  (0x22106e0 shared by 30 slots, plus 0xb883ff, 0xb98348, 0x486c766). All are `int3` followed by the release code
+  (`cc c3` = break-in-debug, ret). They are read as slots the console's own loader fills at load time; that
+  is an inference (nothing in the image writes them), not something measured on a console.
+- The shell now does that loader step on its in-memory copy only (shell/loader.cpp nop_loader_stubs): pointers
+  from data sections into executable gaps outside the exception-table functions that start with 0xCC get
+  0xCC -> 0x90 (nop) in memory; disk untouched; each patched address logged. Boot b19 confirms the mechanism:
+  the fault moved from the stub (0x22106e0) to the inline int3 right after the call (image+0x2219650).
+- That inline int3 is the game's own "this call must not return here" assert on the pool-allocation path
+  (fn 0x4fac3c0 -> fn 0x2219620 -> vtable slot +0x30). The slot's real body exists only in the console loader's
+  patch; it is not derivable from the image. So this path is the honest boundary: the shell fills every stub it
+  can derive, and stops where the game needs code only the console has.
+- Update (boot b22): the loader patch now also NOPs inline int3 traps that directly follow an indirect call
+  (assumed to be overwritten by the console loader as well; the code after the trap is the normal
+  continuation). Boot b22
+  got past image+0x2219650 and stopped at a null write at image+0x5be9387 inside the buddy allocator: the pool's
+  sub-allocator slot (obj+0x1280) is null because the real body of slot +0x30 (a lazy init) is exactly what the
+  console patch provides. Each converted slot reveals the next console-only body; the boundary is real.
+- APU side, per ExCorvus's point that a PC's memory is already unified: AcpHal.dll now answers the memory side for
+  real - ApuCreateHeap creates a committed heap below 4 GiB, ApuAlloc bump-allocates (aligned as asked), shape
+  contexts are a real zeroed array, ApuIsVirtualAddressValid checks real committed memory, and
+  ApuMapVirtualAddress/ApuMapApuAddress are the identity map (refused above 4 GiB, logged). AcpHalCreate still
+  answers E_NOTIMPL - the audio device itself is the one thing a PC cannot fake. The pool-trap path does not call
+  AcpHal (its call sites are the separate audio bring-up fn 0x43ad8b0), so this does not move the boot boundary.
+- vkd3d-proton (D3D12 on Vulkan, LGPL-2.1, ExCorvus-approved with notices) was cloned outside the repository
+  and built with MSVC/meson (needed widl from the MSYS2 mingw-w64 tools; meson wants LC_ALL=C on this German-locale
+  machine). Its d3d12.dll/d3d12core.dll are deployed beside the tools as d3d12_vk.dll/d3d12core.dll, and d3d12_xs
+  now prefers them by explicit path, falling back to the system d3d12.dll. This is what will let the shell import
+  the game's own memory into the GPU zero-copy once the boot gets past start-up. NOT vendored into the repo; the
+  build recipe and license notice are in docs/BUILD-AND-RUN.md and NOTICE.md.
+
+## 2026-11-26 - the last console libraries, the GPU host-memory probe, thread storage at index 0 (measured)
+
+- Added the last console libraries as honest skeletons: xg_xs.dll (XGCreateTextureComputer, XGSuggestSwizzleMode -
+  the PC driver computes textures itself) and XboxBvhBuilder.dll (the seven mangled exports, aliased via
+  /export, each logging once and answering failure; the BVH builder is real work for later). xmem.dll gained
+  XMemVirtualQuery (answers from the region registry with the console protect/type bits, else VirtualQuery),
+  which the shipped XboxBvhBuilder.dll needs to even load. test_gfx_stubs covers all of it; 13/13 tests pass.
+- Boot with these: 68 libraries, 587 of 587 functions connected in that run. (Later runs from the staged
+  folder report 586 connected and one ray-tracing builder function not provided; see Current state.) The boot boundary is unchanged (start-up
+  stops at the console-patched pool stub, see above).
+- Host-memory import into the GPU proven on this machine (RX 9070 XT): shell/tools/vkhost_probe.cpp opens the
+  Vulkan device, imports a host buffer with VK_EXT_external_memory_host, and the GPU reads it back with zero
+  mismatches (64 MiB tested). So "what has to be mapped into VRAM" is: nothing is copied - the game's own RAM is
+  imported as device memory and the GPU reads it directly (the flat-out zero-copy model).
+- TLS slot 0 solved structurally: the per-thread block now lives in the EXE's own .tls section (shell/tls_seat.cpp,
+  linked into every tool/test), so Windows gives it index 0 - the same slot the console gives the game. The
+  game's hardcoded slot-0 reads (e.g. the pool object pointer at entry0+0x13a8) and its index-variable reads now
+  hit the SAME block; kernelbase takes index 1. At claim the exe's .tls template is rewritten with the image's
+  initial data so every thread Windows starts afterwards gets it; the calling thread's block is filled directly.
+  The old whiwhi_tls.dll + entry-0 redirect is removed (redirecting slot 0 to the real block heap-corrupted the
+  PC-side slot-0 owner, boot b25; the zeroed-mirror variant left the game's slot-0 reads seeing zeros).
+- With the exe-seat, boots b26/b27 get through memory start-up AND into DStorage queue creation, then stop at an
+  int3 at image+0x2237178: the storage set-up (fn 0x2236e00) calls fn 0x6170 (returns [rsi+0xc] != 0) and asserts
+  because [rsi+0xc] is 0 - a field our DStorage answers leave zero. test_thread_storage rewritten for the exe-seat
+  (index 0, claim fills the block + rewrites the template, new threads get the template); 13/13 tests pass.
+
+## 2026-11-26 - install path and the Game Runtime (measured, boots b28/b29)
+
+- **Install path.** The game derives its install directory from GetModuleFileNameW(NULL) (fn 0x55e2910) and
+  appends a subdir; in our process that returned the tool's path, so no storage device registered and the
+  storage set-up asserted ([rsi+0xc]==0 at image+0x2237178). Fix: boot_image points the PEB main-module
+  FullDllName/BaseDllName and the process ImagePathName at the game exe (the environment the console gives the
+  game). After that the storage assert is gone and the game runs on to the next dependency.
+- **xgameruntime.dll.** The game LoadLibraryExW's "xgameruntime.dll" (fn 0x55e29dc) and resolves
+  InitializeApiImpl / InitializeApiImplEx / InitializeApiImplEx2 / QueryApiImpl / UninitializeApiImpl. It is not
+  on PC. Our skeleton (shell/xgameruntime.*) answers initialize/uninitialize with success (local-only runtime)
+  and QueryApiImpl with E_NOTIMPL; covered in test_gfx_stubs.
+- **The packaging probe.** fn 0x55e286c reads HKLM\Software\Microsoft\GamingServices!ForceUseLocalServices
+  (DWORD). Non-zero => the game uses the app-dir DLL search (mode 0xa00) and finds our xgameruntime.dll beside
+  the tool; zero => it searches System32 only (mode 0x800) and the load fails (boot b29). Setting that value to
+  1 makes the game take the app-folder search; it was set on this machine with ExCorvus's approval.
+
+## 2026-11-26 - the install folder and xgameruntime (measured)
+
+- The game derives its install dir from GetModuleFileNameW(NULL) (fn 0x55e2910): it takes the exe's folder and
+  appends the string at 0x67e2008 ("xgameruntime.dll"), then GetFileAttributesW on that. The xgameruntime load
+  (fn 0x55e29dc) uses mode 2 (app-dir search, 0xa00) only when that file EXISTS next to the exe and the
+  ForceUseLocalServices probe (fn 0x55e286c, HKLM GamingServices) is 1; otherwise mode 1 (System32-only, 0x800).
+  On a real PC GDK install the game folder holds exe + xgameruntime.dll + the package files together.
+- Our answer: stage a work folder that looks like that install - copy our binaries (boot_image.exe + the console
+  DLLs) into it and hard-link/junction every game-folder entry into it (game folder itself untouched, listing
+  hash unchanged). Then GetModuleFileNameW(NULL) is the work exe, xgameruntime.dll is present beside it (mode 2),
+  and the package reads resolve through the links. run_boot.ps1 does the staging; boot_image's PEB image-path
+  patch is now opt-in (WHIWHI_PEB_GAME=1) since the staged folder makes the natural path correct.
+- xgameruntime.dll skeleton answers InitializeApiImpl/Ex/Ex2 = 0, QueryApiImpl = E_NOTIMPL, Uninitialize = 0,
+  XErrorReport = 0; the game resolves these by name from the loaded module (fn 0x55e2a70) and calls InitEx2 with
+  version constants 0x633600002712 / 0x65f400001edd.
+
+## 2026-11-26 - the main module handle, a real backtrace, and where the latest runs stop (measured, boots b43-b45)
+
+- The game calls GetModuleHandleA(NULL) (at image+0x1e0a377) and reads the section table of what it gets back,
+  so it expects the process's main module to be itself. The shell now answers a NULL module name with the game
+  image (shell/console.cpp). The latest runs stop before this call is reached, so the change has not been
+  exercised by a run yet.
+- boot_image now prints a real backtrace of a fault (unwinding the stack) in addition to the earlier scan of
+  the stack for addresses, which had named callers that were not on the call path.
+- Boot b45 stops with a read of address 0 in a system library. The backtrace is: two frames outside the game,
+  then image+0x1e1cfe5, image+0x1e0a375, image+0x5c1b689. image+0x1e1cfe5 is the instruction after the game's
+  call to D3D12ConfigureVirtualMemoryX in its memory start-up, so the fault is inside the shell's own
+  d3d12_xs.dll while it answers that call. Earlier runs (before the staged folder) got past this call. The cause
+  is not established.
+- boot_image writes its entry-point log lines without taking its log lock: with the lock, the line was lost and
+  a run looked as if it had ended before the entry point.
