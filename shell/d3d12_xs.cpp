@@ -2349,6 +2349,29 @@ void check_shader_tables(const void* signature, const std::uint8_t* container, s
             check_claim("second table: second byte of word 0 is one of the arrivals 0, 1, 3, 4", false, part);
         }
     }
+    // The shader's own tables, on their own: does a resource in a table sit at a position of its own?
+    std::set<std::pair<unsigned, unsigned>> positions;  // (parameter, word 1) of the table resources seen so far
+    for (const auto& w : read.second) {
+        if (((w[0] >> 8) & 0xff) != 3) {
+            continue;
+        }
+        const unsigned offset = w[1], reg = w[2], words = w[4] & 0xff, param = (w[4] >> 16) & 0xff;
+        std::snprintf(part, sizeof(part), "%s: second [%x %x %x %x %x]", where, w[0], w[1], w[2], w[3], w[4]);
+        check_claim("own tables, arrival 3: word 1 is a whole multiple of the low byte of word 4",
+                    words != 0 && offset % words == 0, part);
+        check_claim("own tables, arrival 3: no two resources of one table share word 1",
+                    positions.insert({param, offset}).second, part);
+        bool matched = false;
+        for (const auto& f : read.first) {
+            if (f[0] == 3 && ((f[4] >> 8) & 0xff) == param && f[1] == offset && f[3] == reg) {
+                matched = true;
+                break;
+            }
+        }
+        check_claim("own tables, arrival 3: the first table has a kind 3 entry with the same parameter, word 1 and "
+                    "register",
+                    matched, part);
+    }
     const bool write_now = g_check_pairs.size() % 32 == 0;
     ReleaseSRWLockExclusive(&g_check_lock);
     if (write_now) {
