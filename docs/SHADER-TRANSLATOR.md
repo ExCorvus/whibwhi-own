@@ -940,3 +940,40 @@ coordinate on both sides.
 Everything of section 26 that was "taken to be so" still is, and still nothing the pass writes has been given
 to the graphics device. Compute programs are not handled. A PC root signature for a pipeline, built from what
 the written shaders declare, is the next piece.
+
+## 28. Texel reads: 479 of 505 pixel programs written (boots b131-b133; measured)
+
+The 64 pixel programs that section 27 left at a texel read (`image_load`, and `image_load_mip`) are the ones
+that use the pixel position: they scale the position's x and y by constant-buffer values, turn them into whole
+numbers, and read a texel of a texture from the table at that coordinate (one program reads a 2-D array at
+`(position & 63, slice)`). The pass now writes these reads.
+
+- **The "address is not normalized" flag is accepted.** The public compiler sets it on every texel read (Mesa's
+  instruction selection for a texel fetch), so it is expected, not a reason to refuse. The 16-bit address, 16-bit
+  data and texture-fail flags are still refused.
+- **The number type of the texture.** The pass declares every texture as float. A texel read is written only when
+  every instruction that reads a register the read fills - from the read to the next write of that register, in
+  stored order - takes it as a float, and at least one does. A read whose values go to an integer instruction, to
+  an instruction the pass cannot type, or to no instruction at all, is refused with that reason. In boot b133 all
+  64 programs passed this check (their texels are multiplied by 255.0 or compared as floats).
+- The read is written as a texture load (`ld`) at the integer coordinate, with the level in the fourth component
+  for `image_load_mip`; the components the instruction's mask names go to consecutive registers.
+
+Measured, boot b133 (the pixel and vertex programs of the run's first 1,024 different containers; game folder
+unchanged): **479 of 505 pixel** and **224 of 227 vertex** programs written.
+
+**What is still refused (boot b133; first reason met).**
+
+| programs | reason |
+|---|---|
+| 11 pixel | a register read before any write that nothing known provides (s9 in 10, s11 in 1): the value interpolation reads through, copied into another register first |
+| 6 pixel | a scalar move into the null register (writes nothing) |
+| 4 pixel | `v_readfirstlane_b32` (its result is a scalar register; the reader types it as a vector register - a reader fault) |
+| 2 pixel | a resource taken from the descriptor heap by number |
+| 2 pixel | a word of a descriptor used as a number on one path (the pass's mark is in emission order, not per path) |
+| 1 pixel | the interpolation move (a flat input) |
+| 3 vertex | an export of a parameter the output list does not have (they declare only the position) |
+
+Each of these is understood from the private listings; they are the next small pieces. Nothing the pass writes
+has been given to the graphics device; compute programs are not handled; a PC root signature per pipeline is
+still the next big piece.
