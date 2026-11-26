@@ -318,8 +318,14 @@ void decode_fields(Instruction* ins) {
             break;
         }
         case WalkFormat::kVop1: {
-            // VOP1e: src0 [8:0], opcode [16:9], vdst [24:17].
-            set_destination(ins, source_field((w0 >> 17) & 0xFFu, true));
+            // VOP1e: src0 [8:0], opcode [16:9], vdst [24:17]. v_readfirstlane_b32 (opcode 2) takes lane 0 of a
+            // vector register into a SCALAR register (Mesa builds it with bld.def(s1), aco_select_nir_intrinsics.cpp);
+            // every other instruction of this format writes a vector register.
+            if (ins->opcode == 2) {
+                set_destination(ins, scalar_field((w0 >> 17) & 0xFFu));
+            } else {
+                set_destination(ins, source_field((w0 >> 17) & 0xFFu, true));
+            }
             add_source(ins, 0, source_field(w0 & 0x1FFu, false));
             break;
         }
@@ -372,7 +378,9 @@ void decode_fields(Instruction* ins) {
             const bool plain = ins->format == WalkFormat::kVop3;
             const int used = plain ? vop3_source_count(ins->opcode) : 3;
             const bool compare = plain && vop3_is_compare(ins->opcode);
-            if (compare) {
+            // The two-word form of v_readfirstlane_b32 (0x182) also writes a scalar register.
+            const bool scalar_dst = compare || (plain && ins->opcode == 0x182);
+            if (scalar_dst) {
                 set_destination(ins, scalar_field(w0 & 0xFFu));
             } else if (!(plain && used == 0)) {
                 set_destination(ins, source_field(w0 & 0xFFu, true));
