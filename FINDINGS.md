@@ -267,3 +267,36 @@ Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no de
 - Not done yet: the remaining console libraries (audio/APU, chad, xg_xs, XCRDAPI, XboxBvhBuilder), showing the
   regions to the GPU (the flat hosting model plugs in where graphics calls name memory), and a boot that reaches
   the game's run loop.
+
+## 2026-11-26 — the graphics boundary, mapped from the image's own calls (measured, no boot)
+
+- A register-tracking scan of the image's code (loads of the device global 0x8759d00 and its copy 0x75df048,
+  followed to the `call [reg+offset]` they feed) gives the device vtable slots the executable actually uses.
+  The public D3D12 indices hold exactly: 8 CreateCommandQueue, 9 **CreateCommandAllocator**, 14
+  **CreateDescriptorHeap** (not 11), 15, 16 root signature, 17-21 the five views, 24 CopyDescriptorsSimple,
+  25 GetResourceAllocationInfo, 26 GetCustomHeapProperties, 27 CreateCommittedResource, 36 CreateFence,
+  39 CreateQueryHeap, 41 CreateCommandSignature. A PC device can answer all of those, so the wrapper now
+  forwards 9 and 14 by their real meaning and wraps what they return (allocator, heap). Console-only slots the
+  image uses: 48 (five objects with a 16-byte desc at device set-up), 49, 55 (derived pipeline state), 57 (base
+  pipeline), 61, 62 (compute pipeline state: desc {pointer, count 1}), 67 (pipeline from a stream desc), 70 and
+  71 (views from raw descriptor words), 73 (command list: 16-byte desc + allocator + riid), 74 (pool), 78-81
+  (frame events), 119, 132, 133 (placed resource). Queue slots: 31 page mapping (pool queue), 32 presentation,
+  23/24 in the frame step, 18. Full map with caller RVAs: docs/exe-map/GRAPHICS-CALLS.md.
+- D3D12XboxCreateDevice is called after the game has created its own window (RegisterClassExA/CreateWindowExA);
+  the 64-byte creation block and the ConfigureVirtualMemoryX block are logged, their field meanings are not
+  established.
+- xg_xs: the game builds a 0x38/0x40-byte texture description itself and asks XGSuggestSwizzleMode only when the
+  format byte is 0xff (its own fallback). XGCreateTextureComputer returns an object whose +0x10 method fills a
+  0x6c8-byte layout block; the game caches that block by a format/flags hash (fn 0x5121980) and derives its
+  texture sizes/mips from it (fns 0x979c40, 0x3441f0). That block is the contract our xg_xs.dll must answer.
+- XboxBvhBuilder: one builder object per process (constructed in fn 0x2478440 with the device, destroyed at
+  shutdown), Set64BitMortonCodes around prebuild/build, prebuild-info, batched build, rehydrate (HRESULT) and
+  copy. The world-start rehydrate path (fn 0xea6c60) converts GPU-view to CPU-view addresses before handing the
+  builder the game's own bytes, in batches of at most 16. The builder needs XMemVirtualQuery from our xmem.dll.
+- Shader translator groundwork added (shell/shader_isa.*, shell/shader_translate.*, shell/spirv.*): reads the
+  console instruction words, refuses anything it does not implement with a precise diagnostic, emits SPIR-V
+  through our own writer, caches by content in memory only. It translates straight-line compute shaders of
+  s_mov_b32/s_movk_i32/s_add_u32/s_sub_u32/v_mov_b32/v_add_f32/s_nop/s_endpgm; branches, memory instructions,
+  graphics stages and texture tiling are refused for now. A generated module validates with the Khronos
+  spirv-val (SPIR-V 1.0). Plan: docs/SHADER-TRANSLATOR.md. New test `shader`; all 9 CTest tests pass (the
+  known thread-storage 0xc0000374 did not appear in these runs). No boot and no GPU run in this work.
