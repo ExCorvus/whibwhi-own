@@ -104,10 +104,26 @@ constexpr int kQueryHeap = 11;
 constexpr int kCommandSignature = 12;
 constexpr int kVtableSlots = 160;
 
+// The console's objects are not opaque to the image: it reads and writes fields inside them. Measured in the
+// image's own code (docs/exe-map/COMMAND-LIST-ORDER.md, docs/exe-map/DESCRIPTORS.md):
+//   - a command list: +0x18 current write position and +0x30 end of its command memory (when position < end the
+//     image writes a command record itself, otherwise it calls a method), bytes +0x140 and +0x141, two tables of
+//     dwords at +0x144 and +0x344 that it only reads, two 16-byte blocks at +0x544 and +0x554 that it writes
+//     without any check, a flag byte at +0x548;
+//   - the device: a byte at +0x18; when it is zero the image copies descriptor records in its own memory itself,
+//     when it is non-zero it asks the device to copy (device slot 24).
+// So every object the image is given starts with the method table and then this many bytes that belong to the
+// image, zeroed; the shell's own fields come after them, where the image's writes cannot reach.
+constexpr std::size_t kImageAreaEnd = 0x1000;
+constexpr std::size_t kListWritePosition = 0x18;
+constexpr std::size_t kListWriteEnd = 0x30;
+constexpr std::size_t kDeviceCopiesDescriptors = 0x18;
+
 struct Wrap {
     void** vt;  // must be first: the COM vtable pointer is the object's first field
+    unsigned char image_area[kImageAreaEnd - sizeof(void*)];  // offsets 8..0xfff of the object, the image's
     void* pc;  // the PC COM object; the wrapper holds one reference on it
-    std::atomic<long> refs{1};
+    std::atomic<long> refs;
     int kind_id;
     const char* kind;
     // For a resource the image placed at an address of its own: that address. For a descriptor heap: the address
@@ -119,7 +135,16 @@ struct Wrap {
     unsigned long long requested_block = 0;
     unsigned long long requested_bytes = 0;
     unsigned long long requested_attributes = 0;
+
+    Wrap(void* pc_object, int kind_number, const char* kind_name)
+        : vt(nullptr), image_area{}, pc(pc_object), refs(1), kind_id(kind_number), kind(kind_name) {}
+
+    // The byte of the object at `offset` (8 or more), as the image addresses it.
+    unsigned char* at(std::size_t offset) { return image_area + (offset - sizeof(void*)); }
+    const unsigned char* at(std::size_t offset) const { return image_area + (offset - sizeof(void*)); }
 };
+static_assert(offsetof(Wrap, image_area) == sizeof(void*), "the image's area starts right after the method table");
+static_assert(offsetof(Wrap, pc) == kImageAreaEnd, "the shell's fields start after the image's area");
 
 // Every live wrapper, so that a wrapper the image passes back as an argument can be recognised. The PC library
 // checks that the objects it is handed are its own, so it must never see one of ours.
@@ -298,8 +323,15 @@ void fill_vtable(void** vt, int forward_last, const std::map<int, void*>& overri
 // wrapper's own count reaches zero.
 Wrap* wrap_object(void* pc, int kind_id, const char* kind, int forward_last,
                   const std::map<int, void*>& overrides) {
-    auto* w = new Wrap{nullptr, pc, {}, kind_id, kind};
-    w->refs.store(1);  // the reference handed to whoever asked for the object
+    auto* w = new Wrap(pc, kind_id, kind);  // one reference: the one handed to whoever asked for the object
+    if (kind_id == kDevice) {
+        // The image then sends every descriptor copy through device slot 24, where the same copy can be made in
+        // the PC heap. With zero it would copy the records in its own memory and the PC heap would never hear of
+        // it. Which value the console's own library has here is not known; this one is the shell's choice.
+        *w->at(kDeviceCopiesDescriptors) = 1;
+    }
+    // A command list keeps position == end (both zero): the image then sends every command as a method call and
+    // never writes a hardware command record, which the shell would have no way to carry out.
     w->vt = new void*[kVtableSlots];
     w->vt[0] = reinterpret_cast<void*>(&w_qi);
     w->vt[1] = reinterpret_cast<void*>(&w_addref);
@@ -1804,6 +1836,64 @@ unsigned long long __stdcall whiwhi_d3d12_view_pages_shown(void) {
     const unsigned long long shown = g_view_pages.size();
     ReleaseSRWLockShared(&g_view_pages_lock);
     return shown;
+}
+
+unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
+    // Per kind of object: which offsets of the image's area are not zero in at least one live object.
+    std::map<std::string, std::pair<std::size_t, std::vector<bool>>> by_kind;
+    AcquireSRWLockShared(&g_wraps_lock);
+    for (const void* entry : g_wraps) {
+        const Wrap* w = static_cast<const Wrap*>(entry);
+        auto& item = by_kind[w->kind];
+        ++item.first;
+        if (item.second.empty()) {
+            item.second.assign(kImageAreaEnd, false);
+        }
+        for (std::size_t offset = sizeof(void*); offset < kImageAreaEnd; ++offset) {
+            if (*w->at(offset) != 0 && !(w->kind_id == kDevice && offset == kDeviceCopiesDescriptors)) {
+                item.second[offset] = true;
+            }
+        }
+    }
+    ReleaseSRWLockShared(&g_wraps_lock);
+    unsigned long long written = 0;
+    for (const auto& item : by_kind) {
+        std::string ranges;
+        for (std::size_t offset = sizeof(void*); offset < kImageAreaEnd;) {
+            if (!item.second.second[offset]) {
+                ++offset;
+                continue;
+            }
+            std::size_t end = offset;
+            while (end < kImageAreaEnd && item.second.second[end]) {
+                ++end;
+            }
+            written += end - offset;
+            char text[48];
+            std::snprintf(text, sizeof(text), " +0x%zx..+0x%zx", offset, end - 1);
+            if (ranges.size() < 600) {
+                ranges += text;
+            }
+            offset = end;
+        }
+        if (!ranges.empty()) {
+            logf("%s (%zu live): the image has written into its objects at%s\n", item.first.c_str(), item.second.first,
+                 ranges.c_str());
+        }
+    }
+    if (written == 0) {
+        logf("the image has written nothing into the objects it was given\n");
+    }
+    return written;
+}
+
+int __stdcall whiwhi_d3d12_object_layout(unsigned long long* image_area_end, unsigned long long* list_position,
+                                         unsigned long long* list_end, unsigned long long* device_copy_byte) {
+    if (image_area_end) *image_area_end = kImageAreaEnd;
+    if (list_position) *list_position = kListWritePosition;
+    if (list_end) *list_end = kListWriteEnd;
+    if (device_copy_byte) *device_copy_byte = kDeviceCopiesDescriptors;
+    return 1;
 }
 
 } // extern "C"
