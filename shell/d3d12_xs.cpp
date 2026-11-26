@@ -33,6 +33,7 @@
 // signature, and the console-only methods above slot 43). See docs/exe-map/GRAPHICS-CALLS.md.
 #include "d3d12_xs.h"
 #include "shader_container.hpp"  // names and sizes of the chunks of a shader container
+#include "shader_flow.hpp"       // blocks, branches and loops of a decoded program
 #include "shader_isa.hpp"        // the console instruction reader, used to say what a shader's code part holds
 #include "shader_names.hpp"      // public names of the instructions identified so far
 #include "shader_program.hpp"    // the packed program inside a shader container, unpacked in memory
@@ -2709,6 +2710,7 @@ struct PackedCensus {
     std::map<std::string, unsigned long long> origins;      // "<kind>: <use>: <where its descriptor comes from>"
     std::map<std::string, unsigned long long> tables;       // "<kind>: <a statement about the module's two tables>"
     std::map<std::string, unsigned long long> opening;      // "<kind>: <a statement about how the program begins>"
+    std::map<std::string, unsigned long long> flow;         // "<kind>: <what the control-flow pass made of it>"
     std::map<std::string, unsigned long long> binding;      // "<kind>: <the first table against a root signature>"
     // The tables of each container looked at, kept so that a pipeline request naming the container together with
     // a root signature can be compared with that root signature (numbers the shell derived, not the block).
@@ -2780,6 +2782,7 @@ void log_packed_census(const char* when) {
     const auto origins = c.origins;
     const auto tables = c.tables;
     const auto opening = c.opening;
+    const auto flow = c.flow;
     const auto binding = c.binding;
     const unsigned long long pairs_compared = c.pairs_compared;
     unsigned long long layouts = 0, layouts_shared = 0, most_tables = 0, tables_in_all = 0;
@@ -2814,6 +2817,7 @@ void log_packed_census(const char* when) {
     log_packed_counted("descriptor origin", origins, 48);
     log_packed_counted("tables", tables, 200);
     log_packed_counted("how programs begin", opening, 80);
+    log_packed_counted("control flow", flow, 80);
     logf("packed programs (%s): %llu distinct pair(s) of a root signature and a container were named together by "
          "pipeline requests and compared\n",
          when, pairs_compared);
@@ -3723,12 +3727,50 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
         same = g_programs.word_sums.count(sum) != 0;
         ReleaseSRWLockShared(&g_programs.lock);
     }
-    std::vector<std::string> table_says, opening_says;
+    std::vector<std::string> table_says, opening_says, flow_says;
     whiwhi::shell::ModuleTables kept_tables;
     if (module && lands && decoded_ok) {
         table_statements(container, bytes, block, found, shape, table_says);
         kept_tables = whiwhi::shell::read_module_tables(block.data(), size, found);
         opening_statements(container, bytes, decoded, kept_tables, kind, shape, opening_says);
+        // What the control-flow pass makes of the program: its blocks, its loops, and whether its flow can be
+        // written as nested ifs and loops. Counts and the pass's own reasons only.
+        // A reason may name a position or a block number; those are replaced by '#' so that equal reasons count
+        // together.
+        const auto without_numbers = [](const std::string& reason) {
+            std::string out;
+            for (std::size_t i = 0; i < reason.size() && out.size() < 120;) {
+                if (reason[i] >= '0' && reason[i] <= '9' && (i == 0 || reason[i - 1] == ' ' || reason[i - 1] == '+')) {
+                    while (i < reason.size() && std::isalnum(static_cast<unsigned char>(reason[i]))) {
+                        ++i;
+                    }
+                    out += '#';
+                } else {
+                    out += reason[i++];
+                }
+            }
+            return out;
+        };
+        const whiwhi::shell::FlowGraph graph = whiwhi::shell::flow_of(decoded);
+        if (!graph.ok) {
+            flow_says.push_back("flow not analysed: " + without_numbers(graph.reason));
+        } else {
+            const std::size_t blocks = graph.blocks.size();
+            flow_says.push_back(std::string("flow analysed: ") +
+                                (blocks == 1 ? "one block" : blocks <= 4 ? "2 to 4 blocks" : blocks <= 16
+                                 ? "5 to 16 blocks" : blocks <= 64 ? "17 to 64 blocks" : "more than 64 blocks"));
+            flow_says.push_back(graph.loops.empty() ? "flow analysed: no loop"
+                                : graph.loops.size() == 1 ? "flow analysed: one loop" : "flow analysed: several loops");
+            if (!graph.unreachable.empty()) {
+                flow_says.push_back("flow analysed: has blocks no path reaches");
+            }
+            if (!graph.reducible) {
+                flow_says.push_back("flow analysed: NOT reducible");
+            }
+            const whiwhi::shell::FlowStructure tree = whiwhi::shell::structure_of(graph);
+            flow_says.push_back(tree.ok ? "structured as nested ifs and loops"
+                                        : "not structured: " + without_numbers(tree.reason));
+        }
     }
 
     char text[128];
@@ -3792,6 +3834,9 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
     }
     for (const std::string& statement : opening_says) {
         bounded(g_packed.opening, std::string(kind_name) + ": " + statement);
+    }
+    for (const std::string& statement : flow_says) {
+        bounded(g_packed.flow, std::string(kind_name) + ": " + statement);
     }
     if (g_packed.kept.size() < 262144) {
         PackedCensus::Kept& kept = g_packed.kept[key];
