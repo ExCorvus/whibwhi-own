@@ -79,7 +79,20 @@ struct Operand {
 // VOP3 (encoding 110101) and VOP3P (encoding 110011), both two words. The destination and the modifiers are in
 // the first word, the three 9-bit sources in the second (LLVM VOP3a_gfx10 / VOP3Pe_gfx10).
 struct Vop3Fields {
-    std::uint32_t vdst = 0;  // word 0 bits 7..0: destination VGPR
+    // word 0 bits 7..0: the destination field. A vector register number, except for a compare (VOP3 opcode
+    // below 0x100), where it is a scalar code: the register pair, VCC (106) or EXEC (126) that gets the mask.
+    std::uint32_t vdst = 0;
+    // How many of the three source fields the instruction uses, from the public operand lists
+    // (vop3_source_count). The fields it does not use are not counted in Instruction::source_count.
+    // `sources_established` is false for an opcode the public table of this generation does not list; all
+    // three fields are then kept as they stand.
+    std::uint8_t sources_used = 3;
+    bool sources_established = false;
+    // The VOP3 instructions with a second, scalar result (carry out; the mask of v_div_scale; the high part
+    // of v_mad_*64): word 0 bits 14..8 hold that result's scalar code, and are then NOT abs / op_sel
+    // (LLVM VOP3be: Inst{14-8} = sdst).
+    bool has_scalar_result = false;
+    std::uint8_t scalar_result = 0;
     bool clamp = false;      // word 0 bit 15
     // word 0 bits 10..8, one bit per source (bit 8 = src0): VOP3 = absolute-value modifier;
     // VOP3P = negate-the-high-half modifier.
@@ -277,6 +290,20 @@ std::string describe_instruction(const Instruction& instruction);
 // Translate an inline-constant code into the 32-bit pattern it supplies. Returns false for a code this build
 // does not name (the caller then refuses the shader rather than guessing).
 bool inline_constant(std::uint32_t code, std::uint32_t* value);
+
+// What the public instruction table of this GPU generation says about a VOP3 opcode (Mesa ACO's opcode table,
+// the gfx10 column, with its rule for the two-word form: a compare keeps its number, a two-source instruction
+// is its number + 0x100, a one-source instruction its number + 0x180; the rest are VOP3's own).
+//
+// vop3_is_compare: the opcode is one of the compares (below 0x100): two sources, and the destination field
+// names the scalar register pair, VCC or EXEC that receives the lane mask.
+bool vop3_is_compare(std::uint32_t opcode);
+// vop3_source_count: how many of the three source fields the instruction uses (0..3), or -1 when the table
+// does not list the opcode. The select (0x101) and the three carry-in adds (0x128..0x12A) use the third field
+// for a lane mask; the other re-encoded two-source instructions use two.
+int vop3_source_count(std::uint32_t opcode);
+// vop3_has_scalar_result: the instruction has a second, scalar result in word 0 bits 14..8.
+bool vop3_has_scalar_result(std::uint32_t opcode);
 
 } // namespace whiwhi::shell
 
