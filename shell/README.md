@@ -34,9 +34,12 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 - `shader_walk.hpp` / `shader_walk.cpp` — where each instruction of a console shader program starts and how
   many words it has, for every instruction format. Checked against the game's own programs in a run: a walk
   that reads every length correctly lands exactly on the program's end word.
-- `shader_isa.hpp` / `shader_isa.cpp` — reads the fields of a few instructions for the translator. It is older
-  than the walk and disagrees with it in places (it knows one two-source vector opcode only, and reads
-  scalar-move fields from the wrong bits); it has to be redone on top of the walk before the translator grows.
+- `shader_names.hpp` / `shader_names.cpp` — the public name and group of the instructions identified so
+  far (66 pairs of format and opcode, the most used ones); every row is explained with its public source in
+  `docs/SHADER-OPCODES.md`. A pair that is not listed has no name here.
+- `shader_isa.hpp` / `shader_isa.cpp` — the instruction reader: format, opcode and length come from the
+  walk, and the fields of every format (registers, constants, offsets, flags) are read from the public
+  encoding of this GPU generation. Tried on hand-built words only so far, not on the game's programs.
 - `shader_translate.hpp` / `shader_translate.cpp` — translates a console shader to SPIR-V, kept in memory. Today
   it handles straight-line compute shaders of a handful of instructions and refuses everything else.
 - `spirv.hpp` / `spirv.cpp` — our own small SPIR-V writer.
@@ -81,8 +84,8 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 
 ## Tests
 
-`tests/` holds 18 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
-shader_container, shader_walk, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
+`tests/` holds 19 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
+shader_container, shader_walk, shader_names, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
 game files, no GPU.
 
 ## Build and test
