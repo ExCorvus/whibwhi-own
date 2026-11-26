@@ -6,7 +6,7 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 
 ## Current state (2026-11-26)
 
-- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 18 tests pass.
+- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 19 tests pass.
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
@@ -864,3 +864,30 @@ ExCorvus's: a real audio path behind the audio device object, or a silent device
   wrong bits, and looks for scalar memory loads under an older generation's format number). Its test passes
   because the test was written to the same layout. The translator built on it handles only its own test
   shaders. The reader has to be redone on top of the walk; nothing of the game was ever translated with it.
+
+## 2026-11-26 - the instruction reader rebuilt on the walk; the old reader's opcode numbers were wrong (public sources and hand-built words; not yet run on the game's programs)
+
+- New reading of `shell/shader_isa.*`: format, opcode number and length come from `shader_walk.*`; the reader
+  then extracts the fields of every format from the public GFX10 encoding classes (LLVM AMDGPU backend) and the
+  public operand rules (`AMDGPUDisassembler.cpp`). docs/SHADER-TRANSLATOR.md section 14 lists what is decoded per
+  format and what stays raw.
+- Found: the previous reader's opcode numbers did not come from a public table and two of them named other
+  instructions. On this generation `s_mov_b32` is scalar-one-source opcode 3 (the old reader used 0) and
+  `v_add_f32` is two-source vector opcode 3 (the old reader used 1). `s_add_u32` 0, `s_sub_u32` 1,
+  `s_movk_i32` 0, `v_nop` 0, `v_mov_b32` 1, `s_nop` 0 and `s_endpgm` 1 were already right.
+- Found: the old reader also read the scalar-one-source fields from swapped bit positions, classified only one
+  two-source vector opcode as that format at all, and looked for scalar memory loads under the previous
+  generation's format number. Its test was written to the same wrong layout, which is why it passed.
+- The translator now accepts the same nine instructions as before, with the correct numbers; every other
+  instruction is refused with its format and opcode number. Its module version tag is bumped, so no cached
+  module from the old numbering can be served.
+- Where the walk and the public tables disagreed (opcode width only, never length): the packed three-source
+  format has eight opcode bits at 23..16 (the walk read seven), the untyped buffer format eight at 25..18 (the
+  walk read seven), the typed buffer format 18..16 plus a bit in the second word (the walk read 18..15). Checked
+  against the public definitions and corrected in `shell/shader_walk.cpp`; the instruction counts measured in
+  boots b86-b87 are not changed by it (every opcode counted in those formats is below 128).
+- New: `shell/shader_names.*` and docs/SHADER-OPCODES.md give the public name of 66 (format, opcode) pairs - the
+  most used ones, 94% of the instructions counted. The generation is the one the public tables call gfx10
+  (five separate checks in the document). Every row was compared by script with the gfx10 column of the public
+  opcode table: no disagreement. Two-source vector opcode 0 (429 uses) has no public instruction at that number
+  and stays unnamed; the 27 programs that stop at a word with top six bits 0x3F stay unexplained.
