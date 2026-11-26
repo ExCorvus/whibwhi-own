@@ -3,7 +3,8 @@
 We had it before we had it. Original work by [ExCorvus](https://github.com/ExCorvus). You need your own copy of the game; this
 repository contains no game data, keys or executable, and nothing here decrypts or bypasses any protection.
 
-what i would need most help about would be the audio errors. i now it is weird, but because of th ai traps it cannot be measure
+what i would need most help about would be the audio library erors, they are a silent path atm. 
+i now it is weird, but because of the ai traps it cannot be measure
 how far the game boots, but what i can say is that if my idea is correct, which was only verified by clankers so far, that as
 soon as the shell stands, there will not be any blocks for playing all of it.
 
