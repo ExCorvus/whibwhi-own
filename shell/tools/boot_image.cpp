@@ -16,6 +16,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -45,7 +46,51 @@ LoadedImage* g_loaded = nullptr;
 
 // What a run leaves behind for the log: every network call that was refused, and which bytes of the graphics
 // objects the game wrote into.
+// The game test's record of the import calls (WHIWHI_CALL_LEDGER=<file>): one line per import of the image, in
+// the order of its import table: how often the game called it during the run and whether the shell provides it.
+// Written once, at the end of the run, to a file on the user's PC (it holds names and counts only).
+void write_call_ledger() {
+    static std::atomic<bool> written{false};
+    if (!g_loaded || !g_loaded->call_counts || written.exchange(true)) {
+        return;
+    }
+    char path[MAX_PATH] = {};
+    if (GetEnvironmentVariableA("WHIWHI_CALL_LEDGER", path, sizeof(path)) == 0) {
+        return;
+    }
+    std::FILE* out = std::fopen(path, "w");
+    if (!out) {
+        std::fprintf(stderr, "[boot] the call ledger %s could not be written\n", path);
+        return;
+    }
+    std::size_t called = 0, called_unprovided = 0;
+    unsigned long long calls = 0;
+    for (std::size_t i = 0; i < g_loaded->counted.size(); ++i) {
+        const UnprovidedImport& u = g_loaded->counted[i];
+        const unsigned long long n = g_loaded->call_counts[2 * i];
+        const bool connected = g_loaded->counted_connected[i];
+        if (n) {
+            ++called;
+            calls += n;
+            called_unprovided += connected ? 0 : 1;
+        }
+        if (u.by_ordinal) {
+            std::fprintf(out, "import\t%s!#%u\t%s\t%llu\n", u.library.c_str(), u.ordinal,
+                         connected ? "provided" : "not-provided", n);
+        } else {
+            std::fprintf(out, "import\t%s!%s\t%s\t%llu\n", u.library.c_str(), u.function.c_str(),
+                         connected ? "provided" : "not-provided", n);
+        }
+    }
+    std::fclose(out);
+    std::fprintf(stderr, "[boot] call ledger: %zu of %zu imports called (%llu calls), %zu of them not provided; "
+                         "written to %s\n",
+                 called, g_loaded->counted.size(), calls, called_unprovided, path);
+    std::fflush(stderr);
+}
+
 void end_of_run_report() {
+    write_call_ledger();
     offline_report();
     if (const HMODULE graphics = GetModuleHandleA("d3d12_xs.dll")) {
         if (const auto report = reinterpret_cast<unsigned long long(__stdcall*)(void)>(
@@ -336,6 +381,9 @@ int main(int argc, char** argv) {
     });
     set_unprovided_handler(&on_unprovided);
 
+    if (GetEnvironmentVariableA("WHIWHI_CALL_LEDGER", nullptr, 0) > 0) {
+        set_count_import_calls(true);  // the game test: count every call through the import table
+    }
     LoadedImage loaded;
     std::string reason;
     const ImportResolver resolve = [&](const std::string& library, const ImportedFunction& fn) {
