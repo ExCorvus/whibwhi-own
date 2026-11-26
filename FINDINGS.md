@@ -160,3 +160,53 @@ Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no de
   in storage index 1; the 2 callbacks were not called. Imports unchanged at 520 of 587. The game folder listing was
   identical before and after.
 - Not done yet: the console-only libraries, and starting the image.
+
+## 2026-11-26 - the memory library, xmem.dll (our own; measured)
+
+- What an image asks of this library was read off the original executable's own calls: 57 call sites in 21
+  functions. Microsoft's reference pages for the library are not public and were not used. The flag values the
+  executable passes are named in the public Windows SDK header winnt.h: MEM_64K_PAGES (0x20400000),
+  MEM_LARGE_PAGES (0x20000000), MEM_RESERVE_PLACEHOLDER (0x40000), MEM_REPLACE_PLACEHOLDER (0x4000),
+  PAGE_WRITECOMBINE (0x400) and the PAGE_GRAPHICS_* protections (0x800 to 0x40000). Earlier notes called 0x400
+  "no cache"; that was wrong.
+- The executable uses memory in four ways:
+  1. It reserves a range for 64 KiB pages, asks for physical pages, and maps them in page by page: as a run from
+     one address, or as a list of separate addresses. An entry of 0, or no entry list, unmaps.
+  2. It reserves one placeholder range, splits it itself with VirtualFree, and turns each piece into a range for
+     pages. This is the same placeholder scheme Windows has.
+  3. It commits memory outright, in large-page or 64 KiB-page mode.
+  4. It makes a few plain allocations with XMemAlloc and frees them with XMemFree.
+- It frees what XMemVirtualAlloc gave it with Windows' VirtualFree (23 call sites), in one place passing the
+  region's size where Windows wants 0. Windows refuses that call (measured: error 87).
+- Our xmem.dll (shell/xmem.*) answers 9 of the 12 functions: XMemVirtualAlloc, XMemAllocatePhysicalPages,
+  XMemFreePhysicalPages, XMemMapPhysicalPages, XMemMapPhysicalPagesScatter, XMemAlloc, XMemFree, XMemAllocDefault
+  and XMemFreeDefault. The shell connects the executable's VirtualFree import to the library as well
+  (shell/console.*), because only the library knows how its regions are built.
+- Left out on purpose: XMemGetWorkingSetStatistics, XMemIsToolsMemAvailable and XMemTransferMemory. The calls show
+  their arguments but not what the results mean, so they stay "not provided" and name themselves if called.
+- How it sits on Windows, measured with a probe before it was written (Windows build 26300):
+  - Splitting off a range that is a whole placeholder is refused (error 487), so the library keeps a record of
+    every placeholder. Many adjacent placeholders merge in one call.
+  - One page mapped at two addresses is the same memory at both.
+  - A native release of a range that has been split releases only its first piece, and VirtualFree on a mapped
+    page is refused (error 87). This is why the executable's VirtualFree has to be answered by the library.
+  - 16,384 single-page mappings (1 GiB) took 45 ms to map and 33 ms to unmap. Each page is therefore its own
+    mapping, so changing one page never disturbs a neighbour.
+- Choices that are ours and not known console behaviour: pages read as zero when handed out; an allocation of
+  pages is all or nothing; XMemAlloc memory is zero-filled and aligned to 64 KiB; write-combining is recorded but
+  not applied (it is a caching hint); "large pages" are ordinary pages aligned to 2 MiB. A combination of flags
+  the executable was not seen to use is refused and reported, not guessed. The graphics bits and attributes of
+  every region are kept for the shell; nothing shows them to the GPU yet.
+- No file is written: physical pages are pagefile-backed memory, created 256 MiB at a time as they are asked for.
+- Tested with made-up sizes only (shell/tests/test_xmem.cpp, shell/tests/test_console.cpp): mapping, unmapping,
+  the same page at two addresses, freed pages coming back as zero, the placeholder sequence above with the split
+  done through the library and directly through Windows, release with pages still mapped, four threads changing
+  one range at once, 5,000 pages across two backing sections. 41 runs in a row passed.
+- On the original executable (loaded without starting it): 552 of 587 imports connect, 10 of them to our library
+  (the 9 functions and VirtualFree). Bink2Scarlett.dll now loads unchanged against our library; its start-up code
+  made no call to it. 35 imports are not provided: the 3 above, and 32 in 7 libraries that do not load:
+  AcpHal.dll (9), XboxBvhBuilder.dll (7), chad.dll (5), xapu.dll (5), d3d12_xs.dll (3), xg_xs.dll (2),
+  XCRDAPI.dll (1). XboxBvhBuilder.dll also asks our library for XMemVirtualQuery, a function the executable itself
+  does not import. chad.dll is five XDsp functions and XCRDAPI.dll is DStorageGetFactory. The game folder listing
+  was identical before and after.
+- Not done yet: the remaining console libraries, showing the regions to the GPU, and starting the image.
