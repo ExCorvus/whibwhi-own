@@ -67,11 +67,22 @@ std::wstring map_path(const wchar_t* raw, bool& existed) {
         return std::wstring();
     }
     std::wstring s = raw;
+    std::wstring folder = game_folder();
+    // The console mounts the package as drive G: (the image asks for "G:\<file>").
+    if ((s.size() >= 3) && (s[0] == L'G' || s[0] == L'g') && s[1] == L':' && (s[2] == L'\\' || s[2] == L'/')) {
+        std::wstring mapped = folder + L"\\" + s.substr(3);
+        for (wchar_t& c : mapped) {
+            if (c == L'/') {
+                c = L'\\';
+            }
+        }
+        existed = path_exists(mapped.c_str());
+        return mapped;
+    }
     if (path_exists(s.c_str())) {
         existed = true;
         return s;
     }
-    std::wstring folder = game_folder();
     std::wstring stripped = s;
     const std::size_t colon = s.find(L":/");
     if (colon != std::wstring::npos) {
