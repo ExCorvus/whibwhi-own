@@ -40,6 +40,31 @@ inside.
 
 The measurements behind each point are in [FINDINGS.md](FINDINGS.md) and [docs/exe-map/](docs/exe-map/).
 
+## What the earlier attempt got wrong
+
+Before this shell there was an attempt built on top of another project's runtime (Leonida, by NotRexed). None of
+that code is here. The attempt failed, and the reasons are why this project is shaped the way it is. The mistakes
+described are our own.
+
+1. **It turned failures into successes.** When a memory request of the game could not be met, the runtime was
+   patched so that the request came back as "done". Each patch moved the run further: a crash went away, the
+   frames got brighter. The game still never reached its world, because it was now running on answers that were
+   not true.
+2. **It worked from inside the game instead of from outside.** The effort went into the game's own allocation
+   and error paths. But the game's logic is not what is broken on a PC. What is missing is its surroundings (the
+   six points above). Fixing the inside hides that.
+3. **It gave the game's memory to the graphics card piece by piece.** Single regions were imported, copies were
+   kept, single addresses were corrected one at a time. The game has no table for that: it expects one memory
+   that both chips see. Every piece that was missed became an address the graphics card could not reach, and the
+   crash at the start of the game world was exactly such an address.
+4. **It measured progress by how far a run got.** A run that gets further looks like progress whether or not
+   the answers behind it are right.
+
+What this project does instead, as fixed rules ([AGENTS.md](AGENTS.md)): provide what the game expects and never
+change its checks; never answer "done" for work that was not done; treat the game's memory as one whole; and take
+the program file itself, not the length of a run, as the reference. The longer account is in
+[docs/EARLY-HISTORY.md](docs/EARLY-HISTORY.md).
+
 ## Where it stands
 
 Points 1, 2, 3 and 5 work far enough that the game starts, sets itself up, opens all its packages, creates its
