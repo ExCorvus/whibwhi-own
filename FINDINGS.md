@@ -210,3 +210,25 @@ Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no de
   does not import. chad.dll is five XDsp functions and XCRDAPI.dll is DStorageGetFactory. The game folder listing
   was identical before and after.
 - Not done yet: the remaining console libraries, showing the regions to the GPU, and starting the image.
+
+## 2026-11-26 - first boot of the image inside the shell (measured)
+
+- New tool shell/tools/boot_image.cpp (run by Temp\opencode\boot_shell.ps1): loads the image, connects imports,
+  runs its 2 thread-storage callbacks, then calls its entry point on a new thread with its own 1 MiB stack. An
+  import the shell does not provide is logged and answered with failure (0); the image's own error handling
+  decides what happens. Exceptions are logged with their image-relative address.
+- Boot b1 (the original executable, game folder as library folder, 90 s budget): the image placed at its preferred
+  base, TLS callbacks ran, the entry point ran, and the game stopped at its first graphics call:
+  `d3d12_xs.dll!D3D12ConfigureVirtualMemoryX` - not provided, answered failure - after which the process died with
+  exception 0xc0000374 in ntdll. No GPU was used (no graphics library provided). The game folder listing was
+  identical before and after (150 entries); the boot's working directory was a scratch folder.
+- Reading: the memory library and loader carried the game through start-up up to the graphics boundary. The next
+  console library to provide is d3d12_xs.dll (3 imports: D3D12XboxCreateDevice, D3D12ConfigureVirtualMemoryX,
+  D3D12SerializeVersionedRootSignature); the whole graphics interface sits behind the device it returns.
+- ExCorvus has an Xbox controller: input needs no separate keyboard path; the console input library (GameInput.dll,
+  1 import) can be answered from the controller directly.
+- ExCorvus asked whether VRR is feasible by adjusting the shell (not acted on): yes, in principle, at the present path
+  once the shell builds one (the game's frame-event calls are device slots 78-81 and PresentX on the queue;
+  on a PC those map to a DXGI swapchain created with tearing allowed and presented accordingly, gated on the
+  display actually supporting variable refresh). It changes the frame cadence the game's watchdog sees, so it is
+  a deliberate later change with her sign-off, not something to fold into the current boot work.
