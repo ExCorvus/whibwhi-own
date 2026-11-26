@@ -310,6 +310,11 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
   (fn 0x4fac3c0 -> fn 0x2219620 -> vtable slot +0x30). The slot's real body exists only in the console loader's
   patch; it is not derivable from the image. So this path is the honest boundary: the shell fills every stub it
   can derive, and stops where the game needs code only the console has.
+- Update (boot b22): the loader patch now also NOPs inline int3 traps that directly follow an indirect call
+  (the console loader overwrites those as well; the code after the trap is the normal continuation). Boot b22
+  got past image+0x2219650 and stopped at a null write at image+0x5be9387 inside the buddy allocator: the pool's
+  sub-allocator slot (obj+0x1280) is null because the real body of slot +0x30 (a lazy init) is exactly what the
+  console patch provides. Each converted slot reveals the next console-only body; the boundary is real.
 
 ## 2026-11-26 - booting the image in the shell; what the runs showed (measured)
 
