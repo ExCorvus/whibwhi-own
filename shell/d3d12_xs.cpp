@@ -5805,6 +5805,16 @@ HRESULT __stdcall w_wait_frame_event(Wrap*, void* type_arg, void* timeout_arg, v
     const unsigned flags = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(flags_arg));
     static std::atomic<int> shown{0};
     const bool show = shown.fetch_add(1) < 6;
+    static std::atomic<unsigned long long> calls{0};
+    const unsigned long long call_number = ++calls;
+    static std::once_flag thread_once;
+    std::call_once(thread_once, [] {
+        logf("WaitFrameEventX: first call on thread %lu; the device's own thread is %lu (%s)\n",
+             GetCurrentThreadId(), g_device_thread, on_device_thread() ? "the same" : "different");
+    });
+    if (call_number >= 8 && (call_number & (call_number - 1)) == 0) {
+        logf("WaitFrameEventX: %llu calls so far, this one on thread %lu\n", call_number, GetCurrentThreadId());
+    }
     if (type >= kFrameEventTypes || !token) {
         logf("WaitFrameEventX: event type %u, token place 0x%llx - refused\n", type,
              static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(token)));
