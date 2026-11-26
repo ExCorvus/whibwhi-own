@@ -154,10 +154,108 @@ void dump_vtable(std::uintptr_t rcx) {
     }
 }
 
+// Where an address lies: in the placed image (image+offset), in a library Windows loaded (name+offset), or neither.
+void print_place(std::uintptr_t address) {
+    if (g_loaded && g_loaded->base) {
+        const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(g_loaded->base);
+        if (address >= base && address < base + g_loaded->size) {
+            std::fprintf(stderr, " image+0x%llx", static_cast<unsigned long long>(address - base));
+            return;
+        }
+    }
+    HMODULE module = nullptr;
+    char name[MAX_PATH] = {};
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<const char*>(address), &module) &&
+        GetModuleFileNameA(module, name, sizeof(name))) {
+        const char* file = std::strrchr(name, '\\');
+        std::fprintf(stderr, " %s+0x%llx", file ? file + 1 : name,
+                     static_cast<unsigned long long>(address - reinterpret_cast<std::uintptr_t>(module)));
+        return;
+    }
+    std::fprintf(stderr, " 0x%llx", static_cast<unsigned long long>(address));
+}
+
+// A C++ exception (code 0xE06D7363, raised by the Microsoft C++ runtime's throw): records what was thrown - the
+// type names the runtime lists for it, the text of a std::exception - and the calls that led to the throw. Only
+// recording; the exception goes on to whoever handles it. The layout read here is the x64 one the runtime passes:
+// parameter 1 the thrown object, 2 its throw description, 3 the base the description's offsets count from.
+void record_cpp_exception(const EXCEPTION_RECORD* record) {
+    static volatile LONG seen = 0;
+    if (InterlockedIncrement(&seen) > 32) {
+        return;
+    }
+    std::fprintf(stderr, "[boot] C++ exception thrown, thread %lu:", GetCurrentThreadId());
+    __try {
+        if (record->NumberParameters >= 4) {
+            const auto object = static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
+            const auto throw_info = static_cast<std::uintptr_t>(record->ExceptionInformation[2]);
+            const auto base = static_cast<std::uintptr_t>(record->ExceptionInformation[3]);
+            bool is_std_exception = false;
+            if (throw_info && base) {
+                const auto types = base + *reinterpret_cast<const std::int32_t*>(throw_info + 12);
+                const std::int32_t count = *reinterpret_cast<const std::int32_t*>(types);
+                for (std::int32_t i = 0; i < count && i < 8; ++i) {
+                    const auto type = base + *reinterpret_cast<const std::int32_t*>(types + 4 + 4 * i);
+                    const char* name = reinterpret_cast<const char*>(base + *reinterpret_cast<const std::int32_t*>(type + 4) + 16);
+                    std::fprintf(stderr, " type %s", name);
+                    if (std::strcmp(name, ".?AVexception@std@@") == 0) {
+                        is_std_exception = true;
+                    }
+                    if (object && (std::strcmp(name, ".J") == 0 || std::strcmp(name, ".H") == 0 ||
+                                   std::strcmp(name, ".K") == 0 || std::strcmp(name, ".I") == 0)) {
+                        std::fprintf(stderr, " value 0x%08lx", *reinterpret_cast<const unsigned long*>(object));
+                    }
+                }
+            }
+            if (is_std_exception && object) {
+                const char* what = *reinterpret_cast<const char* const*>(object + 8);
+                if (what) {
+                    std::fprintf(stderr, "; text \"%.200s\"", what);
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        std::fprintf(stderr, " (the throw description could not be read)");
+    }
+    void* frames[24] = {};
+    const USHORT n = RtlCaptureStackBackTrace(0, 24, frames, nullptr);
+    std::fprintf(stderr, "; calls:");
+    for (USHORT i = 0; i < n; ++i) {
+        print_place(reinterpret_cast<std::uintptr_t>(frames[i]));
+    }
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+}
+
 } // namespace
 
 LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
     const ULONG code = info->ExceptionRecord->ExceptionCode;
+    if (code == 0xE06D7363) {
+        std::lock_guard<std::mutex> lock(g_log);
+        record_cpp_exception(info->ExceptionRecord);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    // OutputDebugString raises these when no debugger listens (0x40010006 narrow text, 0x4001000A wide text):
+    // what the program or a library writes for a debugger is recorded here. Windows handles them as before.
+    if ((code == 0x40010006 || code == 0x4001000A) && info->ExceptionRecord->NumberParameters >= 2) {
+        static volatile LONG texts = 0;
+        if (InterlockedIncrement(&texts) <= 200) {
+            std::lock_guard<std::mutex> lock(g_log);
+            const auto length = static_cast<int>(info->ExceptionRecord->ExceptionInformation[0]);
+            const auto text = info->ExceptionRecord->ExceptionInformation[1];
+            if (code == 0x4001000A) {
+                std::fprintf(stderr, "[boot] debug text (wide): %.*ls\n", length > 300 ? 300 : length,
+                             reinterpret_cast<const wchar_t*>(text));
+            } else {
+                std::fprintf(stderr, "[boot] debug text: %.*s\n", length > 300 ? 300 : length,
+                             reinterpret_cast<const char*>(text));
+            }
+            std::fflush(stderr);
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     // Only the exceptions that end or mark a run: breakpoint, single step, access violation, in-page error,
     // stack overflow, heap corruption, fail fast. (0xC0000135/0xC0000139 from the loader are handled by it.)
     const bool interesting = code == 0x80000003 || code == 0x80000004 || code == 0xC0000005 || code == 0xC0000006 ||
