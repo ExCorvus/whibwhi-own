@@ -1453,6 +1453,123 @@ void __stdcall w_list_topology(Wrap* self, unsigned int number) {
     }
 }
 
+// What the PC device can do for two of the list's state calls, asked once (D3D12_FEATURE_D3D12_OPTIONS2 and
+// OPTIONS6 are public).
+struct ListFeatures {
+    bool depth_bounds = false;
+    D3D12_VARIABLE_SHADING_RATE_TIER shading_rate_tier = D3D12_VARIABLE_SHADING_RATE_TIER_NOT_SUPPORTED;
+};
+
+const ListFeatures& list_features(Wrap* list) {
+    static ListFeatures features;
+    static std::once_flag once;
+    std::call_once(once, [list] {
+        ID3D12Device* device = nullptr;
+        static_cast<ID3D12GraphicsCommandList*>(list->pc)->GetDevice(__uuidof(ID3D12Device),
+                                                                     reinterpret_cast<void**>(&device));
+        if (!device) {
+            return;
+        }
+        D3D12_FEATURE_DATA_D3D12_OPTIONS2 options2 = {};
+        if (device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS2, &options2, sizeof(options2)) == 0) {
+            features.depth_bounds = options2.DepthBoundsTestSupported != 0;
+        }
+        D3D12_FEATURE_DATA_D3D12_OPTIONS6 options6 = {};
+        if (device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options6, sizeof(options6)) == 0) {
+            features.shading_rate_tier = options6.VariableShadingRateTier;
+        }
+        device->Release();
+        logf("command list: the PC device %s depth bounds; variable shading rate tier %d\n",
+             features.depth_bounds ? "has" : "does NOT have", static_cast<int>(features.shading_rate_tier));
+    });
+    return features;
+}
+
+// List slot 70: (float, float). Measured in the image (fn 0x32520, site 0x33390): the two floats are kept at
+// context +0x123f0/+0x123f4, and when the depth-stencil state at [table + 8 * index + 0x10] has its word +0x44 at
+// zero the pair is the constant (0.0, 1.0) at 0x6159bc0 - the public default of the depth bounds. Taken as
+// OMSetDepthBounds(min, max) (inferred from the arguments and the default; the slot number is the console's).
+void __stdcall w_list_depth_bounds(Wrap* self, float min_depth, float max_depth) {
+    static std::atomic<int> shown{0}, refused{0};
+    if (!list_features(self).depth_bounds) {
+        if (few(refused)) {
+            logf("command list slot 70: depth bounds (%g, %g) asked - the PC device does not have depth bounds, not "
+                 "passed on\n",
+                 static_cast<double>(min_depth), static_cast<double>(max_depth));
+        }
+        return;
+    }
+    ID3D12GraphicsCommandList1* list = nullptr;
+    static_cast<IUnknown*>(self->pc)->QueryInterface(__uuidof(ID3D12GraphicsCommandList1),
+                                                     reinterpret_cast<void**>(&list));
+    if (!list) {
+        if (few(refused)) {
+            logf("command list slot 70: the PC list has no depth-bounds method - not passed on\n");
+        }
+        return;
+    }
+    list->OMSetDepthBounds(min_depth, max_depth);
+    list->Release();
+    if (few(shown)) {
+        logf("command list slot 70: depth bounds (%g, %g) set on the PC list\n", static_cast<double>(min_depth),
+             static_cast<double>(max_depth));
+    }
+}
+
+// List slot 126: (byte, pointer to two dwords). Measured in the image (fn 0x32520, site 0x32638): one dword of
+// the context (+0x12380) is split into its low byte (the first argument) and bytes 1 and 2 (the two dwords), and
+// the call is skipped when those three bytes did not change. Taken as RSSetShadingRate(rate, combiners[2])
+// (inferred from the shape: one rate and an array of two combiners). Passed on only when the numbers are ones the
+// public lists have and the PC device has variable shading rate; the rate 1x1 with both combiners "passthrough"
+// (all zero) is the PC list's own state when nothing was set, so it needs no call.
+bool public_shading_rate(unsigned rate) {
+    return rate == 0x0 || rate == 0x1 || rate == 0x4 || rate == 0x5 || rate == 0x6 || rate == 0x9 || rate == 0xa;
+}
+
+void __stdcall w_list_shading_rate(Wrap* self, unsigned int rate, const unsigned int* combiners) {
+    static SRWLOCK lock = SRWLOCK_INIT;
+    static std::set<unsigned long long> seen;
+    unsigned int pair[2] = {0, 0};
+    if (combiners && can_read(combiners, sizeof(pair))) {
+        std::memcpy(pair, combiners, sizeof(pair));
+    }
+    const unsigned int base = rate & 0xff;
+    const bool known = combiners && public_shading_rate(base) && pair[0] <= 4 && pair[1] <= 4;
+    const bool is_default = base == 0 && pair[0] == 0 && pair[1] == 0;
+    const ListFeatures& features = list_features(self);
+    const char* outcome = "set on the PC list";
+    if (!known) {
+        outcome = "NOT passed on: a number the public lists do not have";
+    } else if (features.shading_rate_tier == D3D12_VARIABLE_SHADING_RATE_TIER_NOT_SUPPORTED) {
+        outcome = is_default ? "the PC list's own state (the device has no variable shading rate)"
+                             : "NOT passed on: the PC device has no variable shading rate";
+    } else if (features.shading_rate_tier == D3D12_VARIABLE_SHADING_RATE_TIER_1 && (pair[0] || pair[1])) {
+        outcome = "NOT passed on: combiners need shading rate tier 2";
+    } else {
+        ID3D12GraphicsCommandList5* list = nullptr;
+        static_cast<IUnknown*>(self->pc)->QueryInterface(__uuidof(ID3D12GraphicsCommandList5),
+                                                         reinterpret_cast<void**>(&list));
+        if (list) {
+            const D3D12_SHADING_RATE_COMBINER pc_combiners[2] = {
+                static_cast<D3D12_SHADING_RATE_COMBINER>(pair[0]), static_cast<D3D12_SHADING_RATE_COMBINER>(pair[1])};
+            list->RSSetShadingRate(static_cast<D3D12_SHADING_RATE>(base),
+                                   features.shading_rate_tier >= D3D12_VARIABLE_SHADING_RATE_TIER_2 ? pc_combiners
+                                                                                                    : nullptr);
+            list->Release();
+        } else {
+            outcome = "NOT passed on: the PC list has no shading-rate method";
+        }
+    }
+    const unsigned long long key = (static_cast<unsigned long long>(base) << 40) |
+                                   (static_cast<unsigned long long>(pair[0] & 0xfffff) << 20) | (pair[1] & 0xfffff);
+    AcquireSRWLockExclusive(&lock);
+    const bool first = seen.size() < 64 && seen.insert(key).second;
+    ReleaseSRWLockExclusive(&lock);
+    if (first) {
+        logf("command list slot 126: shading rate 0x%x, combiners (%u, %u) - %s\n", rate, pair[0], pair[1], outcome);
+    }
+}
+
 // Draws and dispatches asked while the list has no pipeline state: counted, said at the first and at every power
 // of two, never passed on.
 std::atomic<unsigned long long> g_draws_without_pipeline{0};
@@ -1944,6 +2061,8 @@ Wrap* wrap_kind(void* pc, int kind) {
                  {51, reinterpret_cast<void*>(&w_list_clear_depth)},
                  {52, reinterpret_cast<void*>(&w_list_clear_target)},
                  {61, reinterpret_cast<void*>(&w_list_execute_indirect)},
+                 {70, reinterpret_cast<void*>(&w_list_depth_bounds)},
+                 {126, reinterpret_cast<void*>(&w_list_shading_rate)},
                  {139, reinterpret_cast<void*>(&w_list_begin)}});
             list->recording.store(true);  // a PC list is recording when it is created
             return list;
