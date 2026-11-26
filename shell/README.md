@@ -43,7 +43,9 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
   walk can read (1,302 of 1,302 precompiled programs and 581 of 581 container programs in one run).
 - `shader_program.hpp` / `shader_program.cpp` — finds the console's compiled program inside a shader
   container and unpacks it in memory: the directory in the container's 'DXIL' part, the zlib-packed block,
-  and the module inside it whose header names where the code is. Refuses anything laid out differently.
+  and the module inside it whose header names where the code is. Also reads the module's two tables, which
+  say through which register and at which offset each resource reaches the program. Refuses anything laid
+  out differently.
 - `shader_shape.hpp` / `shader_shape.cpp` — what a decoded program expects and uses: registers read
   before they are written, what it exports, and where each image, sampler and buffer descriptor comes from.
 - `shader_translate.hpp` / `shader_translate.cpp` — translates a console shader to SPIR-V, kept in memory. Today
