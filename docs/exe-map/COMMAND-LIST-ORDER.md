@@ -80,7 +80,9 @@ public methods four places up**:
 So console slots **27 to 31** are five methods where the public list has one (`ExecuteBundle` at 27): four of
 them are console-only, and which of the five is `ExecuteBundle`, if any, is not known. The public methods 28 to
 48 are at 32 to 52, and two public methods are absent between console 53 and 60. Slots 41
-to 48 are not answered yet: they carry addresses in the image's memory. Slot 20 is called with the number 0x11,
+to 48 carry addresses in the image's memory and are answered since boot b88 (44, 47 and 48 seen and carried
+out; the root signature current at the slot 44 call has a shader-resource address at that parameter, read from
+its serialized form - a confirmation that does not rest on argument shape). Slot 20 is called with the number 0x11,
 which is not a public topology. Slot 139 (start recording on an allocator) is answered with the PC list's
 `Reset`. The console-only slots called in runs and not provided: 70, 71, 72, 74, 75, 126, 131, 132, 142, 146.
 
