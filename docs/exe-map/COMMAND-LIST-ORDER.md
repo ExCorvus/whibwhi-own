@@ -208,7 +208,7 @@ surrounding code makes the record mean (**I**), and it is the thing to confirm f
 | `+0x250` | 74 | 0x2484b0c (fn 0x2484ad0) and 1 more | `(rdx = arg1 of the wrapper, r8d = 7 (constant), r9 = arg3, stack = 1)` | record with a constant 7 | **U** |
 | `+0x258` | 75 | 0x3281a (fn 0x32520) | `(edx = 0 or 1, from bit 6 of `[pipeline+0x55]`)` | one flag | **U** |
 | `+0x3f0` | 126 | 0x32638 (fn 0x32520) | `(edx = byte 0 of the dword at ctx+0x12380, r8 = &two dwords at rsp+0x110 = bytes 1 and 2 of it)`; skipped when those three bytes did not change (the shifts 8/16 and mask 0xff are the constants at 0x615a8b0 and 0x6159f10) | RSSetShadingRate(rate, combiners[2]); hosted by the shell since boot b149 (only (0, 0, 0) seen so far) | **I** (shape only) |
-| `+0x470` | 142 | 0x329e3 (fn 0x32520) | `(none)`; `ctx+0x123e0` was just set from `ctx+0x12360` | emit of a resource-reference record | **U** |
+| `+0x470` | 142 | 0x329e3 (fn 0x32520) | `(rdx = the 64-bit value at ctx+0x12360)`; set by fn 0x4e57ff0 from fn 0x4e58060, which picks a mask from the table at 0x6500dc0 (16-bit groups switched on one after another) and may invert it; all ones = none set | a mask of which parts of the console GPU may run the following work; noted and not carried out by the shell since boot b151 (rule-4 exception granted by ExCorvus) | **I** |
 
 The four `+0x458`, `+0x490`, `+0x418`, `+0x420` offsets in COMMAND-LIST.md §3 keep their measured shapes; they are
 consistent with the model above:
