@@ -1,14 +1,14 @@
 # The shader translator — plan and first code
 
 This is the plan for turning the game's **own** shaders into something a PC graphics driver runs, and a record
-of the first code that is in `shell/` today. It is written in plain words on purpose: the design decisions
+of the first code that is in `weave/` today. It is written in plain words on purpose: the design decisions
 matter more than the vocabulary.
 
 ## 1. The problem in one paragraph
 
 On the console the game does not ship a shader language file that the driver compiles; it ships the GPU's own
 machine code for its shaders (RDNA2-class instructions). The console's GPU runs those instructions as they are.
-A PC GPU does not: it wants SPIR-V (for Vulkan) from us. So one piece of the shell has to read the game's own
+A PC GPU does not: it wants SPIR-V (for Vulkan) from us. So one piece of the weave has to read the game's own
 shader code and re-express it as SPIR-V, exactly — not "something similar that looks right". The rule from
 ExCorvus stands: **translate faithfully; when our translator is wrong, fix the translator, never rewrite the
 shader.** A shader we cannot translate yet is refused with a precise reason, not approximated.
@@ -56,14 +56,14 @@ which stage, the workgroup size) stay in the device wrapper.
 The game's shaders address memory with the game's own flat addresses. There is no conversion table (MAP.md
 §1.4): a graphics address is a raw title address, and the console hardware reads it directly. Our hosting
 model already solves this with one flat backing and a uniform shift
-(`device_address = heap_base + (game_va - flat_base)`, `shell/hosting.hpp`).
+(`device_address = heap_base + (game_va - flat_base)`, `weave/hosting.hpp`).
 
 The translator therefore never invents addresses:
 
 - an instruction that reads memory computes the address from its own registers, exactly as the console does;
 - in SPIR-V the address becomes an index into the one flat storage buffer:
   `index = (address - flat_base) / 4`;
-- `flat_base` is a push constant the shell sets per dispatch/draw; it is the same value the hosting model uses
+- `flat_base` is a push constant the weave sets per dispatch/draw; it is the same value the hosting model uses
   for every other GPU reference.
 
 Consequence: a shader that reads a pointer out of a buffer (the game does this constantly — indirect draws,
@@ -117,7 +117,7 @@ Today the translator refuses all branches. That is visible in the tests, so it c
 
 ## 8. What is in the code today
 
-`shell/`:
+`weave/`:
 
 - `spirv.hpp` / `spirv.cpp` — our SPIR-V writer. Module header and instruction framing from the public
   specification, with the opcodes, capabilities, storage classes and decorations the translator uses.
