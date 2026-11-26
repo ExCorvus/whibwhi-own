@@ -187,7 +187,7 @@ pool index (jump table 0x674c270). The pool {base,size} is recorded in the first
 - fn 0x1e86440 — 6 reservations + 5 page maps (a second paged structure).
 - fn 0x22163d0 / 0x2216940 / 0x2473090 / 0x2474660 — the other physical-page users.
 - fn 0x4e9b660 and its 31 callers — every reason the game stops itself.
-- device slot 74 (+0x250) and slot 50 (+0x190): what our layer answers there.
+- device slot 74 (+0x250) and slot 50 (+0x190): what the shell answers there.
 
 ## 4. The watchdog as the frame loop's liveness relay (read from the image)
 
@@ -202,8 +202,7 @@ gap, and OUR layer's long blocks are what it sees. Everything below is from `fun
 - fn 0x2215a20 starts it: `fn 0x2215a60`, argument 0, stack 0xA000, priority 0xF (time-critical) -> fn 0x1ad0ef0.
 - fn 0x1ad0fd0 is the engine's thread factory: a `{function, argument, handle}` context (fn 0x2215e10), then
   `CreateThread` with entry **fn 0x2215ea0** (the trampoline: TEB+0x410 = stack base, `call [context]`, then
-  fn 0x22160b0 / fn 0x2216160), `SetThreadPriority`, `SetThreadGroupAffinity`, `ResumeThread`. Boot upmain3's stack
-  (return address 0x2215eca inside 0x2215ea0) is this call. **V**
+  fn 0x22160b0 / fn 0x2216160), `SetThreadPriority`, `SetThreadGroupAffinity`, `ResumeThread`.
 - So the watchdog is a parallel execution inside the same process, exactly as ExCorvus described it, not a timer callback.
 - fn 0x22161b0 stops it (caller 0x21b5cc0): clears 0x71b6330, sets 0x71b6340 = 1, zeroes 0x71b6334, and joins the
   handle kept at 0x6843320 (fn 0x5b32780; the handle is set to -1 afterwards). **V**
@@ -275,7 +274,7 @@ gap, and OUR layer's long blocks are what it sees. Everything below is from `fun
   vtable call sites. The watchdog is not on that path.
 - **I (the relay reading our runtime uses):** the relay is **liveness, not cadence**. The watchdog does not drive the
   pacer; it watches the loop that both paces (its Sleep, and our WaitFrameEventX model) and reports progress. One
-  block in our layer therefore stalls frames *and* drains the watchdog's 30 s budget at the same time — that is the
+  block in shell code therefore stalls frames *and* drains the watchdog's 30 s budget at the same time — that is the
   one-system coupling.
 - **U:** which of the vtable call sites of slots 78-81 belong to the real frame loop (the capability probes obscure
   it). Not needed for the relay; a dedicated chapter would need the call-graph up from each site.
