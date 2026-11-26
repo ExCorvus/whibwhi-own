@@ -9,7 +9,7 @@ The image imports **9 functions from `AcpHal.dll`** and **5 from `xapu.dll`** (1
 They are the console's audio stack: `AcpHal` is the hardware/driver side (APU heap, the shape contexts the DSP
 reads, CPU ↔ APU address translation), `xapu` is the command/result channel to the DSP.
 
-Our answer today is a skeleton pair (`shell/acp_hal.*`, `shell/xapu.*`, built as `AcpHal.dll` / `xapu.dll`):
+Our answer today is a skeleton pair (`weave/acp_hal.*`, `weave/xapu.*`, built as `AcpHal.dll` / `xapu.dll`):
 every name exists, every one answers "not provided", and says so once on stderr. Nothing is faked, because the
 image acts on success — see §6 for what a fake success would cost.
 
@@ -17,7 +17,7 @@ image acts on success — see §6 for what a fake success would cost.
 
 **V** The audio start-up is fn `0x43ad8b0` (436 bytes). It has no direct caller: its address sits in a table of
 module init/shutdown pointers in `.rdata` at `0x65f4938`, with its shutdown partner fn `0x43ada70` right behind
-it at `0x65f4940`. So the shell's host code decides when audio comes up, not a call chain we can follow.
+it at `0x65f4940`. So the weave's host code decides when audio comes up, not a call chain we can follow.
 
 **V** Fn `0x43ad8b0` does, in this order:
 
@@ -254,7 +254,7 @@ or not.
 The console's APU is hardware: a heap the DSP owns, a shape-context array the DSP reads, a 32-bit APU address
 window, and a command/result queue the DSP drains. None of it exists here, and nothing in the image can be made
 to stand still for it. So the honest PC answer is "refuse, and say what was asked", which is what
-`shell/acp_hal.cpp` and `shell/xapu.cpp` do:
+`weave/acp_hal.cpp` and `weave/xapu.cpp` do:
 
 | function | answer | why that value |
 | --- | --- | --- |
@@ -274,7 +274,7 @@ to stand still for it. So the honest PC answer is "refuse, and say what was aske
 | `XApuDequeueResult` | `E_NOTIMPL`, result left alone | the drain loop skips a negative dequeue |
 
 Each export prints `[acp_hal] …` / `[xapu] …` with its arguments on the **first** call (`WHIWHI_ACP_TRACE=1` /
-`WHIWHI_XAPU_TRACE=1` logs every call). `shell/tests/test_acpxapu.cpp` loads both built DLLs, checks all 14
+`WHIWHI_XAPU_TRACE=1` logs every call). `weave/tests/test_acpxapu.cpp` loads both built DLLs, checks all 14
 names, checks every answer is a failure, and checks that no output slot was written.
 
 **V** Consequences for a boot, stated plainly: the game's audio start-up now fails at its own `int3`
@@ -303,8 +303,8 @@ note and then the image's break.
 
 ## 8. What we built
 
-- `shell/acp_hal.h` / `shell/acp_hal.cpp` → `AcpHal.dll` (9 exports).
-- `shell/xapu.h` / `shell/xapu.cpp` → `xapu.dll` (5 exports).
-- `shell/tests/test_acpxapu.cpp` → CTest `acpxapu`.
-- `shell/CMakeLists.txt`: the two libraries, the test, and dependencies so `connect_imports` and `boot_image`
-  build them beside themselves (the shell resolves an import by loading the library file of that name).
+- `weave/acp_hal.h` / `weave/acp_hal.cpp` → `AcpHal.dll` (9 exports).
+- `weave/xapu.h` / `weave/xapu.cpp` → `xapu.dll` (5 exports).
+- `weave/tests/test_acpxapu.cpp` → CTest `acpxapu`.
+- `weave/CMakeLists.txt`: the two libraries, the test, and dependencies so `connect_imports` and `boot_image`
+  build them beside themselves (the weave resolves an import by loading the library file of that name).
