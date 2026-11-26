@@ -62,9 +62,10 @@ target_link_libraries(xgameruntime PRIVATE onecore)
 # Shell core: image mapper, import table reader, image loader, host-library resolver, console imports, flat
 # hosting model.
 add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp inflate.cpp
-                               loader.cpp offline.cpp shader_container.cpp shader_dxbc.cpp shader_emit_flow.cpp
-                               shader_flow.cpp shader_isa.cpp shader_meaning.cpp shader_names.cpp
-                               shader_program.cpp shader_shape.cpp shader_translate.cpp shader_walk.cpp spirv.cpp)
+                               loader.cpp offline.cpp shader_access.cpp shader_container.cpp shader_dxbc.cpp
+                               shader_emit_flow.cpp shader_flow.cpp shader_isa.cpp shader_meaning.cpp
+                               shader_names.cpp shader_program.cpp shader_shape.cpp shader_translate.cpp
+                               shader_walk.cpp spirv.cpp)
 target_include_directories(whiwhi_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(whiwhi_shell PUBLIC whiwhi_seat)
 
@@ -171,6 +172,11 @@ add_test(NAME shader_flow COMMAND test_shader_flow)
 add_executable(test_shader_emit_flow tests/test_shader_emit_flow.cpp)
 target_link_libraries(test_shader_emit_flow PRIVATE whiwhi_shell)
 add_test(NAME shader_emit_flow COMMAND test_shader_emit_flow)
+
+# What the memory, image, interpolation, export and whole-wave instructions touch, on hand-built words.
+add_executable(test_shader_access tests/test_shader_access.cpp)
+target_link_libraries(test_shader_access PRIVATE whiwhi_shell)
+add_test(NAME shader_access COMMAND test_shader_access)
 
 # What the covered arithmetic, move, compare and bit instructions compute, on one hand-built lane.
 add_executable(test_shader_meaning tests/test_shader_meaning.cpp)
