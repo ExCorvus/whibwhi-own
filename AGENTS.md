@@ -77,4 +77,4 @@ What works today, and where a run currently stops, is in the **Current state** b
 shell\build.cmd
 ```
 
-Builds the shell, the console libraries and the tools, and runs the 27 tests. No game files and no GPU are needed.
+Builds the shell, the console libraries and the tools, and runs the 17 tests. No game files and no GPU are needed.
