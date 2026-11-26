@@ -471,6 +471,7 @@ bool load_image(const Image& image, const ImportResolver& resolve, LoadedImage& 
         out.function_table = table;
         out.unwind_entries = entries;
     }
+    connect_allocation_hooks();
     return true;
 }
 
@@ -485,6 +486,10 @@ void start_thread_callbacks(const LoadedImage& loaded) {
 }
 
 void unload_image(LoadedImage& loaded) {
+    if (loaded.base) {
+        disconnect_allocation_hooks();
+        set_hosted_image_base(nullptr);
+    }
     if (loaded.thread_storage) {
         whiwhi_thread_block_release();
     }
