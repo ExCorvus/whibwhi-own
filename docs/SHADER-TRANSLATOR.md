@@ -181,6 +181,6 @@ OpFunctionEnd
 
 - Does the blob hold extra metadata the shader itself never sees (resource binding tables, register counts)?
   The answer decides whether the translator needs a second input besides the code.
-- Are there shaders with multiple entry points (libraries)? The world compute passes look like separate
-  programs today, but the old layer's logs called them "library/…"; that name needs reading.
+- Are there shaders with multiple entry points (libraries)? Not measured yet; it needs reading the game's
+  pipeline creation calls.
 - Which tiling modes actually appear in the game's textures — this bounds the texture work we have to do first.
