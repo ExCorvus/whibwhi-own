@@ -28,8 +28,14 @@ game, flat out.** Not an emulator. See [docs/EARLY-HISTORY.md](docs/EARLY-HISTOR
 - **The watchdog stays armed** (a liveness relay of the frame-pacing loop). Never disable or outrun it.
 - **BANNED** (crash the AMD driver / whole system): sparse `VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT`;
   off-thread async pipeline builds.
-- **No subagents** — the coordinator does the work (narrow exception: a maintenance-only repo-description keeper).
-  **ExCorvus gates every push and boot.** One GPU run at a time.
+- **Subagents are allowed with ExCorvus's go-ahead** (2026-11-26 amendment; the earlier "no subagents" line was
+  temporary): pass the model explicitly and never send a follow-up message to a running subagent (it cancels
+  it). Only the coordinator seat may boot — no subagent starts the game's entry point or its callbacks, runs
+  the GPU, or pushes; those still need ExCorvus's word. **ExCorvus gates every push and boot.** One GPU run at a time.
+- **Game-specific facts may live in the shell code** (2026-11-26 amendment): the game's base address, import
+  and library names, the TLS index and similar measured facts belong in `shell/` where hosting needs them.
+  What stays banned is game **data**: the executable, archives, shaders in any form, textures, audio,
+  disassembly — the `scripts/check_no_game_data.py` gate runs before every commit.
 - **Source of truth:** `C:\Users\user\AppData\Local\Temp\opencode\leonida-submission\shared\FACTS.md` + the
   `fix-ledger.md` tail. Nothing is pushed until ExCorvus says.
 
