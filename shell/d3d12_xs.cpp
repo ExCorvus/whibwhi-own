@@ -155,6 +155,8 @@ struct Wrap {
     // an offset inside the buffer.
     bool over_image_memory = false;
     unsigned long long placed_delta = 0;
+    // A texture placed at an address of the image's memory: the initial layout number it was asked with.
+    unsigned initial_layout = 0xffffffffu;
     // For a surface that can be displayed: the block asked of XMemAlloc on its behalf (see device slot 127), given
     // back with XMemFree and the same attributes when the surface goes.
     unsigned long long requested_block = 0;
@@ -410,6 +412,10 @@ HRESULT __stdcall w_presentx(Wrap*, unsigned int, const unsigned char*, const vo
 HRESULT __stdcall w_queue_slot31(Wrap*, void*, void*, void*, void*, void*, void*, void*, void*);
 unsigned long long __stdcall w_resource_gpu_address(Wrap* self);
 HRESULT __stdcall w_resource_map(Wrap* self, unsigned int subresource, const D3D12_RANGE* range, void** data);
+HRESULT map_placed_texture(Wrap* self, unsigned int subresource, const D3D12_RANGE* range, void** data,
+                           std::string& why);
+void forget_mapped(Wrap* resource);
+void carry_mapped_textures(ID3D12CommandQueue* queue);
 void __stdcall w_resource_unmap(Wrap* self, unsigned int subresource, const D3D12_RANGE* range);
 void* __stdcall w_resource_desc(void* first, void* second);
 HRESULT __stdcall w_queue_timestamp_frequency(Wrap* self, unsigned long long* frequency);
@@ -2005,6 +2011,7 @@ HRESULT __stdcall w_queue_submit(Wrap* self, unsigned int count, void* const* li
             ++closed_here;
         }
     }
+    carry_mapped_textures(static_cast<ID3D12CommandQueue*>(self->pc));
     static_cast<ID3D12CommandQueue*>(self->pc)->ExecuteCommandLists(count, pc.data());
     if (few(shown, 3) || (closed_here && few(closed_shown, 6)) || (last == 3 && few(shown3, 3))) {
         logf("queue slot 35: %u command list(s) submitted to the PC queue (%u of them closed here first); frame "
@@ -6423,6 +6430,7 @@ HRESULT placed_texture(Wrap* self, unsigned long long address, const D3D12_RESOU
     }
     Wrap* wrapped = wrap_kind(resource, kResource);
     wrapped->title_address = address;
+    wrapped->initial_layout = layout;
     note_placed_texture(wrapped);
     *out = wrapped;
     if (show) {
@@ -6818,22 +6826,51 @@ HRESULT __stdcall w_resource_map(Wrap* self, unsigned int subresource, const D3D
         return 0;
     }
     if (self->title_address) {
+        std::string why;
+        const HRESULT mapped = map_placed_texture(self, subresource, range, data, why);
+        if (mapped == 0) {
+            return 0;
+        }
         static std::atomic<int> shown{0};
         if (shown.fetch_add(1) < 8) {
-            logf("resource: Map asked for the texture the image placed at 0x%llx (subresource %u, returns to %p) - "
-                 "its pixels are not in memory the image can read; refused\n",
-                 self->title_address, subresource, _ReturnAddress());
+            logf("resource: Map of the texture the image placed at 0x%llx refused: %s\n", self->title_address,
+                 why.c_str());
+            const D3D12_RESOURCE_DESC d = static_cast<ID3D12Resource*>(self->pc)->GetDesc();
+            void* frames[10] = {};
+            const unsigned got = RtlCaptureStackBackTrace(0, 10, frames, nullptr);
+            char stack[256] = {};
+            std::size_t used = 0;
+            for (unsigned i = 1; i < got && used + 20 < sizeof(stack); ++i) {
+                used += std::snprintf(stack + used, sizeof(stack) - used, " %p", frames[i]);
+            }
+            logf("resource: Map asked for the texture the image placed at 0x%llx (subresource %u, range %s0x%llx..0x%llx, "
+                 "texture dimension %d, %llu x %u x %u, %u mips, format %d, flags 0x%x, initial layout 0x%x; returns to "
+                 "%p; stack%s)\n",
+                 self->title_address, subresource, range ? "" : "(none) ",
+                 range ? static_cast<unsigned long long>(range->Begin) : 0ull,
+                 range ? static_cast<unsigned long long>(range->End) : 0ull, static_cast<int>(d.Dimension),
+                 static_cast<unsigned long long>(d.Width), d.Height, static_cast<unsigned>(d.DepthOrArraySize),
+                 static_cast<unsigned>(d.MipLevels), static_cast<int>(d.Format), static_cast<unsigned>(d.Flags),
+                 self->initial_layout, _ReturnAddress(), stack);
         }
         if (data) {
             *data = nullptr;
         }
-        return 0x80004001L;
+        return mapped;
     }
     return static_cast<ID3D12Resource*>(self->pc)->Map(subresource, range, data);
 }
 
 void __stdcall w_resource_unmap(Wrap* self, unsigned int subresource, const D3D12_RANGE* range) {
     if (self->title_address) {
+        static std::atomic<int> shown{0};
+        if (!self->over_image_memory && shown.fetch_add(1) < 8) {
+            logf("resource: Unmap of the texture the image placed at 0x%llx (subresource %u, written range "
+                 "%s0x%llx..0x%llx, returns to %p)\n",
+                 self->title_address, subresource, range ? "" : "(none = all) ",
+                 range ? static_cast<unsigned long long>(range->Begin) : 0ull,
+                 range ? static_cast<unsigned long long>(range->End) : 0ull, _ReturnAddress());
+        }
         return;
     }
     static_cast<ID3D12Resource*>(self->pc)->Unmap(subresource, range);
@@ -7146,6 +7183,7 @@ void forget_resource_addresses(Wrap* resource) {
         ReleaseSRWLockExclusive(&g_pc_ranges_lock);
     }
     if (resource->title_address && !resource->over_image_memory) {
+        forget_mapped(resource);
         AcquireSRWLockExclusive(&g_placed_lock);
         const auto found = g_placed_textures.find(resource->title_address);
         if (found != g_placed_textures.end() && found->second == resource) {
@@ -8089,6 +8127,43 @@ bool texture_upload_ready(ID3D12Device* device) {
     return u.ready;
 }
 
+// Copies a texture's bytes from the image's memory, laid out as the texture library's layout block says, into an
+// upload buffer at the PC device's footprints. Returns an empty string, or why the two layouts do not agree.
+std::string rows_into_upload(const unsigned char* block, unsigned mips, unsigned slices, const unsigned char* memory,
+                             unsigned char* mapped, const std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>& places,
+                             const std::vector<UINT>& rows, const std::vector<UINT64>& row_bytes) {
+    unsigned long long slice_stride = 0;
+    std::memcpy(&slice_stride, block + 0x10, 8);
+    for (unsigned s = 0; s < slices; ++s) {
+        for (unsigned m = 0; m < mips; ++m) {
+            const unsigned i = m + s * mips;
+            const unsigned char* record = block + 0x38 + m * 0x70;
+            unsigned long long mip_bytes = 0, mip_offset = 0, plane_bytes = 0;
+            unsigned row = 0;
+            std::memcpy(&mip_bytes, record + 0x00, 8);
+            std::memcpy(&mip_offset, record + 0x08, 8);
+            std::memcpy(&plane_bytes, record + 0x10, 8);
+            std::memcpy(&row, record + 0x1c, 4);
+            const D3D12_SUBRESOURCE_FOOTPRINT& f = places[i].Footprint;
+            if (row == 0 || plane_bytes == 0 || row_bytes[i] != row || plane_bytes != rows[i] * row ||
+                mip_bytes != plane_bytes * f.Depth) {
+                return "mip " + std::to_string(m) + ": the library's rows (" + std::to_string(row) + " bytes, " +
+                       std::to_string(plane_bytes) + " per slice) do not match the PC texture's (" +
+                       std::to_string(row_bytes[i]) + " bytes, " + std::to_string(rows[i]) + " rows)";
+            }
+            const unsigned char* from = memory + s * slice_stride + mip_offset;
+            unsigned char* to = mapped + places[i].Offset;
+            for (unsigned z = 0; z < f.Depth; ++z) {
+                for (unsigned r = 0; r < rows[i]; ++r) {
+                    std::memcpy(to + (static_cast<unsigned long long>(z) * rows[i] + r) * f.RowPitch,
+                                from + z * plane_bytes + static_cast<unsigned long long>(r) * row, row);
+                }
+            }
+        }
+    }
+    return std::string();
+}
+
 // Fills every subresource of `texture` from the image's memory at `address`, laid out as the texture library lays
 // out `d`. Waits until the PC device has done it. Returns an empty string, or why it was not done.
 std::string fill_memory_texture(ID3D12Device* device, ID3D12Resource* texture, const WhiwhiXgDescription& d,
@@ -8140,37 +8215,13 @@ std::string fill_memory_texture(ID3D12Device* device, ID3D12Resource* texture, c
         upload->Release();
         return "the upload buffer could not be mapped";
     }
-    const auto* memory = reinterpret_cast<const unsigned char*>(address);
-    for (unsigned s = 0; s < slices; ++s) {
-        for (unsigned m = 0; m < mips; ++m) {
-            const unsigned i = m + s * mips;
-            const unsigned char* record = block.data() + 0x38 + m * 0x70;
-            unsigned long long mip_bytes = 0, mip_offset = 0, plane_bytes = 0;
-            unsigned row = 0;
-            std::memcpy(&mip_bytes, record + 0x00, 8);
-            std::memcpy(&mip_offset, record + 0x08, 8);
-            std::memcpy(&plane_bytes, record + 0x10, 8);
-            std::memcpy(&row, record + 0x1c, 4);
-            const D3D12_SUBRESOURCE_FOOTPRINT& f = places[i].Footprint;
-            if (row == 0 || plane_bytes == 0 || row_bytes[i] != row || plane_bytes != rows[i] * row ||
-                mip_bytes != plane_bytes * f.Depth) {
-                upload->Unmap(0, nullptr);
-                upload->Release();
-                return "mip " + std::to_string(m) + ": the library's rows (" + std::to_string(row) + " bytes, " +
-                       std::to_string(plane_bytes) + " per slice) do not match the PC texture's (" +
-                       std::to_string(row_bytes[i]) + " bytes, " + std::to_string(rows[i]) + " rows)";
-            }
-            const unsigned char* from = memory + s * slice_stride + mip_offset;
-            unsigned char* to = mapped + places[i].Offset;
-            for (unsigned z = 0; z < f.Depth; ++z) {
-                for (unsigned r = 0; r < rows[i]; ++r) {
-                    std::memcpy(to + (static_cast<unsigned long long>(z) * rows[i] + r) * f.RowPitch,
-                                from + z * plane_bytes + static_cast<unsigned long long>(r) * row, row);
-                }
-            }
-        }
-    }
+    const std::string bad = rows_into_upload(block.data(), mips, slices, reinterpret_cast<const unsigned char*>(address),
+                                             mapped, places, rows, row_bytes);
     upload->Unmap(0, nullptr);
+    if (!bad.empty()) {
+        upload->Release();
+        return bad;
+    }
     TextureUpload& u = g_texture_upload;
     std::lock_guard<std::mutex> guard(u.lock);
     std::string why;
@@ -8337,6 +8388,280 @@ void log_memory_textures(const char* when) {
         logf("textures that are only memory (%s): %llu PC texture(s) made and filled, %llu refilled after the "
              "texture library wrote their memory again\n",
              when, made, refreshed);
+    }
+}
+
+// ---- textures the image placed and writes through Map ---------------------------------------------------------
+//
+// Measured in the image (fn 0x5121690, reached from 17 functions): it asks the texture library for the texture's
+// layout (XGCreateTextureComputer and the object's layout method, fn 0x5121980), maps subresource 0 with an empty
+// read range (it will not read), adds the subresource's offset from that layout to the pointer, and its callers
+// copy the pixels in with memcpy. Unmap comes later from elsewhere (seen returning to image+0x20a8f54, with no
+// range: everything may have been written). On the console the mapped memory is the texture the GPU reads. The
+// textures seen are kept in two or three copies picked by the frame number (fn 0x5121550).
+//
+// So Map answers with the memory the image set aside for the texture at the address where it placed it (its size
+// is the texture library's, from device slot 25). The PC texture is in the PC device's memory, so before the image's
+// work is submitted to a direct queue, each mapped texture whose memory changed since it was last carried over is
+// copied into the PC texture on that same queue, ahead of the image's lists: layout from the one the texture was
+// made in (only the shader-resource layout is taken) to copy destination, the rows, and back. The bytes carried over
+// are kept, so unchanged memory costs a comparison and no copy.
+struct MappedTexture {
+    Wrap* wrap = nullptr;                  // cleared when the image lets the texture go
+    ID3D12Resource* texture = nullptr;     // one reference held here
+    unsigned long long address = 0;
+    std::vector<unsigned char> block;      // the texture library's layout block
+    unsigned long long bytes = 0;          // the image's memory for it
+    std::vector<unsigned char> carried;    // the bytes last carried over (empty: never)
+    D3D12_BARRIER_LAYOUT layout = D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> places;
+    std::vector<UINT> rows;
+    std::vector<UINT64> row_bytes;
+    ID3D12Resource* upload = nullptr;
+    ID3D12CommandAllocator* allocator = nullptr;
+    ID3D12GraphicsCommandList7* list = nullptr;
+    unsigned long long done_value = 0;     // g_mapped_fence value after its last copy
+};
+std::mutex g_mapped_lock;
+std::vector<MappedTexture*> g_mapped;
+ID3D12Fence* g_mapped_fence = nullptr;
+unsigned long long g_mapped_value = 0;
+std::atomic<unsigned long long> g_mapped_copies{0};
+
+void release_mapped(MappedTexture* m) {
+    if (m->list) m->list->Release();
+    if (m->allocator) m->allocator->Release();
+    if (m->upload) m->upload->Release();
+    if (m->texture) m->texture->Release();
+    delete m;
+}
+
+// Device-side objects for one mapped texture. Empty string, or why they could not be made.
+std::string prepare_mapped(ID3D12Device* device, MappedTexture& m) {
+    const D3D12_RESOURCE_DESC pc = m.texture->GetDesc();
+    const unsigned mips = pc.MipLevels;
+    const unsigned slices = pc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1u : pc.DepthOrArraySize;
+    const unsigned count = mips * slices;
+    m.places.resize(count);
+    m.rows.resize(count);
+    m.row_bytes.resize(count);
+    UINT64 total = 0;
+    device->GetCopyableFootprints(&pc, 0, count, 0, m.places.data(), m.rows.data(), m.row_bytes.data(), &total);
+    if (total == 0 || total == ~0ull) {
+        return "the PC device gives no copy layout for the texture";
+    }
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = total;
+    buffer.Height = 1;
+    buffer.DepthOrArraySize = 1;
+    buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ID3D12GraphicsCommandList* list = nullptr;
+    const bool made =
+        device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                        __uuidof(ID3D12Resource), reinterpret_cast<void**>(&m.upload)) == 0 &&
+        device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(ID3D12CommandAllocator),
+                                       reinterpret_cast<void**>(&m.allocator)) == 0 &&
+        device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m.allocator, nullptr,
+                                  __uuidof(ID3D12GraphicsCommandList), reinterpret_cast<void**>(&list)) == 0 &&
+        list->QueryInterface(__uuidof(ID3D12GraphicsCommandList7), reinterpret_cast<void**>(&m.list)) == 0 &&
+        m.list->Close() == 0;
+    if (list) {
+        list->Release();
+    }
+    if (!made) {
+        return "the upload buffer or the copy list could not be made";
+    }
+    return std::string();
+}
+
+// Map of a texture the image placed. 0 with *data set, or a refusal.
+HRESULT map_placed_texture(Wrap* self, unsigned int subresource, const D3D12_RANGE* range, void** data,
+                           std::string& why) {
+    if (subresource != 0) {
+        why = "a subresource other than 0 (the image was seen to map 0 and add the offset itself)";
+        return 0x80004001L;
+    }
+    if (!range || range->End > range->Begin) {
+        why = "a range the image would read: carrying the PC texture's pixels back to memory is not provided";
+        return 0x80004001L;
+    }
+    if (self->initial_layout != static_cast<unsigned>(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE)) {
+        why = "a texture made in layout " + std::to_string(self->initial_layout) +
+              " (only the shader-resource layout is carried over)";
+        return 0x80004001L;
+    }
+    ID3D12Resource* texture = static_cast<ID3D12Resource*>(self->pc);
+    const D3D12_RESOURCE_DESC pc = texture->GetDesc();
+    WhiwhiXgDescription d{};
+    std::memcpy(&d, &pc, sizeof(d));
+    d.layout = 0;
+    const auto layout = reinterpret_cast<int (*)(const WhiwhiXgDescription*, void*)>(xg_function("whiwhi_xg_layout"));
+    const auto total_bytes =
+        reinterpret_cast<unsigned long long (*)(const WhiwhiXgDescription*)>(xg_function("whiwhi_xg_total_bytes"));
+    std::vector<unsigned char> block(WHIWHI_XG_LAYOUT_BYTES);
+    const unsigned long long bytes = total_bytes ? total_bytes(&d) : 0;
+    if (!layout || !layout(&d, block.data()) || bytes == 0 || pc.SampleDesc.Count > 1) {
+        why = "the texture library does not lay out this texture";
+        return 0x80004001L;
+    }
+    if (!can_read(reinterpret_cast<const void*>(self->title_address), static_cast<std::size_t>(bytes))) {
+        why = "the image's memory at the texture's address is not there for the texture's size";
+        return 0x80004001L;
+    }
+    std::lock_guard<std::mutex> guard(g_mapped_lock);
+    bool known = false;
+    for (MappedTexture* m : g_mapped) {
+        known = known || m->wrap == self;
+    }
+    if (!known) {
+        ID3D12Device* device = nullptr;
+        texture->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&device));
+        auto* m = new MappedTexture;
+        m->wrap = self;
+        m->texture = texture;
+        texture->AddRef();
+        m->address = self->title_address;
+        m->block = std::move(block);
+        m->bytes = bytes;
+        why = device ? prepare_mapped(device, *m) : "the PC device was not found";
+        if (!g_mapped_fence && device && why.empty() &&
+            device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence),
+                                reinterpret_cast<void**>(&g_mapped_fence)) != 0) {
+            why = "the fence could not be made";
+        }
+        if (device) {
+            device->Release();
+        }
+        if (!why.empty()) {
+            release_mapped(m);
+            return 0x80004005L;
+        }
+        g_mapped.push_back(m);
+        logf("resource: Map of the texture the image placed at 0x%llx (%llu x %u, format %d) answered with that "
+             "memory (%llu bytes, the texture library's layout); what the image writes there is carried into the PC "
+             "texture before its next submission\n",
+             self->title_address, static_cast<unsigned long long>(pc.Width), pc.Height, static_cast<int>(pc.Format),
+             bytes);
+    }
+    if (data) {
+        *data = reinterpret_cast<void*>(self->title_address);
+    }
+    return 0;
+}
+
+void forget_mapped(Wrap* resource) {
+    std::lock_guard<std::mutex> guard(g_mapped_lock);
+    for (MappedTexture* m : g_mapped) {
+        if (m->wrap == resource) {
+            m->wrap = nullptr;  // let go after the last copy is done (see carry_mapped_textures)
+        }
+    }
+}
+
+// Before the image's lists go to a direct queue: every mapped texture whose memory changed is copied into its PC
+// texture on that queue first. Textures the image let go are released once their last copy is done.
+void carry_mapped_textures(ID3D12CommandQueue* queue) {
+    std::lock_guard<std::mutex> guard(g_mapped_lock);
+    if (g_mapped.empty() || !g_mapped_fence) {
+        return;
+    }
+    if (queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+        return;
+    }
+    const unsigned long long completed = g_mapped_fence->GetCompletedValue();
+    for (std::size_t i = 0; i < g_mapped.size();) {
+        MappedTexture* m = g_mapped[i];
+        if (!m->wrap) {
+            if (m->done_value <= completed) {
+                release_mapped(m);
+                g_mapped.erase(g_mapped.begin() + static_cast<std::ptrdiff_t>(i));
+                continue;
+            }
+            ++i;
+            continue;
+        }
+        ++i;
+        const auto* memory = reinterpret_cast<const unsigned char*>(m->address);
+        if (m->carried.size() == m->bytes && std::memcmp(m->carried.data(), memory, m->bytes) == 0) {
+            continue;
+        }
+        if (m->done_value > completed) {
+            continue;  // its last copy is still in flight; carried at a later submission
+        }
+        m->carried.assign(memory, memory + m->bytes);
+        const D3D12_RESOURCE_DESC pc = m->texture->GetDesc();
+        const unsigned mips = pc.MipLevels;
+        const unsigned slices = pc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1u : pc.DepthOrArraySize;
+        unsigned char* mapped = nullptr;
+        if (m->upload->Map(0, nullptr, reinterpret_cast<void**>(&mapped)) != 0 || !mapped) {
+            continue;
+        }
+        const std::string bad = rows_into_upload(m->block.data(), mips, slices, m->carried.data(), mapped, m->places,
+                                                 m->rows, m->row_bytes);
+        m->upload->Unmap(0, nullptr);
+        if (!bad.empty() || m->allocator->Reset() != 0 || m->list->Reset(m->allocator, nullptr) != 0) {
+            static std::atomic<int> shown{0};
+            if (few(shown, 4)) {
+                logf("resource: the texture mapped at 0x%llx was not carried over: %s\n", m->address,
+                     bad.empty() ? "the copy list could not be reset" : bad.c_str());
+            }
+            continue;
+        }
+        D3D12_TEXTURE_BARRIER barrier{};
+        barrier.SyncBefore = D3D12_BARRIER_SYNC_ALL;
+        barrier.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+        barrier.AccessBefore = D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
+        barrier.AccessAfter = D3D12_BARRIER_ACCESS_COPY_DEST;
+        barrier.LayoutBefore = m->layout;
+        barrier.LayoutAfter = D3D12_BARRIER_LAYOUT_COPY_DEST;
+        barrier.pResource = m->texture;
+        barrier.Subresources.IndexOrFirstMipLevel = 0xffffffffu;
+        D3D12_BARRIER_GROUP group{};
+        group.Type = D3D12_BARRIER_TYPE_TEXTURE;
+        group.NumBarriers = 1;
+        group.pTextureBarriers = &barrier;
+        m->list->Barrier(1, &group);
+        for (unsigned s = 0; s < m->places.size(); ++s) {
+            D3D12_TEXTURE_COPY_LOCATION to{};
+            to.pResource = m->texture;
+            to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            to.SubresourceIndex = s;
+            D3D12_TEXTURE_COPY_LOCATION from{};
+            from.pResource = m->upload;
+            from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            from.PlacedFootprint = m->places[s];
+            m->list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        }
+        std::swap(barrier.SyncBefore, barrier.SyncAfter);
+        std::swap(barrier.AccessBefore, barrier.AccessAfter);
+        std::swap(barrier.LayoutBefore, barrier.LayoutAfter);
+        m->list->Barrier(1, &group);
+        if (m->list->Close() != 0) {
+            continue;
+        }
+        ID3D12CommandList* lists[1] = {m->list};
+        queue->ExecuteCommandLists(1, lists);
+        m->done_value = ++g_mapped_value;
+        queue->Signal(g_mapped_fence, m->done_value);
+        const unsigned long long copies = g_mapped_copies.fetch_add(1) + 1;
+        if (copies <= 4 || (copies & (copies - 1)) == 0) {
+            logf("resource: the texture mapped at 0x%llx carried into its PC texture before a submission (%llu "
+                 "carried so far)\n",
+                 m->address, copies);
+        }
+    }
+}
+
+void log_mapped_textures(const char* when) {
+    std::lock_guard<std::mutex> guard(g_mapped_lock);
+    if (!g_mapped.empty() || g_mapped_copies.load()) {
+        logf("textures written through Map (%s): %zu mapped, carried into their PC textures %llu time(s)\n", when,
+             g_mapped.size(), g_mapped_copies.load());
     }
 }
 
@@ -8730,6 +9055,7 @@ unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
     log_pipeline_prep("whole run");
     log_slot70("whole run");
     log_memory_textures("whole run");
+    log_mapped_textures("whole run");
     return written;
 }
 
