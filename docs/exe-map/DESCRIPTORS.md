@@ -21,6 +21,11 @@ Two facts frame everything else:
 
 ## A. Device slot 61 — sampler creation
 
+**What the shell answers today (boot b110):** the description's fields are put back together into the public
+sampler description and a real sampler is made at the same position of the PC heap; the field-by-field
+reading of the builder function, with what is measured and what is taken to be so, is in the comment above
+`w_device_slot61` in `shell/d3d12_xs.cpp`. Six samplers were made in boot b110, none refused.
+
 ### A.1 The call
 
 | what | where |
