@@ -122,16 +122,6 @@ void* pointer_of(std::uint64_t address) {
     return reinterpret_cast<void*>(static_cast<std::uintptr_t>(address));
 }
 
-// The routine to tell before memory stops being what it was (whiwhi_xmem_set_change_routine). Called with the
-// lock held.
-std::atomic<WhiwhiXmemChangeRoutine> g_change_routine{nullptr};
-
-void memory_changes(std::uint64_t base, std::uint64_t bytes) {
-    if (const WhiwhiXmemChangeRoutine routine = g_change_routine.load()) {
-        routine(pointer_of(base), bytes);
-    }
-}
-
 // ---- Physical pages ---------------------------------------------------------------------------------------
 
 HANDLE slab_of(std::uint32_t number) {
@@ -470,7 +460,6 @@ void merge_placeholders(Region& region, std::uint64_t step) {
 bool unmap_step(Region& region, std::uint64_t step, bool merge) {
     State& s = state();
     void* at = pointer_of(region.base + step * kPage);
-    memory_changes(region.base + step * kPage, kPage);
     if (!UnmapViewOfFile2(GetCurrentProcess(), at, MEM_PRESERVE_PLACEHOLDER)) {
         ++s.stats.host_failures;
         note("the page at %p could not be unmapped (error %lu)", at, GetLastError());
@@ -668,7 +657,6 @@ void heap_free(void* pointer, unsigned long long attributes) {
         note("XMemFree(%p) gives attributes 0x%llx, the allocation was made with 0x%llx", pointer, attributes,
              it->second.attributes);
     }
-    memory_changes(it->second.base, it->second.bytes);
     if (!VirtualFree(pointer, 0, MEM_RELEASE)) {
         ++s.stats.host_failures;
         note("XMemFree(%p): Windows did not release it (error %lu)", pointer, GetLastError());
@@ -683,7 +671,6 @@ void heap_free(void* pointer, unsigned long long attributes) {
 int release_pages_region(Region& region) {
     State& s = state();
     bool ok = true;
-    memory_changes(region.base, region.bytes);
     for (std::uint64_t step = 0; step < region.page.size(); ++step) {
         if (!region.page[step]) {
             continue;
@@ -708,44 +695,11 @@ int release_pages_region(Region& region) {
     return ok ? 1 : 0;
 }
 
-// A release or decommit that goes to Windows as it is: says which committed memory is about to stop being what
-// it was. With no size given the extent is the whole allocation that starts at the address.
-void notice_before_windows_free(void* address, unsigned long long size, unsigned long type) {
-    if (!g_change_routine.load() || !(type & (MEM_RELEASE | MEM_DECOMMIT)) ||
-        (type & (MEM_COALESCE_PLACEHOLDERS | MEM_PRESERVE_PLACEHOLDER))) {
-        return;
-    }
-    const std::uint64_t at = address_of(address);
-    std::uint64_t end = at;
-    bool committed = false;
-    MEMORY_BASIC_INFORMATION info{};
-    if (size != 0) {
-        end = at + size;
-        for (std::uint64_t p = at; p < end;) {
-            if (VirtualQuery(pointer_of(p), &info, sizeof(info)) != sizeof(info) || info.RegionSize == 0) {
-                break;
-            }
-            committed = committed || info.State == MEM_COMMIT;
-            p = address_of(info.BaseAddress) + info.RegionSize;
-        }
-    } else {
-        while (VirtualQuery(pointer_of(end), &info, sizeof(info)) == sizeof(info) && info.RegionSize != 0 &&
-               info.State != MEM_FREE && info.AllocationBase == address) {
-            committed = committed || info.State == MEM_COMMIT;
-            end = address_of(info.BaseAddress) + info.RegionSize;
-        }
-    }
-    if (committed && end > at) {
-        memory_changes(at, end - at);
-    }
-}
-
 int virtual_free(void* address, unsigned long long size, unsigned long type) {
     State& s = state();
     const std::uint64_t at = address_of(address);
     Region* region = find_region(at);
     if (!region) {
-        notice_before_windows_free(address, size, type);
         return VirtualFree(address, size, type);
     }
     const bool whole = at == region->base && (size == 0 || size == region->bytes);
@@ -762,7 +716,6 @@ int virtual_free(void* address, unsigned long long size, unsigned long type) {
     case WHIWHI_XMEM_COMMITTED:
     case WHIWHI_XMEM_HEAP:
         if (type == MEM_RELEASE && whole) {
-            memory_changes(region->base, region->bytes);
             if (!VirtualFree(address, 0, MEM_RELEASE)) {
                 return 0;
             }
@@ -788,7 +741,6 @@ int virtual_free(void* address, unsigned long long size, unsigned long type) {
         break;
     }
     // Splits and merges of the image's own placeholders, decommits, and anything Windows should judge itself.
-    notice_before_windows_free(address, size, type);
     return VirtualFree(address, size, type);
 }
 
@@ -923,11 +875,6 @@ void whiwhi_xmem_set_allocation_hooks(WhiwhiXmemAllocRoutine alloc, WhiwhiXmemFr
     }
     g_alloc_routine.store(alloc);
     g_free_routine.store(free_routine);
-}
-
-void whiwhi_xmem_set_change_routine(WhiwhiXmemChangeRoutine routine) {
-    Guard guard;
-    g_change_routine.store(routine);
 }
 
 int XMemGetWorkingSetStatistics(unsigned long kind, void* statistics) {
