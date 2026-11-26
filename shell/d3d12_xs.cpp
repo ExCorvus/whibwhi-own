@@ -513,6 +513,7 @@ struct HeapRange {
     unsigned long long bytes;
     unsigned long long pc_cpu;  // the PC heap's own start handles
     unsigned long long pc_gpu;  // 0 when the heap is not visible to shaders
+    unsigned type = 0;          // D3D12_DESCRIPTOR_HEAP_TYPE
 };
 SRWLOCK g_heaps_lock = SRWLOCK_INIT;
 std::vector<HeapRange> g_heaps;
@@ -615,6 +616,28 @@ bool cpu_handle_in_heap(unsigned long long handle, unsigned long long& pc) {
         }
         if (r.pc_cpu && handle >= r.pc_cpu && handle < r.pc_cpu + r.bytes) {
             pc = handle;
+            found = true;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_heaps_lock);
+    return found;
+}
+
+// The same, also telling which type of heap the position is in.
+bool cpu_handle_in_heap_type(unsigned long long handle, unsigned long long& pc, unsigned& type) {
+    bool found = false;
+    AcquireSRWLockShared(&g_heaps_lock);
+    for (const HeapRange& r : g_heaps) {
+        if (r.title && handle >= r.title && handle < r.title + r.bytes) {
+            pc = r.pc_cpu + (handle - r.title);
+            type = r.type;
+            found = true;
+            break;
+        }
+        if (r.pc_cpu && handle >= r.pc_cpu && handle < r.pc_cpu + r.bytes) {
+            pc = handle;
+            type = r.type;
             found = true;
             break;
         }
@@ -4474,6 +4497,7 @@ HRESULT __stdcall w_device_slot14(Wrap* self, const D3D12_DESCRIPTOR_HEAP_DESC* 
     }
     HeapRange range{};
     const unsigned step = device->GetDescriptorHandleIncrementSize(desc->Type);
+    range.type = static_cast<unsigned>(desc->Type);
     range.bytes = static_cast<unsigned long long>(desc->NumDescriptors) * step;
     range.pc_cpu = heap->GetCPUDescriptorHandleForHeapStart().ptr;
     if (desc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
@@ -4506,6 +4530,170 @@ HRESULT __stdcall w_device_slot14(Wrap* self, const D3D12_DESCRIPTOR_HEAP_DESC* 
              range.title, range.pc_cpu);
     }
     *out = wrapped;
+    return 0;
+}
+
+// Device slot 61: make a sampler at a place in the image's descriptor memory. Two arguments: a description and
+// the destination (measured at the image's one call site, image+0x12b9818; the result is not looked at).
+//
+// The description is the console's own 0x54-byte layout. The image builds it (function at image+0x12b96b0) from
+// its sampler record, whose flag word is taken apart bit by bit exactly as the public D3D12_FILTER value is laid
+// out: bit 0x1 (mip linear), 0x4 (magnify linear), 0x10 (minify linear), 0x40 (anisotropic), 0x80 (comparison),
+// and the two bits from 0x80 up as the reduction (standard, comparison, minimum, maximum). Read from that code:
+//   +0x04  magnify: 1 when bit 0x4 is set, 2 when clear, 3 when anisotropic
+//   +0x08  minify:  1 when bit 0x10 is set, 2 when clear, 3 when anisotropic
+//   +0x0c  mip:     2 when bit 0x1 is set, 1 when clear
+//   +0x10  2 when bit 0x4 is set, 1 when clear (a second use of the magnify bit; what the console does with
+//          it is not known, and nothing here depends on it beyond checking it)
+//   +0x14  0 for the standard and the comparison reduction, 1 for minimum, 2 for maximum
+//   +0x18, +0x1c, +0x20  the three address modes, copied from the record
+//   +0x24, +0x28  smallest and largest level of detail;  +0x30  level-of-detail bias
+//   +0x34  a 5-bit number from the record;  +0x40  1, or a byte of the record when the comparison bit is set
+//   +0x44  four numbers: the border colour
+//   +0x00, +0x2c, +0x38, +0x3c  never written (zero)
+// Taken to be so, not measured: the address modes and the comparison number use the public numbering (their
+// default values, 1 for "never" and the modes 1 to 5, fit it), and the 5-bit number is the anisotropy limit.
+// A comparison sampler whose function is 1 ("never") cannot be told from a sampler with no comparison; it is
+// made without comparison. Anything outside what that code can produce is refused and logged, and nothing is
+// written at the destination.
+struct ConsoleSamplerDescription {
+    std::uint32_t word00;
+    std::uint32_t magnify;
+    std::uint32_t minify;
+    std::uint32_t mip;
+    std::uint32_t magnify_again;
+    std::uint32_t reduction;
+    std::uint32_t address[3];
+    float least_detail;
+    float most_detail;
+    std::uint32_t word2c;
+    float bias;
+    std::uint32_t anisotropy;
+    std::uint32_t word38;
+    std::uint32_t word3c;
+    std::uint32_t comparison;
+    float border[4];
+};
+static_assert(sizeof(ConsoleSamplerDescription) == 0x54, "the console sampler description is 0x54 bytes");
+
+std::atomic<unsigned long long> g_samplers_made{0}, g_samplers_refused{0};
+
+// The public sampler description for a console one; false with a reason when it is not one the image's code
+// can have built.
+bool public_sampler(const ConsoleSamplerDescription& c, D3D12_SAMPLER_DESC& out, const char*& why) {
+    if (c.word00 || c.word2c || c.word38 || c.word3c) {
+        why = "a field the image never writes is not zero";
+        return false;
+    }
+    const bool anisotropic = c.magnify == 3 || c.minify == 3;
+    if (anisotropic ? (c.magnify != 3 || c.minify != 3) : (c.magnify < 1 || c.magnify > 2 || c.minify < 1 || c.minify > 2)) {
+        why = "the magnify / minify numbers are not a pair the image's code produces";
+        return false;
+    }
+    if (c.mip < 1 || c.mip > 2 || c.magnify_again < 1 || c.magnify_again > 2) {
+        why = "the mip number or the number at +0x10 is not 1 or 2";
+        return false;
+    }
+    if (!anisotropic && (c.magnify_again == 2) != (c.magnify == 1)) {
+        why = "the two numbers made from the magnify bit disagree";
+        return false;
+    }
+    if (c.reduction > 2) {
+        why = "the reduction number is not 0, 1 or 2";
+        return false;
+    }
+    if (c.comparison < 1 || c.comparison > 8) {
+        why = "the comparison number is not 1 to 8";
+        return false;
+    }
+    for (std::uint32_t mode : c.address) {
+        if (mode < 1 || mode > 5) {
+            why = "an address mode is not 1 to 5";
+            return false;
+        }
+    }
+    unsigned filter = c.mip == 2 ? 0x1u : 0u;
+    if (anisotropic) {
+        if (c.anisotropy < 1 || c.anisotropy > 16) {
+            why = "anisotropic with a limit that is not 1 to 16";
+            return false;
+        }
+        filter |= 0x40u | 0x10u | 0x4u;
+    } else {
+        filter |= (c.magnify == 1 ? 0x4u : 0u) | (c.minify == 1 ? 0x10u : 0u);
+    }
+    const bool compares = c.comparison != 1;
+    if (c.reduction == 1) {
+        filter |= 0x100u;
+    } else if (c.reduction == 2) {
+        filter |= 0x180u;
+    } else if (compares) {
+        filter |= 0x80u;
+    }
+    if (c.reduction != 0 && compares) {
+        why = "a minimum / maximum sampler that also names a comparison";
+        return false;
+    }
+    out = D3D12_SAMPLER_DESC{};
+    out.Filter = static_cast<D3D12_FILTER>(filter);
+    out.AddressU = static_cast<D3D12_TEXTURE_ADDRESS_MODE>(c.address[0]);
+    out.AddressV = static_cast<D3D12_TEXTURE_ADDRESS_MODE>(c.address[1]);
+    out.AddressW = static_cast<D3D12_TEXTURE_ADDRESS_MODE>(c.address[2]);
+    out.MipLODBias = c.bias;
+    out.MaxAnisotropy = anisotropic ? c.anisotropy : 1;
+    out.ComparisonFunc = compares ? static_cast<D3D12_COMPARISON_FUNC>(c.comparison) : D3D12_COMPARISON_FUNC_NEVER;
+    for (int i = 0; i < 4; ++i) {
+        out.BorderColor[i] = c.border[i];
+    }
+    out.MinLOD = c.least_detail;
+    out.MaxLOD = c.most_detail;
+    return true;
+}
+
+HRESULT __stdcall w_device_slot61(Wrap* self, const ConsoleSamplerDescription* description,
+                                  unsigned long long destination, void*, void*, void*, void*, void*, void*) {
+    static std::atomic<int> shown{0}, shown_refused{0};
+    const char* why = nullptr;
+    D3D12_SAMPLER_DESC pc_desc{};
+    unsigned long long pc_handle = 0;
+    unsigned heap_type = 0;
+    if (!description || !can_read(description, sizeof(ConsoleSamplerDescription))) {
+        why = "the description cannot be read";
+    } else if (!cpu_handle_in_heap_type(destination, pc_handle, heap_type)) {
+        why = "the destination is not a position in a descriptor heap of this library";
+    } else if (heap_type != static_cast<unsigned>(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)) {
+        why = "the destination is in a heap that does not hold samplers";
+    } else {
+        public_sampler(*description, pc_desc, why);
+    }
+    if (why) {
+        g_samplers_refused.fetch_add(1);
+        if (few(shown_refused, 8)) {
+            if (description && can_read(description, sizeof(ConsoleSamplerDescription))) {
+                const ConsoleSamplerDescription& c = *description;
+                logf("device slot 61: sampler NOT made (%s): destination 0x%llx; magnify %u, minify %u, mip %u, "
+                     "+0x10 %u, reduction %u, address %u %u %u, anisotropy %u, comparison %u\n",
+                     why, destination, c.magnify, c.minify, c.mip, c.magnify_again, c.reduction, c.address[0],
+                     c.address[1], c.address[2], c.anisotropy, c.comparison);
+            } else {
+                logf("device slot 61: sampler NOT made (%s): destination 0x%llx\n", why, destination);
+            }
+        }
+        return 0x80004001L;  // E_NOTIMPL
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE handle{};
+    handle.ptr = static_cast<SIZE_T>(pc_handle);
+    static_cast<ID3D12Device*>(self->pc)->CreateSampler(&pc_desc, handle);
+    const unsigned long long made = g_samplers_made.fetch_add(1) + 1;
+    if (few(shown, 6) || (made >= 64 && (made & (made - 1)) == 0)) {
+        logf("device slot 61: sampler #%llu made at 0x%llx (PC position 0x%llx): filter 0x%x, address %u %u %u, "
+             "level of detail %g to %g, bias %g, anisotropy %u, comparison %u\n",
+             made, destination, pc_handle, static_cast<unsigned>(pc_desc.Filter),
+             static_cast<unsigned>(pc_desc.AddressU), static_cast<unsigned>(pc_desc.AddressV),
+             static_cast<unsigned>(pc_desc.AddressW), static_cast<double>(pc_desc.MinLOD),
+             static_cast<double>(pc_desc.MaxLOD), static_cast<double>(pc_desc.MipLODBias), pc_desc.MaxAnisotropy,
+             static_cast<unsigned>(pc_desc.ComparisonFunc));
+    }
     return 0;
 }
 
@@ -6592,6 +6780,7 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {73, reinterpret_cast<void*>(&w_device_slot73)},
          {55, reinterpret_cast<void*>(&w_device_pipeline_request<0, 55, 0x400>)},
          {57, reinterpret_cast<void*>(&w_device_pipeline_request<1, 57, 0x300>)},
+         {61, reinterpret_cast<void*>(&w_device_slot61)},
          {62, reinterpret_cast<void*>(&w_device_slot62)},
          {67, reinterpret_cast<void*>(&w_device_pipeline_request<3, 67, 0x40>)},
          {86, reinterpret_cast<void*>(&w_device_slot86)},
