@@ -413,12 +413,25 @@ static void test_read_fields_one_word_formats() {
         CHECK(ins.source_count == 0 && !ins.has_constant_word);
     }
     CHECK(sopp(1, 0) == kEndOfProgramWord);
-    // VINTRP opcode 2: v5 gets attribute 0x21, channel 1, from v3.
+    // VINTRP opcode 2, the parameter move: v5 gets attribute 0x21, channel 1; the source field is the selector
+    // (here 2), not a register, so the instruction has no source operand.
     {
-        const Instruction ins = decode_one({vintrp(2, 5, 0x21, 1, 3)});
+        const Instruction ins = decode_one({vintrp(2, 5, 0x21, 1, 2)});
         CHECK(ins.format == WalkFormat::kVintrp && ins.opcode == 2);
         CHECK(ins.dst.kind == OperandKind::kVgpr && ins.dst.index == 5);
-        CHECK(ins.vintrp.attr == 0x21 && ins.vintrp.attrchan == 1 && ins.vintrp.vsrc == 3);
+        CHECK(ins.vintrp.attr == 0x21 && ins.vintrp.attrchan == 1 && ins.vintrp.vsrc == 2);
+        CHECK(ins.vintrp.vsrc_is_selector);
+        CHECK(ins.source_count == 0);
+    }
+    // VINTRP opcodes 0 and 1, the two interpolation steps: the source field is a vector register and is the
+    // instruction's one source operand.
+    for (unsigned step : {0u, 1u}) {
+        const Instruction ins = decode_one({vintrp(step, 6, 3, 2, 9)});
+        CHECK(ins.format == WalkFormat::kVintrp && ins.opcode == step);
+        CHECK(ins.dst.kind == OperandKind::kVgpr && ins.dst.index == 6);
+        CHECK(!ins.vintrp.vsrc_is_selector);
+        CHECK(ins.source_count == 1);
+        CHECK(ins.src[0].kind == OperandKind::kVgpr && ins.src[0].index == 9);
     }
 }
 
