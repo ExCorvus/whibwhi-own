@@ -90,7 +90,7 @@ contract (V):
   index 0 at +0x20 and the byte length for the other indexes at +0x2c;
 - **that index is 0 in every call site in the image** (V). A stage is selected by passing a *different record*:
   fn 0x86f090 calls the function five times, each with its own record, and writes the five results into a table of
-  `{ptr, size}` pairs 0x18 bytes apart (V). So the shell cannot read the shader's stage out of this call — it comes
+  `{ptr, size}` pairs 0x18 bytes apart (V). So the weave cannot read the shader's stage out of this call — it comes
   from which record was passed, which is the renderer's business (U which record is which stage);
 - if that index's pointer is already set, it is returned as it is;
 - otherwise the bytes are **copied out of GPU-visible memory**: the record's +0x38 object gets two vtable calls
@@ -155,7 +155,7 @@ function; the 0x18/0x04 fields are named after the public container layout, I).
 Consequence (U, and it must stay open): **the fourcc of the chunk that holds the console instruction stream is not
 established by the game's code.** The image never looks at it — the console driver does. Any fourcc we wrote down
 for it would be a guess. The instruction bytes are in *some* chunk of that container, but which one is for the
-shell's translator to determine from a logged container header, not to assume now.
+weave's translator to determine from a logged container header, not to assume now.
 
 What the game passes on as the shader length is the dword at the outer container's +0x08 (V), i.e. the length of
 this whole DXBC container, not the length of any chunk.
@@ -183,7 +183,7 @@ this whole DXBC container, not the length of any chunk.
 - During device start-up (fn 0x19f4df0, the chain that also calls `D3D12XboxCreateDevice`) the only pipeline work
   reached is fn 0x1d65750 → fn 0x2476e20, which creates **root signatures** and fills the pipeline cache; it does
   not call a pipeline method itself (V).
-- So the first pipeline state the shell is likely to see is the **compute** one from fn 0x247fd30 / slot 62, with
+- So the first pipeline state the weave is likely to see is the **compute** one from fn 0x247fd30 / slot 62, with
   a `D3D12_COMPUTE_PIPELINE_STATE_DESC`-shaped description whose CS pair is a real shader container (I). The first
   thing the translator would have to read is therefore a compute container, not a graphics one.
 
@@ -197,7 +197,7 @@ is logging of numbers and header fields in memory during a run — nothing is wr
    whether 62 really is tried after 67.
 2. **Which thread makes the first pipeline call.** Log `GetCurrentThreadId()` at the first pipeline call. Settles
    whether the game builds pipelines off-thread (rule 7 is about what *we* do, but if the caller is already a
-   worker thread the shell must not move the work again, and ExCorvus must decide the answer).
+   worker thread the weave must not move the work again, and ExCorvus must decide the answer).
 3. **What the pointer handed over really points at.** Log the first 16 bytes at the shader pointer and the length,
    for the first pipeline. Expectation from this file: `DXBC` first (the unpacked form), and 0xDCE7 only if the
    outer branch was skipped. Settles: whether our wrapper sees the packed or the unpacked container.
@@ -206,10 +206,10 @@ is logging of numbers and header fields in memory during a run — nothing is wr
    "instruction stream at offset X, length Y" answer can be. That is the one fact this document cannot supply.
 5. **Which record belongs to which stage** for graphics pipelines. The index passed to fn 0x86f8e0 is 0 in every
    call site, so the stage is not in that argument (section 2). Logging the *caller* function and the record
-   pointer for each of the five calls fn 0x86f090 makes settles the order; until then the shell must not infer a
+   pointer for each of the five calls fn 0x86f090 makes settles the order; until then the weave must not infer a
    stage from the call itself.
 
-## 8. What is in `shell/shader_container.*` because of this file
+## 8. What is in `weave/shader_container.*` because of this file
 
 `shader_container.hpp/.cpp` is a reader for the two headers above and nothing more. It reports:
 
