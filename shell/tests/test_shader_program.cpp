@@ -294,6 +294,47 @@ Bytes declared_part(std::uint32_t info, std::uint32_t count, std::uint32_t recor
     return p;
 }
 
+// A signature part's payload with three made-up elements. `words` is the record's size in 32-bit words:
+// 8 (stream first, minimum precision last), 7 (stream first) or 6.
+struct MadeUpElement {
+    const char* name;
+    std::uint32_t index, system_value, component_type, shader_register, mask_word, stream, precision;
+};
+const MadeUpElement kMadeUpElements[3] = {
+    {"POSITION", 0, 0, 3, 0, 0x0307, 0, 0},
+    {"TEXCOORD", 2, 0, 3, 1, 0x0303, 0, 1},
+    {"SV_Made_Up", 0, 64, 1, 2, 0x000F, 1, 0},
+};
+Bytes signature_part(unsigned words) {
+    Bytes p;
+    put32(p, 3);
+    put32(p, 8);
+    const std::uint32_t names_at = 8 + 3 * words * 4;
+    std::uint32_t name_at = names_at;
+    for (const MadeUpElement& e : kMadeUpElements) {
+        if (words >= 7) {
+            put32(p, e.stream);
+        }
+        put32(p, name_at);
+        put32(p, e.index);
+        put32(p, e.system_value);
+        put32(p, e.component_type);
+        put32(p, e.shader_register);
+        put32(p, e.mask_word);
+        if (words == 8) {
+            put32(p, e.precision);
+        }
+        name_at += static_cast<std::uint32_t>(std::strlen(e.name)) + 1;
+    }
+    for (const MadeUpElement& e : kMadeUpElements) {
+        for (const char* c = e.name; *c; ++c) {
+            p.push_back(static_cast<std::uint8_t>(*c));
+        }
+        p.push_back(0);
+    }
+    return p;
+}
+
 } // namespace
 
 int main() {
@@ -663,6 +704,83 @@ int main() {
         CHECK(declared_resource_class(3) == 0 && declared_resource_class(4) == 0 && declared_resource_class(5) == 0);
         CHECK(declared_resource_class(6) == 3 && declared_resource_class(9) == 3);
         CHECK(declared_resource_class(0) == 0xFF && declared_resource_class(10) == 0xFF);
+    }
+
+    // The signature parts: the three record sizes, each under every name that has it.
+    {
+        struct Named {
+            const char* name;
+            unsigned words;
+        };
+        const Named names[] = {{"ISG1", 8}, {"OSG1", 8}, {"PSG1", 8}, {"OSG5", 7},
+                               {"ISGN", 6}, {"OSGN", 6}, {"PCSG", 6}};
+        for (const Named& n : names) {
+            const Bytes part = signature_part(n.words);
+            const Signature s = read_signature(n.name, part.data(), part.size());
+            CHECK(s.found && s.reason.empty());
+            CHECK(s.elements.size() == 3);
+            if (s.elements.size() == 3) {
+                for (int i = 0; i < 3; ++i) {
+                    const MadeUpElement& want = kMadeUpElements[i];
+                    const SignatureElement& got = s.elements[static_cast<std::size_t>(i)];
+                    CHECK(got.name == want.name);
+                    CHECK(got.index == want.index && got.system_value == want.system_value);
+                    CHECK(got.component_type == want.component_type && got.shader_register == want.shader_register);
+                    CHECK(got.mask == (want.mask_word & 0xFF) && got.use_mask == ((want.mask_word >> 8) & 0xFF));
+                    CHECK(got.stream == (n.words >= 7 ? want.stream : 0u));
+                    CHECK(got.minimum_precision == (n.words == 8 ? want.precision : 0u));
+                }
+            }
+        }
+
+        // A part with no element at all is a signature with none.
+        Bytes none;
+        put32(none, 0);
+        put32(none, 8);
+        const Signature empty = read_signature("OSG1", none.data(), none.size());
+        CHECK(empty.found && empty.elements.empty());
+
+        // Refusals: each leaves no element behind and says why.
+        const Bytes part = signature_part(8);
+        const auto refused = [](const char* name, const Bytes& bytes) {
+            const Signature s = read_signature(name, bytes.data(), bytes.size());
+            return !s.found && !s.reason.empty() && s.elements.empty();
+        };
+        CHECK(refused("PSV0", part));   // not a signature part
+        CHECK(refused("", part));
+        CHECK(!read_signature(nullptr, part.data(), part.size()).found);
+        CHECK(!read_signature("ISG1", nullptr, 64).found);
+        CHECK(refused("ISG1", Bytes(part.begin(), part.begin() + 4)));  // no room for the count and the 8
+        Bytes broken = part;
+        set32(broken, 4, 12);  // the word after the count
+        CHECK(refused("ISG1", broken));
+        broken = part;
+        set32(broken, 0, 300);  // more elements than the reader accepts
+        CHECK(refused("ISG1", broken));
+        broken = part;
+        set32(broken, 0, 9);  // more records than there are bytes for
+        CHECK(refused("ISG1", broken));
+        CHECK(refused("ISG1", Bytes(part.begin(), part.begin() + 8 + 2 * 32)));  // cut inside the records
+        broken = part;
+        set32(broken, 8 + 4, 16);  // the first name points into the records
+        CHECK(refused("ISG1", broken));
+        broken = part;
+        set32(broken, 8 + 4, static_cast<std::uint32_t>(part.size()));  // ... or past the end
+        CHECK(refused("ISG1", broken));
+        broken = part;
+        broken.back() = 'x';  // the last name never ends
+        CHECK(refused("ISG1", broken));
+        broken = part;
+        broken[8 + 3 * 32] = 0;  // an empty name
+        CHECK(refused("ISG1", broken));
+        broken = part;
+        broken[8 + 3 * 32 + 1] = 0x01;  // a name that is not text
+        CHECK(refused("ISG1", broken));
+        broken = part;
+        set32(broken, 8 + 24, 0x0317);  // a mask naming a fifth component
+        CHECK(refused("ISG1", broken));
+        // The same bytes read with the wrong record size do not pass by accident.
+        CHECK(refused("ISGN", part));
     }
 
     if (failures == 0) {
