@@ -1057,16 +1057,24 @@ StepResult step_sop2(MachineState& state, const Instruction& ins) {
             }
             return ok_step();
         }
-        case 39: {  // s_bfe_u32: the field described by src1: offset in bits [4:0], width - 1 in bits [10:5]
+        case 39: {  // s_bfe_u32: the field described by src1: offset in bits [4:0], width in bits [22:16]
+            // Mesa's compiler writes the second operand as (width << 16) | offset wherever it emits this
+            // instruction (aco_lower.cpp: `Operand::c32((bits << 16) | offset)`; aco_select_nir_intrinsics.cpp:
+            // `28 | (4 << 16)` with the comment "extract last 4 bits"). An earlier form of this step read the
+            // width from bits [10:5]; that was wrong.
             std::uint32_t value = 0;
             std::uint32_t spec = 0;
             if (!load32(state, ins, 0, &value, &why) || !load32(state, ins, 1, &spec, &why)) {
                 return refuse_instruction(ins, why);
             }
             const std::uint32_t offset = spec & 0x1Fu;
-            const std::uint32_t width = ((spec >> 5) & 0x3Fu) + 1u;  // 1..32: the field stores width - 1
+            const std::uint32_t width = (spec >> 16) & 0x7Fu;
+            if (width == 0) {
+                return refuse_instruction(ins, "a bit-field extract of width 0: what the hardware gives is not "
+                                               "stated in the sources read");
+            }
             std::uint32_t extracted = 0;
-            if (offset < 32) {
+            {
                 const std::uint32_t shifted = value >> offset;
                 // Bits of the field past bit 31 are zero: the source has none there.
                 extracted = shifted;
