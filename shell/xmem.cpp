@@ -122,6 +122,16 @@ void* pointer_of(std::uint64_t address) {
     return reinterpret_cast<void*>(static_cast<std::uintptr_t>(address));
 }
 
+// The routine to tell before memory stops being what it was (whiwhi_xmem_set_change_routine). Called with the
+// lock held.
+std::atomic<WhiwhiXmemChangeRoutine> g_change_routine{nullptr};
+
+void memory_changes(std::uint64_t base, std::uint64_t bytes) {
+    if (const WhiwhiXmemChangeRoutine routine = g_change_routine.load()) {
+        routine(pointer_of(base), bytes);
+    }
+}
+
 // ---- Physical pages ---------------------------------------------------------------------------------------
 
 HANDLE slab_of(std::uint32_t number) {
@@ -460,6 +470,7 @@ void merge_placeholders(Region& region, std::uint64_t step) {
 bool unmap_step(Region& region, std::uint64_t step, bool merge) {
     State& s = state();
     void* at = pointer_of(region.base + step * kPage);
+    memory_changes(region.base + step * kPage, kPage);
     if (!UnmapViewOfFile2(GetCurrentProcess(), at, MEM_PRESERVE_PLACEHOLDER)) {
         ++s.stats.host_failures;
         note("the page at %p could not be unmapped (error %lu)", at, GetLastError());
@@ -657,6 +668,7 @@ void heap_free(void* pointer, unsigned long long attributes) {
         note("XMemFree(%p) gives attributes 0x%llx, the allocation was made with 0x%llx", pointer, attributes,
              it->second.attributes);
     }
+    memory_changes(it->second.base, it->second.bytes);
     if (!VirtualFree(pointer, 0, MEM_RELEASE)) {
         ++s.stats.host_failures;
         note("XMemFree(%p): Windows did not release it (error %lu)", pointer, GetLastError());
@@ -671,6 +683,7 @@ void heap_free(void* pointer, unsigned long long attributes) {
 int release_pages_region(Region& region) {
     State& s = state();
     bool ok = true;
+    memory_changes(region.base, region.bytes);
     for (std::uint64_t step = 0; step < region.page.size(); ++step) {
         if (!region.page[step]) {
             continue;
@@ -716,6 +729,7 @@ int virtual_free(void* address, unsigned long long size, unsigned long type) {
     case WHIWHI_XMEM_COMMITTED:
     case WHIWHI_XMEM_HEAP:
         if (type == MEM_RELEASE && whole) {
+            memory_changes(region->base, region->bytes);
             if (!VirtualFree(address, 0, MEM_RELEASE)) {
                 return 0;
             }
@@ -875,6 +889,11 @@ void whiwhi_xmem_set_allocation_hooks(WhiwhiXmemAllocRoutine alloc, WhiwhiXmemFr
     }
     g_alloc_routine.store(alloc);
     g_free_routine.store(free_routine);
+}
+
+void whiwhi_xmem_set_change_routine(WhiwhiXmemChangeRoutine routine) {
+    Guard guard;
+    g_change_routine.store(routine);
 }
 
 int XMemGetWorkingSetStatistics(unsigned long kind, void* statistics) {
