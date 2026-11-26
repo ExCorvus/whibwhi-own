@@ -34,9 +34,15 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   from the game's memory into a PC texture yet, so no texture with starting data can be sampled.
 - **Network:** every imported function that could open a socket, resolve a name or make an HTTP request is
   connected to a refusal (docs/console-libs/network.md). No run so far has called one.
+- **Shaders (measured, boots b81-b85):** every pipeline request names shader containers with the public
+  container's parts, but the part that would hold portable shader code holds none (its code field is the four
+  letters "NOBC"). The code the console runs is precompiled hardware code, handed over in the descriptions of
+  device slots 57 (graphics) and 67 (compute). So a translator from that hardware code is the way to a picture;
+  the PC device cannot take the game's shaders as they are. Nearly every request comes from the game's worker
+  threads (tens of thousands in the first seconds); three come from the thread that created the device.
 - **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
-  slots 57, 62, 67 and 86 and all are refused (the shader translator handles only straight-line compute test
-  shaders), so every draw is held. Command-list methods that name buffers by address (slots 41 to 48: root
+  slots 57, 62, 67 and 86; each request is read and counted, and none can be made (the shader translator
+  handles only straight-line compute test shaders), so every draw is held. Command-list methods that name buffers by address (slots 41 to 48: root
   buffers, index and vertex buffers), because a game address is not turned into a PC buffer address yet. The
   command-list methods at slots 70, 71, 72, 74, 75, 126, 131, 132, 142 and 146 (what they are is not known).
   The primitive topology number 0x11 (not a PC topology). Views made from raw descriptor words (device slot 70)
@@ -813,3 +819,26 @@ hardware start-up only when the byte at image+0xaa31c54 is 1. That byte has one 
 (fn 0x25a4c00), which stores the constant 1. So this build always starts audio hardware; there is nothing of
 the game's own to turn it off with, and the shell does not change that byte. The choices are unchanged and are
 ExCorvus's: a real audio path behind the audio device object, or a silent device accepted as a stated exception.
+
+## 2026-11-26 - what the game's pipeline requests carry (boots b81-b85; measured)
+
+- The graphics library reads every pipeline request (device slots 55, 57, 62, 67, 86, 101), counts it and logs
+  numbers about the first few. Nothing of a shader is written to a file or to the log.
+- Identified by their argument lists: slot 62 = the public compute pipeline description; slot 86 = the public
+  pipeline state stream; slot 101 = the public state-object description of a ray-tracing pipeline (refused).
+  Slots 57 and 67 are console-only: descriptions of precompiled pipelines (graphics and compute).
+- Every shader container the requests name has the public container's seven parts (SFI0, ISG1, OSG1, PSV0, HASH,
+  DXIL, PRIV) and says shader model 6.6, but its code part is empty: four bytes, the letters "NOBC". A first
+  reading of the log as "the shaders are portable code, no translation needed" was wrong and was never written
+  down as a result.
+- The hardware code is in the slot 57 and slot 67 descriptions: blocks whose sizes are multiples of 64 bytes,
+  each holding exactly one end-of-program word of the hardware instruction set. The translator has to read those
+  blocks. docs/exe-map/SHADER-PATH.md section 9 and docs/SHADER-TRANSLATOR.md section 12 have the details.
+- Three requests come from the thread that created the device (shaders stored inside the executable); all others
+  come from the game's worker threads, tens of thousands in the first twenty seconds.
+- The shell makes a pipeline only on the device's own thread, and only from a container that has portable code;
+  no request so far has one, so no pipeline state exists and every draw is held, as before.
+- For ExCorvus to decide: whether pipeline requests from the game's own worker threads may be served on the thread
+  that asks (rule 7 as written forbids building pipelines on another thread).
+- Not established: where a program starts inside its block, what the other blocks of a description hold, and
+  what the bytes between the DXIL header and "NOBC" are.
