@@ -534,6 +534,53 @@ int main() {
                           "utof r3.z, r0.z"});
     }
 
+    // 8b. What the pass that joins a console program to this writer needs: a sampler taken from an unbounded
+    //     range by a run-time number, one component of a constant buffer element, the two 16-bit float
+    //     conversions, the bit-field and reciprocal instructions, a discard, and an instruction written from a
+    //     stored operand list.
+    {
+        DxbcBuilder builder(ShaderType::kPixel);
+        builder.declare_global_flags(GlobalShaderFlags{});
+        builder.add_input_signature(
+            SignatureElement{"TEXCOORD", 0, SystemValue::kUndefined, ComponentType::kFloat32, 0, kMaskXY});
+        builder.add_output_signature(SignatureElement{"SV_Target", 0, SystemValue::kUndefined,
+                                                      ComponentType::kFloat32, 0, kMaskAll});
+        builder.declare_constant_buffer(0, 500, 500, 1, 0);
+        builder.declare_sampler(0, 0, 0xFFFFFFFFu, 22344);
+        builder.declare_texture(0, 2, 2, 1, ResourceDimension::kTexture2d, ReturnType::kFloat);
+        builder.declare_input_ps(0, kMaskXY, InterpolationMode::kLinear);
+        builder.declare_output(0, kMaskAll);
+        builder.declare_temps(3);
+        builder.emit(Opcode::kMov, {temp_dest(1, kMaskX), constant_buffer_scalar(0, 500, 0, 1)});
+        builder.emit(Opcode::kSample, {temp_dest(0), input_source(0, kSwizzleXYXX), resource_source(0, 2),
+                                       sampler_source_indexed(0, 0, 1, 0)});
+        builder.emit(Opcode::kF32toF16, {temp_dest(1, kMaskY), temp_scalar(0, 0)});
+        builder.emit(Opcode::kF16toF32, {temp_dest(1, kMaskZ), temp_scalar(1, 1)});
+        builder.emit(Opcode::kRcp, {temp_dest(1, kMaskW), temp_scalar(0, 0)});
+        builder.emit(Opcode::kUbfe, {temp_dest(2, kMaskX), immediate1u(4), immediate1u(8), temp_scalar(1, 0)});
+        builder.emit(Opcode::kNop, {});
+        InstructionFlags if_zero;
+        if_zero.test_zero = true;
+        const Operand stored[] = {temp_scalar(1, 0)};
+        builder.emit(Opcode::kDiscard, if_zero, stored, 1);
+        builder.emit(Opcode::kMov, {output_dest(0), temp_source(0)});
+        builder.emit(Opcode::kRet, {});
+        expect_container(compiler, "what the joining pass needs", builder.build(),
+                         {"dcl_constantbuffer CB0[500:500][1], immediateIndexed, space=0",
+                          "dcl_sampler S0[0:*], mode_default, space=22344",
+                          "dcl_resource_texture2d (float,float,float,float) T0[2:2], space=1",
+                          "mov r1.x, CB0[500][0].y",
+                          "sample r0.xyzw, v0.xyxx, T0[2].xyzw, S0[r1.x + 0]",
+                          "f32tof16 r1.y, r0.x",
+                          "f16tof32 r1.z, r1.y",
+                          "rcp r1.w, r0.x",
+                          "ubfe r2.x, l(4), l(8), r1.x",
+                          "nop",
+                          "discard_z r1.x",
+                          "mov o0.xyzw, r0.xyzw",
+                          "ret"});
+    }
+
     // 9. The checksum is checked by the tool: altering it must make the container be rejected.
     {
         std::vector<std::uint8_t> blob = build_pixel_sample();
