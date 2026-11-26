@@ -199,6 +199,30 @@ int main() {
         CHECK(register_set_text(s.scalar_inputs) == "-");
     }
 
+    // A three-operand compare (opcode 6) of v1 and v2 writes its lane mask into the scalar pair s10, s11; its
+    // third source field holds 0 and is not a source, so s0 is not an input. A select (0x101) then reads that
+    // mask from its third field (both registers of the pair), and a second select reads the pair at s20,
+    // which nothing wrote: s20-s21 are inputs. A re-encoded two-source instruction (0x108) with 0 in its
+    // third field reads no scalar register.
+    {
+        std::vector<std::uint32_t> q;
+        q.push_back(0xD4000000u | (6u << 16) | 10u);
+        q.push_back((256u + 1u) | ((256u + 2u) << 9));
+        q.push_back(0xD4000000u | (0x101u << 16) | 3u);
+        q.push_back((256u + 1u) | ((256u + 2u) << 9) | (10u << 18));
+        q.push_back(0xD4000000u | (0x101u << 16) | 4u);
+        q.push_back((256u + 1u) | ((256u + 2u) << 9) | (20u << 18));
+        q.push_back(0xD4000000u | (0x108u << 16) | 5u);
+        q.push_back((256u + 3u) | ((256u + 4u) << 9));
+        q.push_back(kEndOfProgramWord);
+        const std::vector<std::uint8_t> c = bytes_of(q);
+        const DecodedShader d = decode_shader(c.data(), c.size(), ShaderStage::kCompute);
+        CHECK(d.ok && d.instructions.size() == 5);
+        const ProgramShape s = shape_of(d);
+        CHECK(register_set_text(s.scalar_inputs) == "s20-s21");
+        CHECK(register_set_text(s.vector_inputs) == "v1-v2");
+    }
+
     CHECK(std::string(resource_use_name(ResourceUse::kImage)) == "image");
     CHECK(std::string(resource_use_name(ResourceUse::kConstantBuffer)) == "constant buffer");
 
