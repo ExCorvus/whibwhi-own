@@ -4,6 +4,10 @@ This file records which insights were **ExCorvus's** and which implementation wo
 is honest. The project description is in [README.md](README.md); the required credit terms are in
 [NOTICE.md](NOTICE.md).
 
+**This file is a record of credit, not a list of rules.** The rules are in [AGENTS.md](AGENTS.md). Several items
+below come from the earlier attempt ([docs/EARLY-HISTORY.md](docs/EARLY-HISTORY.md)), whose code is not in this
+repository; they are kept because the ideas were ExCorvus's, not because they describe what the shell does today.
+
 ## ExCorvus's ideas (the direction)
 
 1. **The watchdog ground truth.** The watchdog is a small parallel execution folded into the game executable,
@@ -33,9 +37,17 @@ is honest. The project description is in [README.md](README.md); the required cr
 
 ## The agent's work (the implementation)
 
+In this repository:
+
 - **Mapped the original executable** (read-only, our own tooling): memory start-up, the streaming page pool, the
-  page mapper (queue slot 31), the watchdog and its callees, the fatal-stop routine, the buddy allocator. See
-  `docs/exe-map/MAP.md` and `docs/exe-map/CHANNELS.md`.
+  page mapper (queue slot 31), the watchdog and its callees, the fatal-stop routine, the buddy allocator, the
+  graphics calls and the console libraries. See `docs/exe-map/` and `docs/console-libs/`.
+- **Wrote the shell** in `shell/`: the image reader and loader, thread-local storage for the game, the console
+  libraries, the tools and the tests. Helper agents mapped and wrote the first versions of the audio, file-read
+  and graphics-call pieces and the shader translator groundwork; the coordinating agent reviewed and merged them.
+
+In the earlier attempt (code not in this repository):
+
 - **Built the fault-trace diagnostic** (`FAULT_TRACE`): at a GPU fault it reports what the faulting address is
   (host state, GPU/CPU view, pool, alias, shadow tracker), which descriptor slots name it, and where the address is
   stored in process memory.
@@ -55,7 +67,7 @@ is honest. The project description is in [README.md](README.md); the required cr
 
 - The game keeps one linear pool of 64 KiB pages, shown in a CPU view and a GPU-only view; there is no
   address-conversion table — the page mapping is the whole mechanism.
-- The world-start crash was an untranslated write descriptor in committed placed RAM; the mesh draws were also
-  dropped.
+- In the earlier attempt, the crash at the start of the game world was a write through an address the GPU could
+  not reach; the mesh draws were also dropped.
 - Sparse `DEVICE_ADDRESS_CAPTURE_REPLAY` and off-thread (async) pipeline builds destabilised the AMD driver; they
   are banned. Ordinary (non-sparse) host imports are safe.
