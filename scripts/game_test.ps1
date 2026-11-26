@@ -63,6 +63,10 @@ $work = Join-Path $outFull 'work'
 New-Item -ItemType Directory -Force -Path $run, $work | Out-Null
 Get-ChildItem -LiteralPath $work -File | Remove-Item -Force
 Copy-Item (Join-Path $build '*.exe'), (Join-Path $build '*.dll') $work -Force
+# A library the installation ships itself is loaded from the installation, not from the shell's build: the shell's
+# file of the same name would win (host_libraries.cpp loads from beside boot_image.exe first).
+Get-ChildItem -LiteralPath $work -File | Where-Object { Test-Path -LiteralPath (Join-Path $Game $_.Name) } |
+    ForEach-Object { Write-Host "the installation ships $($_.Name) itself - the shell's file is left out"; Remove-Item -LiteralPath $_.FullName -Force }
 $buildHash = Get-BuildHash $work
 $commit = (git -C $repo rev-parse --short HEAD).Trim()
 $dirty = @(git -C $repo status --porcelain -- shell scripts).Count
