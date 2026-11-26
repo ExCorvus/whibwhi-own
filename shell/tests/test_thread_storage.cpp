@@ -236,6 +236,17 @@ static void exercise(const Image& image, bool expect_moved) {
     for (std::uint32_t i = 0; i < kZeroFill; ++i) zero_ok = zero_ok && block[kTemplateBytes + i] == 0;
     CHECK(zero_ok);
 
+    // Entry 0 of the per-thread storage array is redirected to the zeroed upper half of the block (the console
+    // gives the game index 0 and parts of the image read entry 0 directly).
+    {
+        void** blocks = reinterpret_cast<void**>(__readgsqword(0x58));
+        CHECK(blocks[0] == block + WHIWHI_THREAD_BLOCK_BYTES / 2);
+        bool upper_zero = true;
+        for (std::uint32_t i = WHIWHI_THREAD_BLOCK_BYTES / 2; i < WHIWHI_THREAD_BLOCK_BYTES; ++i)
+            upper_zero = upper_zero && block[i] == 0;
+        CHECK(upper_zero);
+    }
+
     const Reader reader = reinterpret_cast<Reader>(loaded.base + kReaderRva);
     CHECK(reader() == template_value());
 
