@@ -51,11 +51,11 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   program and tables it reads, and it agrees with what the containers declare. The root signature the game
   names in a request gives only the order and kind of the parameters: one root signature is named for many
   shaders (16 layouts for 926 pairs), so what a table holds has to be taken from each shader's own module.
-  A translator from that hardware code is the way to a picture. Its first form exists (boot b118): a pass
-  that writes a PC shader for a pixel or vertex program. It writes 281 of 505 pixel and 129 of 227 vertex
-  programs of a run and refuses the rest with a reason; compute programs are not handled. What it writes has
-  been checked against a reference interpreter on made-up programs only and has not been given to the
-  graphics device (docs/SHADER-TRANSLATOR.md section 26). Nearly every request comes from the game's worker
+  A translator from that hardware code is the way to a picture. Its first form exists: a pass
+  that writes a PC shader for a pixel or vertex program. It writes 415 of 505 pixel and 224 of 227 vertex
+  programs of a run (boot b130) and refuses the rest with a reason; compute programs are not handled. What
+  it writes has been checked against a reference interpreter on made-up programs only and has not been given
+  to the graphics device (docs/SHADER-TRANSLATOR.md sections 26 and 27). Nearly every request comes from the game's worker
   threads (tens of thousands in the first seconds); three come from the thread that created the device.
   Details: docs/SHADER-TRANSLATOR.md sections 13, 15 and 16, docs/exe-map/SHADER-PATH.md sections 10 to 12.
 - **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
@@ -1285,5 +1285,51 @@ The game folder was unchanged after the run. 26 tests pass.
 - **Not established:** everything listed as "taken to be so" in docs/SHADER-TRANSLATOR.md section 26 - above
   all that the vertex call returns with the inputs in place, how pixel inputs are interpolated, and what v2
   and v3 hold.
+
+The game folder was unchanged after every run. 27 tests pass.
+
+## 2026-11-26 - 415 of 505 pixel and 224 of 227 vertex programs written; some runs end at the game's own watchdog (boots b119-b130; measured)
+
+**The pass that writes PC shaders** (docs/SHADER-TRANSLATOR.md section 27 has the tables):
+
+- 96 vertex programs read a constant buffer at a row number worked out at run time (measured: each declares
+  one constant buffer and reads through its descriptor with the element-number flag). Written as a PC
+  constant-buffer read with a run-time element. Inferred: one element is 16 bytes. Vertex programs written:
+  129 -> 224 of 227.
+- What the pass knows about a register now belongs to the instruction that last wrote it, worked out for
+  every place in the program. The game's pixel programs load a texture's descriptor over the very registers
+  that held the table's and the sampler heap's addresses; the old rule (a register written once in the whole
+  program) refused them. Pixel programs written: 281 -> 367.
+- New instructions: the plain multiply-accumulate, the two-word fused one, a byte of a word as a float, and
+  the compares that write the execution mask. Pixel programs written: 367 -> 415.
+- The pixel position: measured, the 68 pixel programs marked as reading the position's x and y read exactly
+  the vector registers v2 and v3 before writing them, and the 78 marked as reading none of it read nothing
+  past v1. The pass now provides v2 and v3 from the PC's position input. Those 68 programs are still not
+  written: 64 of them then read a texture at integer coordinates, which the pass does not carry yet.
+- Still refused in boot b130: 90 pixel programs (64 texel reads, 11 a register nothing known provides, 6 a move
+  into a special register, 4 one instruction, 2 + 2 descriptor cases, 1 interpolation move) and 3 vertex
+  programs (a parameter export nothing declares).
+- Still true: none of this has been given to the graphics device, and no picture is drawn.
+
+**Runs that end at the game's own watchdog.** Five runs in a row (b124 to b128) did not reach the usual end at
+the audio start-up. They ended with the game's own hang watchdog (docs/exe-map/MAP.md section 4.3): after 30
+seconds without a progress report from its frame loop the game writes to address 0 (image+0x2215c35). It is
+the first time a run of the shell ended there. The shell does nothing to that watchdog (rule 6) and did
+nothing here.
+
+- One of the five (b128) was the code as last pushed, so the day's changes are not the cause.
+- In those runs everything before the first frame took longer: the first frame was presented about ten seconds
+  later than in the run just before them (b123), one frame was presented, and the watchdog fired at about 38
+  seconds.
+- The shell's own counting of shaders is not the cause: measured in b130, it takes 1.4 seconds of the game's
+  threads' time in a whole run, and no single step ever took a quarter of a second.
+- Not the cause either, checked: the graphics driver restarting (Windows' log shows nothing new), the display
+  sleeping, failing file reads.
+- What was different is not established. Found on the way: every run so far had been started at a lowered
+  process priority, inherited from the terminal the tool was started in. Two runs started at normal priority
+  (b129, b130) reached the usual end.
+- What it means: on this PC the game's start-up under the shell is within about ten seconds of the game's own
+  30-second limit. A slower start - lower priority, a busier machine - and the game stops itself. Making the
+  shell's side of start-up faster is the remedy; the watchdog stays as it is.
 
 The game folder was unchanged after every run. 27 tests pass.
