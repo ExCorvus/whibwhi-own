@@ -26,7 +26,7 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   The audio device (AcpHalCreate) and the command channel (xapu) are not provided and answer "not provided".
   The silent audio host of boot b141 was withdrawn on 2026-11-26 (see the entry "what went wrong" at the end):
   it answered success for work that was not done. Boot b143 (after the withdrawal, normal priority, game folder unchanged):
-  AcpHalCreate is refused, the game presents 32 to 63 more frames, then stops itself at its own breakpoint
+  AcpHalCreate is refused, the game keeps presenting (at least 32 frames in all), then stops itself at its own breakpoint
   (image+0x43ad94e) with the same unwind as boot b137; the process ended after 35 s.
 - **Textures:** a texture's bytes in the game's memory are in the shell's own untiled layout (xg_xs.h); the
   device tells the game that size when asked. A texture the game places at an address of its own memory is a
