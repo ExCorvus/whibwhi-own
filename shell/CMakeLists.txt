@@ -19,7 +19,8 @@ target_link_libraries(xmem PRIVATE onecore)
 # The console's graphics library: the three imported entry points answered on a PC (a wrapped real D3D12
 # device behind D3D12XboxCreateDevice).
 add_library(d3d12_xs SHARED d3d12_xs.cpp inflate.cpp shader_container.cpp shader_isa.cpp shader_names.cpp
-                            shader_program.cpp shader_shape.cpp shader_walk.cpp shader_flow.cpp)
+                            shader_program.cpp shader_shape.cpp shader_walk.cpp shader_flow.cpp
+                            shader_emit_flow.cpp)
 target_compile_definitions(d3d12_xs PRIVATE WHIWHI_D3D12_XS_BUILD)
 target_link_libraries(d3d12_xs PRIVATE onecore)
 
@@ -61,9 +62,9 @@ target_link_libraries(xgameruntime PRIVATE onecore)
 # Shell core: image mapper, import table reader, image loader, host-library resolver, console imports, flat
 # hosting model.
 add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp inflate.cpp
-                               loader.cpp offline.cpp shader_container.cpp shader_flow.cpp shader_isa.cpp
-                               shader_meaning.cpp shader_names.cpp shader_program.cpp shader_shape.cpp
-                               shader_translate.cpp shader_walk.cpp spirv.cpp)
+                               loader.cpp offline.cpp shader_container.cpp shader_dxbc.cpp shader_emit_flow.cpp
+                               shader_flow.cpp shader_isa.cpp shader_meaning.cpp shader_names.cpp
+                               shader_program.cpp shader_shape.cpp shader_translate.cpp shader_walk.cpp spirv.cpp)
 target_include_directories(whiwhi_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(whiwhi_shell PUBLIC whiwhi_seat)
 
@@ -137,6 +138,11 @@ add_executable(test_shader_container tests/test_shader_container.cpp)
 target_link_libraries(test_shader_container PRIVATE whiwhi_shell)
 add_test(NAME shader_container COMMAND test_shader_container)
 
+# The writer for a DXBC container holding a shader-model-5.1 program; the system disassembler checks it.
+add_executable(test_shader_dxbc tests/test_shader_dxbc.cpp)
+target_link_libraries(test_shader_dxbc PRIVATE whiwhi_shell)
+add_test(NAME shader_dxbc COMMAND test_shader_dxbc)
+
 add_executable(test_shader_walk tests/test_shader_walk.cpp)
 target_link_libraries(test_shader_walk PRIVATE whiwhi_shell)
 add_test(NAME shader_walk COMMAND test_shader_walk)
@@ -159,6 +165,12 @@ add_test(NAME shader_program COMMAND test_shader_program)
 add_executable(test_shader_flow tests/test_shader_flow.cpp)
 target_link_libraries(test_shader_flow PRIVATE whiwhi_shell)
 add_test(NAME shader_flow COMMAND test_shader_flow)
+
+# Any control-flow graph as code a shader language can run: the same block order as the graph under the same
+# branch decisions, for hand-built shapes and 2,000 random graphs (no GPU, no game data).
+add_executable(test_shader_emit_flow tests/test_shader_emit_flow.cpp)
+target_link_libraries(test_shader_emit_flow PRIVATE whiwhi_shell)
+add_test(NAME shader_emit_flow COMMAND test_shader_emit_flow)
 
 # What the covered arithmetic, move, compare and bit instructions compute, on one hand-built lane.
 add_executable(test_shader_meaning tests/test_shader_meaning.cpp)
