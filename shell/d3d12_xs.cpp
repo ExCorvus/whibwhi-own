@@ -817,9 +817,21 @@ void __stdcall w_list_set_heaps(Wrap* self, unsigned int count, void* const* hea
 // (the serialized form the image hands to device slot 16, read with the PC's own deserializer) and passes a root
 // argument on only when the list's current root signature has that parameter and it is of that kind. It is also
 // the check on which list slot is which method: a call that sets a kind the parameter is not, is said.
+struct RootRange {
+    unsigned type = 0;      // D3D12_DESCRIPTOR_RANGE_TYPE: 0 shader resource, 1 unordered access, 2 constant buffer,
+                            // 3 sampler
+    unsigned count = 0;     // descriptors in the range (all ones = unbounded)
+    unsigned base = 0;      // first shader register
+    unsigned space = 0;
+    unsigned offset = 0;    // descriptors from the table's start (all ones = directly after the range before)
+};
 struct RootLayout {
     std::vector<unsigned char> type;  // D3D12_ROOT_PARAMETER_TYPE of each parameter
     std::vector<unsigned> constants;  // for a parameter that is a run of constants: how many 32-bit values
+    std::vector<unsigned> shader_register;        // for constants and addresses: the shader register
+    std::vector<std::vector<RootRange>> ranges;   // for a descriptor table: its ranges
+    std::vector<unsigned> static_samplers;        // shader register of each static sampler, in order
+    unsigned flags = 0;                           // D3D12_ROOT_SIGNATURE_FLAGS
 };
 SRWLOCK g_root_layouts_lock = SRWLOCK_INIT;
 std::map<const Wrap*, RootLayout> g_root_layouts;
@@ -858,12 +870,39 @@ bool read_root_layout(const void* blob, std::size_t bytes, RootLayout& layout) {
     const bool ok = reader->GetRootSignatureDescAtVersion(D3D_ROOT_SIGNATURE_VERSION_1_1, &desc) == 0 && desc &&
                     (desc->Desc_1_1.NumParameters == 0 || desc->Desc_1_1.pParameters);
     if (ok) {
+        layout.flags = static_cast<unsigned>(desc->Desc_1_1.Flags);
         for (unsigned i = 0; i < desc->Desc_1_1.NumParameters; ++i) {
             const D3D12_ROOT_PARAMETER1& parameter = desc->Desc_1_1.pParameters[i];
             layout.type.push_back(static_cast<unsigned char>(parameter.ParameterType));
             layout.constants.push_back(parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS
                                            ? parameter.Constants.Num32BitValues
                                            : 0);
+            std::vector<RootRange> ranges;
+            unsigned shader_register = 0;
+            if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+                for (unsigned r = 0; r < parameter.DescriptorTable.NumDescriptorRanges && r < 256 &&
+                                     parameter.DescriptorTable.pDescriptorRanges;
+                     ++r) {
+                    const D3D12_DESCRIPTOR_RANGE1& from = parameter.DescriptorTable.pDescriptorRanges[r];
+                    RootRange range;
+                    range.type = static_cast<unsigned>(from.RangeType);
+                    range.count = from.NumDescriptors;
+                    range.base = from.BaseShaderRegister;
+                    range.space = from.RegisterSpace;
+                    range.offset = from.OffsetInDescriptorsFromTableStart;
+                    ranges.push_back(range);
+                }
+            } else if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+                shader_register = parameter.Constants.ShaderRegister;
+            } else {
+                shader_register = parameter.Descriptor.ShaderRegister;
+            }
+            layout.shader_register.push_back(shader_register);
+            layout.ranges.push_back(std::move(ranges));
+        }
+        for (unsigned i = 0; i < desc->Desc_1_1.NumStaticSamplers && i < 4096 && desc->Desc_1_1.pStaticSamplers;
+             ++i) {
+            layout.static_samplers.push_back(desc->Desc_1_1.pStaticSamplers[i].ShaderRegister);
         }
     }
     reader->Release();
@@ -2631,9 +2670,22 @@ void census_programs_in(const void* description, std::size_t bytes) {
 // unpacked is kept or written. (Two earlier readings of these blocks were wrong and are corrected by this
 // count: a walk started in the zero words before the code, or at the header itself, also "lands", because
 // those words happen to read as one-word instructions.)
+// A number for a run of bytes (FNV-1a, 64 bits): the same bytes give the same number. A container named by one
+// of the image's worker threads sits at an address that is used again for the next shader (measured: the
+// addresses lie 1 MiB apart, one per thread), so a container is told apart by its bytes, never by its address.
+// (Counts made before boot b105 told containers apart by address and so looked at far fewer of them.)
+std::uint64_t content_key(const void* data, std::size_t size) {
+    const std::uint8_t* bytes = static_cast<const std::uint8_t*>(data);
+    std::uint64_t key = 0xCBF29CE484222325ull;
+    for (std::size_t i = 0; i < size; ++i) {
+        key = (key ^ bytes[i]) * 0x100000001B3ull;
+    }
+    return key;
+}
+
 struct PackedCensus {
     SRWLOCK lock = SRWLOCK_INIT;
-    std::set<std::uintptr_t> seen;  // containers looked at, by address
+    std::set<std::uint64_t> seen;  // containers looked at, by their bytes (content_key)
     unsigned long long containers = 0, unpacked = 0, none = 0, refused = 0;
     unsigned long long packed_bytes = 0, unpacked_bytes = 0;
     unsigned long long modules = 0;        // unpacked blocks that start with 'FSSM'
@@ -2656,6 +2708,20 @@ struct PackedCensus {
     std::map<std::string, unsigned long long> exports;      // "<kind>: kinds of export target"
     std::map<std::string, unsigned long long> origins;      // "<kind>: <use>: <where its descriptor comes from>"
     std::map<std::string, unsigned long long> tables;       // "<kind>: <a statement about the module's two tables>"
+    std::map<std::string, unsigned long long> opening;      // "<kind>: <a statement about how the program begins>"
+    std::map<std::string, unsigned long long> binding;      // "<kind>: <the first table against a root signature>"
+    // The tables of each container looked at, kept so that a pipeline request naming the container together with
+    // a root signature can be compared with that root signature (numbers the shell derived, not the block).
+    struct Kept {
+        unsigned kind = 0;  // the kind of shader
+        whiwhi::shell::ModuleTables tables;
+    };
+    std::map<std::uint64_t, Kept> kept;                       // by the container's bytes (content_key)
+    std::set<std::pair<std::uint64_t, std::uint64_t>> pairs;  // (root signature layout, container) compared so far
+    unsigned long long pairs_compared = 0;
+    unsigned long long named = 0;                             // containers named by requests, repeats included
+    // For each root signature layout: the different first tables (fixed samplers left out) it was named with.
+    std::map<std::uint64_t, std::set<std::uint64_t>> tables_of_layout;
 };
 PackedCensus g_packed;
 
@@ -2713,6 +2779,16 @@ void log_packed_census(const char* when) {
     const auto exports = c.exports;
     const auto origins = c.origins;
     const auto tables = c.tables;
+    const auto opening = c.opening;
+    const auto binding = c.binding;
+    const unsigned long long pairs_compared = c.pairs_compared;
+    unsigned long long layouts = 0, layouts_shared = 0, most_tables = 0, tables_in_all = 0;
+    for (const auto& item : c.tables_of_layout) {
+        ++layouts;
+        layouts_shared += item.second.size() > 1;
+        tables_in_all += item.second.size();
+        most_tables = item.second.size() > most_tables ? item.second.size() : most_tables;
+    }
     ReleaseSRWLockShared(&g_packed.lock);
     if (!containers) {
         return;
@@ -2737,6 +2813,16 @@ void log_packed_census(const char* when) {
     log_packed_counted("exports", exports, 16);
     log_packed_counted("descriptor origin", origins, 48);
     log_packed_counted("tables", tables, 200);
+    log_packed_counted("how programs begin", opening, 80);
+    logf("packed programs (%s): %llu distinct pair(s) of a root signature and a container were named together by "
+         "pipeline requests and compared\n",
+         when, pairs_compared);
+    logf("packed programs (%s): those pairs name %llu different root signature layout(s) (told apart by their "
+         "parameters as the shell read them); %llu of them were named with more than one first table (fixed samplers "
+         "left out); one layout was named with up to %llu different first tables; %llu (layout, first table) "
+         "combinations in all\n",
+         when, layouts, layouts_shared, most_tables, tables_in_all);
+    log_packed_counted("first table against the root signature", binding, 120);
 }
 
 // What the two tables after a module's code say (shader_program.hpp), checked against what the program does
@@ -2913,10 +2999,618 @@ void table_statements(const std::uint8_t* container, std::uint32_t bytes, const 
                   register_set_text(unnamed));
 }
 
-void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
+// How a module's program begins, and what it does with the registers no table entry names. A few listings read
+// by hand suggested each of these; here every module is asked, and the answers are counted (numbers only):
+//   - a program begins with no-operations that carry a constant word (an identification, not code), and whether
+//     those words are words of the container's 'HASH' part;
+//   - a pixel program moves one scalar register into the register the interpolation instructions read, and
+//     whether that is the register right after the last root parameter of the first table;
+//   - a vertex program calls through the address in s4 (s_swappc_b64 s4, s4);
+//   - a compute program reads s5, s6, s7 before writing them;
+//   - a sampling instruction whose four sampler registers were each last written by a move of a constant (the
+//     form a fixed sampler was seen to take), against whether the first table has fixed-sampler entries.
+// "Last written" is taken in stored order, like the shape pass: a write on a path that is skipped still counts.
+void opening_statements(const std::uint8_t* container, std::uint32_t bytes,
+                        const whiwhi::shell::DecodedShader& decoded, const whiwhi::shell::ModuleTables& tables,
+                        unsigned kind, const whiwhi::shell::ProgramShape& shape, std::vector<std::string>& say) {
+    using namespace whiwhi::shell;
+    char text[200];
+    const std::vector<Instruction>& code = decoded.instructions;
+
+    // The no-operations at the start.
+    std::size_t leading = 0;
+    while (leading < code.size() && code[leading].format == WalkFormat::kVop3 && code[leading].opcode == 384 &&
+           code[leading].has_constant_word) {
+        ++leading;
+    }
+    std::snprintf(text, sizeof(text), "begins with %zu no-operation(s) that carry a constant word",
+                  leading > 4 ? static_cast<std::size_t>(5) : leading);
+    say.push_back(leading > 4 ? "begins with more than four no-operations that carry a constant word" : text);
+    if (leading == 2) {
+        const ShaderContainer parts = read_shader_container(container, bytes);
+        const ShaderChunk* hash = nullptr;
+        for (const ShaderChunk& chunk : parts.chunks) {
+            if (chunk.fourcc == 0x48534148u) {  // 'HASH'
+                hash = &chunk;
+            }
+        }
+        if (!parts.ok() || !hash || hash->size < 20) {
+            say.push_back("the container has no 'HASH' part of 20 bytes to compare the two constant words with");
+        } else {
+            std::uint32_t words[5];
+            std::memcpy(words, container + hash->offset + 8, sizeof(words));
+            int first = 0, second = 0;  // which word of the part (counted from 1) each constant word is
+            for (int i = 4; i >= 0; --i) {
+                if (words[i] == code[0].constant_word) first = i + 1;
+                if (words[i] == code[1].constant_word) second = i + 1;
+            }
+            if (first && second) {
+                std::snprintf(text, sizeof(text),
+                              "the two constant words are words %d and %d of the container's 'HASH' part", first,
+                              second);
+            } else {
+                std::snprintf(text, sizeof(text), "the two constant words are NOT both words of the 'HASH' part");
+            }
+            say.push_back(text);
+        }
+    }
+    std::size_t other_nops = 0;
+    for (std::size_t i = leading; i < code.size(); ++i) {
+        other_nops += code[i].format == WalkFormat::kVop3 && code[i].opcode == 384;
+    }
+    say.push_back(other_nops ? "has that no-operation again after the start" : "has that no-operation only at the start");
+
+    // The register right after the last root parameter, by the first table.
+    unsigned after_last = kind == 5 ? 4 : 8;
+    bool any_parameter = false;
+    bool fixed_entries = false;
+    if (tables.found) {
+        for (const ModuleLayoutEntry& entry : tables.layout) {
+            if (entry.kind == 4) {
+                fixed_entries = true;
+                continue;
+            }
+            any_parameter = true;
+            const unsigned end = entry.scalar_register + (entry.count ? entry.count : 1);
+            after_last = end > after_last ? end : after_last;
+        }
+    }
+
+    if (kind == 0) {  // pixel
+        int moves = 0;
+        unsigned from = 0;
+        bool plain = false;
+        for (const Instruction& i : code) {
+            if (i.format == WalkFormat::kSop1 && i.opcode == 3 && i.has_destination &&
+                i.dst.kind == OperandKind::kSpecialRegister && i.dst.index == 124) {
+                ++moves;
+                if (moves == 1) {
+                    plain = i.src[0].kind == OperandKind::kSgpr;
+                    from = i.src[0].index;
+                }
+            }
+        }
+        if (moves == 0) {
+            say.push_back(shape.interpolations ? "interpolates, but never moves a register into the interpolation "
+                                                 "register"
+                                               : "does not interpolate and moves nothing into the interpolation "
+                                                 "register");
+        } else if (!plain) {
+            say.push_back("moves something that is not a plain scalar register into the interpolation register");
+        } else {
+            std::snprintf(text, sizeof(text), "moves a scalar register into the interpolation register (%s): %s",
+                          moves == 1 ? "once" : "more than once",
+                          !tables.found ? "the tables were not read"
+                          : from == after_last ? (any_parameter ? "it is the register right after the last root "
+                                                                  "parameter"
+                                                                : "it is s8, and the first table names no parameter")
+                                               : "it is NOT the register right after the last root parameter");
+            say.push_back(text);
+        }
+    } else if (kind == 1) {  // vertex
+        int calls = 0, through_s4 = 0;
+        std::size_t first_at = 0;
+        for (std::size_t n = 0; n < code.size(); ++n) {
+            const Instruction& i = code[n];
+            if (i.format == WalkFormat::kSop1 && i.opcode == 33) {
+                if (calls++ == 0) {
+                    first_at = n;
+                }
+                through_s4 += i.has_destination && i.dst.kind == OperandKind::kSgpr && i.dst.index == 4 &&
+                              i.src[0].kind == OperandKind::kSgpr && i.src[0].index == 4;
+            }
+        }
+        if (calls == 0) {
+            say.push_back("has no call through a register");
+        } else {
+            std::snprintf(text, sizeof(text), "has %s call(s) through a register, %s; the first is %s",
+                          calls == 1 ? "one" : "several", through_s4 == calls ? "all through s4" : "NOT all through s4",
+                          first_at <= leading + 2 ? "within two instructions of the start" : "later in the program");
+            say.push_back(text);
+        }
+    } else if (kind == 5) {  // compute
+        // The registers right after the last one the first table names (s5, s6, s7 when there is one table in s4).
+        const auto reads = [&shape](unsigned r) { return r < 128 && shape.scalar_inputs[r] ? "yes" : "no"; };
+        std::snprintf(text, sizeof(text),
+                      "reads before writing the three registers right after the last one the first table names: %s, "
+                      "%s, %s%s",
+                      reads(after_last), reads(after_last + 1), reads(after_last + 2),
+                      !tables.found ? " (the tables were not read)" : "");
+        say.push_back(text);
+        std::bitset<128> beyond = shape.scalar_inputs;
+        for (unsigned r = 0; r < after_last + 3 && r < 128; ++r) {
+            beyond[r] = false;
+        }
+        std::bitset<128> below = shape.scalar_inputs;
+        for (unsigned r = 4; r < 128; ++r) {
+            below[r] = false;
+        }
+        if (beyond.any() || below.any()) {
+            say.push_back("also reads before writing: below s4 " + register_set_text(below) + ", beyond those three " +
+                          register_set_text(beyond));
+        }
+    }
+    if (kind != 1) {
+        bool other_call = false;
+        for (const Instruction& i : code) {
+            other_call = other_call || (i.format == WalkFormat::kSop1 && i.opcode == 33);
+        }
+        if (other_call) {
+            say.push_back("has a call through a register (not a vertex program)");
+        }
+    }
+
+    // Sampling instructions whose sampler registers were all last written by moves of constants.
+    unsigned long long samples = 0, from_constants = 0;
+    std::bitset<128> constant_now;  // scalar registers whose last write (stored order) is a move of a constant
+    for (const Instruction& i : code) {
+        if (i.format == WalkFormat::kMimg && i.opcode >= 32) {
+            ++samples;
+            const unsigned base = i.mimg.ssamp * 4;
+            bool all = base + 3 < 128;
+            for (unsigned r = base; all && r < base + 4; ++r) {
+                all = constant_now[r];
+            }
+            from_constants += all;
+        }
+        if (!i.has_destination || i.dst.kind != OperandKind::kSgpr || i.dst.index >= 128) {
+            continue;
+        }
+        const bool constant_move =
+            (i.format == WalkFormat::kSopk && i.opcode == 0) ||
+            (i.format == WalkFormat::kSop1 && i.opcode == 3 &&
+             (i.src[0].kind == OperandKind::kLiteral || i.src[0].kind == OperandKind::kInline));
+        constant_now[i.dst.index] = constant_move;
+        // A 64-bit scalar result also writes the next register.
+        const char* const name = instruction_name(i.format, i.opcode);
+        const std::size_t length = name ? std::strlen(name) : 0;
+        if (length > 2 && std::strcmp(name + length - 2, "64") == 0 && i.dst.index + 1 < 128) {
+            constant_now[i.dst.index + 1] = false;
+        }
+    }
+    if (samples) {
+        std::snprintf(text, sizeof(text), "samples: %s built from four moves of constants; the first table %s",
+                      from_constants == 0 ? "no sampler is" : from_constants == samples ? "every sampler is"
+                                                                                        : "some samplers are",
+                      !tables.found ? "was not read" : fixed_entries ? "has fixed-sampler entries"
+                                                                     : "has no fixed-sampler entry");
+        say.push_back(text);
+    }
+}
+
+// The first table of a module against a root signature the image names together with the module's container in
+// a pipeline request. What is checked (it was read off a handful of pairs first; here every pair is asked):
+//   - the root parameters take scalar registers in their order, starting at s8 (s4 in a compute program): a
+//     descriptor table one register (the table's address), a run of n constants n registers, a buffer address
+//     two;
+//   - a first-table entry of kind 3 (a resource descriptor) or kind 6 (a sampler descriptor) at a table's
+//     register names a shader register that lies in a range of that table, at the place the range gives it (a
+//     resource descriptor takes 8 words, a sampler descriptor 4), and carries the parameter's number in the
+//     second byte of its last word; kind 0 is a run of constants and kind 1 a buffer address, with the shader
+//     register the root signature gives, the count word equal to the registers taken, and the parameter's number
+//     likewise;
+//   - after the last parameter's registers come the descriptor heaps when the root signature says shaders index
+//     them directly: kind 5 the resource heap (flag 0x400), kind 6 at such a register the sampler heap (flag
+//     0x800);
+//   - kind 4 is a static sampler: the second byte of its last word is the sampler's number in the root
+//     signature's list, and its shader register is that sampler's.
+// Every statement is counted once per pair and per kind of shader; a statement holds no byte of the game.
+struct BindingTally {
+    unsigned entries = 0, agree = 0;
+    unsigned not_this_kind = 0;      // the parameter at that register is of another kind
+    unsigned outside_ranges = 0;     // a table entry whose shader register is in no range of the right kind
+    unsigned other_place = 0;        // ... in a range, but not at the place the range gives
+    unsigned other_register = 0;     // constants or an address with another shader register
+    unsigned other_count = 0;        // another count word than the registers the parameter takes
+    unsigned other_number = 0;       // the second byte of the last word is not the parameter's number
+};
+
+void say_tally(const char* what, const BindingTally& tally, std::vector<std::string>& say) {
+    if (tally.entries == 0) {
+        return;
+    }
+    if (tally.agree == tally.entries) {
+        say.push_back(std::string(what) + ": every entry agrees with the root signature");
+        return;
+    }
+    std::string text = std::string(what) + ": NOT every entry agrees with the root signature:";
+    if (tally.not_this_kind) text += " the parameter at its register is of another kind;";
+    if (tally.outside_ranges) text += " its shader register is in no range of the table;";
+    if (tally.other_place) text += " it is not at the place its range gives;";
+    if (tally.other_register) text += " another shader register;";
+    if (tally.other_count) text += " another count word;";
+    if (tally.other_number) text += " the second byte of its last word is not the parameter's number;";
+    say.push_back(text);
+}
+
+void binding_statements(const RootLayout& root, const whiwhi::shell::ModuleTables& tables, unsigned kind,
+                        std::vector<std::string>& say) {
+    using whiwhi::shell::ModuleLayoutEntry;
+    char text[256];
+    const unsigned first = kind == 5 ? 4 : 8;
+    std::vector<unsigned> starts, takes;
+    unsigned cursor = first;
+    for (std::size_t p = 0; p < root.type.size(); ++p) {
+        const unsigned type = root.type[p];
+        starts.push_back(cursor);
+        takes.push_back(type == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE    ? 1
+                        : type == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS ? root.constants[p]
+                                                                              : 2);
+        cursor += takes.back();
+    }
+    const unsigned after_parameters = cursor;
+    const bool resources_indexed = (root.flags & 0x400u) != 0;
+    const bool samplers_indexed = (root.flags & 0x800u) != 0;
+
+    BindingTally in_tables, constants, addresses;
+    std::vector<unsigned> entries_of(root.type.size(), 0);
+    unsigned strays = 0, fixed = 0, fixed_right = 0;
+    std::vector<unsigned> resource_heaps, sampler_heaps;  // the scalar registers of the heap entries
+    for (const ModuleLayoutEntry& entry : tables.layout) {
+        if (entry.kind == 4) {
+            ++fixed;
+            fixed_right += entry.fixed_index < root.static_samplers.size() &&
+                           root.static_samplers[entry.fixed_index] == entry.shader_register;
+            continue;
+        }
+        if (entry.kind == 5) {
+            resource_heaps.push_back(entry.scalar_register);
+            continue;
+        }
+        std::size_t p = 0;
+        while (p < starts.size() && starts[p] != entry.scalar_register) {
+            ++p;
+        }
+        if (p == starts.size()) {
+            if (entry.kind == 6 && entry.scalar_register >= after_parameters) {
+                sampler_heaps.push_back(entry.scalar_register);
+            } else {
+                ++strays;
+            }
+            continue;
+        }
+        ++entries_of[p];
+        const unsigned type = root.type[p];
+        if (entry.kind == 3 || entry.kind == 6) {
+            ++in_tables.entries;
+            if (type != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+                ++in_tables.not_this_kind;
+                continue;
+            }
+            const unsigned words_each = entry.kind == 6 ? 4 : 8;
+            bool in_range = false, at_place = false;
+            unsigned long long running = 0;
+            for (const RootRange& range : root.ranges[p]) {
+                const unsigned long long start = range.offset == 0xFFFFFFFFu ? running : range.offset;
+                running = start + (range.count == 0xFFFFFFFFu ? 0 : range.count);
+                if ((range.type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER) != (entry.kind == 6)) {
+                    continue;
+                }
+                if (entry.shader_register < range.base ||
+                    (range.count != 0xFFFFFFFFu && entry.shader_register - range.base >= range.count)) {
+                    continue;
+                }
+                in_range = true;
+                at_place =
+                    at_place || (start + (entry.shader_register - range.base)) * words_each == entry.offset_words;
+            }
+            const bool count_ok = entry.count == 1, number_ok = entry.fixed_index == p;
+            in_tables.outside_ranges += !in_range;
+            in_tables.other_place += in_range && !at_place;
+            in_tables.other_count += !count_ok;
+            in_tables.other_number += !number_ok;
+            in_tables.agree += in_range && at_place && count_ok && number_ok;
+        } else {
+            const bool is_constants = entry.kind == 0;
+            BindingTally& tally = is_constants ? constants : addresses;
+            ++tally.entries;
+            const bool kind_ok = is_constants ? type == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS
+                                              : (type == D3D12_ROOT_PARAMETER_TYPE_CBV ||
+                                                 type == D3D12_ROOT_PARAMETER_TYPE_SRV ||
+                                                 type == D3D12_ROOT_PARAMETER_TYPE_UAV);
+            if (!kind_ok) {
+                ++tally.not_this_kind;
+                continue;
+            }
+            const bool register_ok = entry.shader_register == root.shader_register[p];
+            const bool count_ok = entry.count == takes[p], number_ok = entry.fixed_index == p;
+            tally.other_register += !register_ok;
+            tally.other_count += !count_ok;
+            tally.other_number += !number_ok;
+            tally.agree += register_ok && count_ok && number_ok;
+        }
+    }
+    say_tally("entries for descriptors in tables", in_tables, say);
+    say_tally("entries for runs of constants", constants, say);
+    say_tally("entries for buffer addresses", addresses, say);
+    say.push_back(strays ? "SOME entries sit at a register that starts no root parameter"
+                         : "no entry sits at a register that starts no root parameter");
+
+    // Does the first table list every root parameter, and every descriptor of a table's ranges?
+    bool every_parameter = true, table_fewer = false, table_more = false, table_open = false;
+    for (std::size_t p = 0; p < root.type.size(); ++p) {
+        every_parameter = every_parameter && entries_of[p] != 0;
+        if (root.type[p] != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            continue;
+        }
+        unsigned long long in_ranges = 0;
+        bool open = false;
+        for (const RootRange& range : root.ranges[p]) {
+            open = open || range.count == 0xFFFFFFFFu;
+            in_ranges += range.count == 0xFFFFFFFFu ? 0 : range.count;
+        }
+        table_open = table_open || open;
+        table_fewer = table_fewer || (!open && entries_of[p] < in_ranges);
+        table_more = table_more || (!open && entries_of[p] > in_ranges);
+    }
+    if (!root.type.empty()) {
+        say.push_back(every_parameter ? "every root parameter has an entry in the first table"
+                                      : "a root parameter has NO entry in the first table");
+        say.push_back(table_more    ? "a descriptor table has MORE entries than its ranges have descriptors"
+                      : table_fewer ? "a descriptor table has fewer entries than its ranges have descriptors"
+                      : table_open  ? "a descriptor table has a range with no end"
+                                    : "every descriptor table has as many entries as its ranges have descriptors");
+    }
+
+    // The heaps after the parameters.
+    std::snprintf(text, sizeof(text),
+                  "resource heap: the root signature %s that shaders index it directly; the first table has %s kind 5 "
+                  "entr%s",
+                  resources_indexed ? "says" : "does not say",
+                  resource_heaps.empty() ? "no" : resource_heaps.size() == 1 ? "one" : "several",
+                  resource_heaps.size() == 1 ? "y" : "ies");
+    if (resources_indexed || !resource_heaps.empty()) {
+        say.push_back(text);
+    }
+    std::snprintf(text, sizeof(text),
+                  "sampler heap: the root signature %s that shaders index it directly; the first table has %s kind 6 "
+                  "entr%s after the parameters",
+                  samplers_indexed ? "says" : "does not say",
+                  sampler_heaps.empty() ? "no" : sampler_heaps.size() == 1 ? "one" : "several",
+                  sampler_heaps.size() == 1 ? "y" : "ies");
+    if (samplers_indexed || !sampler_heaps.empty()) {
+        say.push_back(text);
+    }
+    if (!resource_heaps.empty() || !sampler_heaps.empty()) {
+        // Which registers the heaps take, counted from the first register after the parameters.
+        std::string where;
+        for (const unsigned at : resource_heaps) {
+            std::snprintf(text, sizeof(text), " resource heap at +%d", static_cast<int>(at) - static_cast<int>(after_parameters));
+            where += text;
+        }
+        for (const unsigned at : sampler_heaps) {
+            std::snprintf(text, sizeof(text), " sampler heap at +%d", static_cast<int>(at) - static_cast<int>(after_parameters));
+            where += text;
+        }
+        say.push_back("counted from the first register after the parameters:" + where);
+    }
+
+    if (fixed || !root.static_samplers.empty()) {
+        std::snprintf(text, sizeof(text),
+                      "static samplers: the first table has %s fixed-sampler entries %s the root signature has static "
+                      "samplers; %s",
+                      fixed == root.static_samplers.size() ? "as many" : fixed < root.static_samplers.size() ? "fewer"
+                                                                                                              : "MORE",
+                      fixed == root.static_samplers.size() ? "as" : "than",
+                      fixed == 0 ? "-" : fixed_right == fixed ? "each entry's number names the static sampler with "
+                                                                "its register"
+                                                              : "an entry's number does NOT name the static sampler "
+                                                                "with its register");
+        say.push_back(text);
+    }
+}
+
+// A number for a root signature's layout as the shell read it (two root signatures with the same parameters get
+// the same number; the image makes and releases them constantly, so the object's address says nothing).
+std::uint64_t layout_key(const RootLayout& root) {
+    std::vector<std::uint32_t> flat;
+    flat.push_back(root.flags);
+    for (std::size_t p = 0; p < root.type.size(); ++p) {
+        flat.push_back(0xA0000000u | root.type[p]);
+        flat.push_back(root.constants[p]);
+        flat.push_back(root.shader_register[p]);
+        for (const RootRange& range : root.ranges[p]) {
+            flat.push_back(range.type);
+            flat.push_back(range.count);
+            flat.push_back(range.base);
+            flat.push_back(range.space);
+            flat.push_back(range.offset);
+        }
+    }
+    flat.push_back(0xB0000000u);
+    flat.insert(flat.end(), root.static_samplers.begin(), root.static_samplers.end());
+    return content_key(flat.data(), flat.size() * 4);
+}
+
+// Called for a pipeline request that names a root signature of this library and a shader container together.
+// Reads nothing of the PC device and changes nothing: it only compares two things the shell already read.
+void compare_binding(const void* signature, const void* container, std::size_t bytes) {
+    if (!signature || !container || bytes < 0x20 || !can_read(container, 0x20) ||
+        kind_of(const_cast<void*>(signature)) != kRootSignature) {
+        return;
+    }
+    // The count of containers tells them apart by the bytes the container's own header says it has (the word at
+    // +0x18); the same bytes are taken here, so that both sides name a container by the same number.
+    std::uint32_t declared = 0;
+    std::memcpy(&declared, static_cast<const std::uint8_t*>(container) + 0x18, 4);
+    if (declared < 0x20 || declared > 0x4000000 || !can_read(container, declared)) {
+        return;
+    }
+    bytes = declared;
+    RootLayout root;
+    bool have_root = false;
+    AcquireSRWLockShared(&g_root_layouts_lock);
+    const auto layout = g_root_layouts.find(static_cast<const Wrap*>(signature));
+    if (layout != g_root_layouts.end()) {
+        root = layout->second;
+        have_root = true;
+    }
+    ReleaseSRWLockShared(&g_root_layouts_lock);
+    const std::pair<std::uint64_t, std::uint64_t> pair(have_root ? layout_key(root) : 0,
+                                                       content_key(container, bytes));
+    // A container the count has not looked at yet (the count finds containers by looking through a request for
+    // pointers on 4-byte boundaries, and so misses one that lies elsewhere) is looked at now.
+    census_packed_program(static_cast<const std::uint8_t*>(container), declared);
+    PackedCensus::Kept kept;
+    bool have_tables = false;
     AcquireSRWLockExclusive(&g_packed.lock);
-    const bool fresh = g_packed.seen.size() < 65536 &&
-                       g_packed.seen.insert(reinterpret_cast<std::uintptr_t>(container)).second;
+    const bool fresh = g_packed.pairs.size() < 262144 && g_packed.pairs.insert(pair).second;
+    if (fresh) {
+        const auto found = g_packed.kept.find(pair.second);
+        if (found != g_packed.kept.end()) {
+            kept = found->second;
+            have_tables = true;
+        }
+    }
+    if (fresh && !have_tables) {
+        // Another thread is still looking at this container: the pair is compared when it is named again.
+        g_packed.pairs.erase(pair);
+    }
+    if (fresh && have_tables && have_root && kept.tables.found && g_packed.tables_of_layout.size() < 65536) {
+        // How many different first tables one root signature layout is named with (the fixed samplers left out).
+        std::vector<std::uint32_t> flat;
+        for (const whiwhi::shell::ModuleLayoutEntry& entry : kept.tables.layout) {
+            if (entry.kind != 4) {
+                flat.insert(flat.end(), {entry.kind, entry.offset_words, entry.count, entry.shader_register, entry.last});
+            }
+        }
+        std::set<std::uint64_t>& seen_tables = g_packed.tables_of_layout[pair.first];
+        if (seen_tables.size() < 4096) {
+            seen_tables.insert(content_key(flat.data(), flat.size() * 4));
+        }
+    }
+    ReleaseSRWLockExclusive(&g_packed.lock);
+    if (!fresh || !have_tables) {
+        return;
+    }
+
+    std::vector<std::string> say;
+    const char* kind_name = "unread container";
+    {
+        kind_name = packed_kind_name(kept.kind);
+        if (!have_root) {
+            say.push_back("the root signature's parameters were not read, so nothing is compared");
+        } else if (!kept.tables.found) {
+            say.push_back("nothing is compared: " + kept.tables.reason.substr(0, 110));
+        } else {
+            say.push_back("compared");
+            binding_statements(root, kept.tables, kept.kind, say);
+            // Off unless WHIWHI_SHOW_STAGE_DATA=1: the two descriptions side by side, for the first pairs of each
+            // kind of shader and the first pairs in which something does not agree, so that a rule that does not
+            // hold can be worked out (the log stays on this machine). Long lists are cut.
+            bool disagrees = false;
+            for (const std::string& statement : say) {
+                disagrees = disagrees || statement.find("NOT") != std::string::npos ||
+                            statement.find("SOME") != std::string::npos ||
+                            statement.find("MORE") != std::string::npos;
+            }
+            static std::atomic<int> shown[16], shown_disagreeing[16];
+            if (private_diagnostics() && kept.kind < 16 &&
+                (shown[kept.kind]++ < 4 || (disagrees && shown_disagreeing[kept.kind]++ < 16))) {
+                std::string line;
+                char one[112];
+                for (std::size_t p = 0; p < root.type.size(); ++p) {
+                    if (root.type[p] == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+                        std::snprintf(one, sizeof(one), " table(%zu ranges){", root.ranges[p].size());
+                        line += one;
+                        std::size_t printed = 0;
+                        for (const RootRange& range : root.ranges[p]) {
+                            if (printed++ >= 10) {
+                                line += " ...";
+                                break;
+                            }
+                            std::snprintf(one, sizeof(one), " [type %u count %d base %u space %u at %d]", range.type,
+                                          static_cast<int>(range.count), range.base, range.space,
+                                          static_cast<int>(range.offset));
+                            line += one;
+                        }
+                        line += " }";
+                    } else if (root.type[p] == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+                        std::snprintf(one, sizeof(one), " constants(%u, register %u)", root.constants[p],
+                                      root.shader_register[p]);
+                        line += one;
+                    } else {
+                        std::snprintf(one, sizeof(one), " address(type %u, register %u)",
+                                      static_cast<unsigned>(root.type[p]), root.shader_register[p]);
+                        line += one;
+                    }
+                }
+                std::snprintf(one, sizeof(one), "; %zu static sampler(s) || first table (%zu entries, fixed ones "
+                                                "left out):",
+                              root.static_samplers.size(), kept.tables.layout.size());
+                line += one;
+                std::size_t printed = 0;
+                for (const whiwhi::shell::ModuleLayoutEntry& entry : kept.tables.layout) {
+                    if (entry.kind == 4) {
+                        continue;
+                    }
+                    if (printed++ >= 14) {
+                        line += " ...";
+                        break;
+                    }
+                    std::snprintf(one, sizeof(one), " {%u, %u, %u, %u, 0x%x}", entry.kind, entry.offset_words,
+                                  entry.count, entry.shader_register, entry.last);
+                    line += one;
+                }
+                line += " || second table:";
+                printed = 0;
+                for (const whiwhi::shell::ModuleResourceEntry& entry : kept.tables.resources) {
+                    if (printed++ >= 14) {
+                        line += " ...";
+                        break;
+                    }
+                    std::snprintf(one, sizeof(one), " {0x%x, %u, %u, %u, 0x%x}", entry.first, entry.offset_words,
+                                  entry.shader_register, entry.word3, entry.last);
+                    line += one;
+                }
+                std::string said;
+                for (const std::string& statement : say) {
+                    if (statement.find("NOT") != std::string::npos || statement.find("SOME") != std::string::npos ||
+                        statement.find("MORE") != std::string::npos) {
+                        said += " <" + statement.substr(0, 60) + ">";
+                    }
+                }
+                logf("pair (private): %s shader%s; root signature flags 0x%x:%s%s\n", kind_name,
+                     disagrees ? " (disagrees)" : "", root.flags, line.c_str(), said.c_str());
+            }
+        }
+    }
+    AcquireSRWLockExclusive(&g_packed.lock);
+    ++g_packed.pairs_compared;
+    for (const std::string& statement : say) {
+        const std::string key = std::string(kind_name) + ": " + statement;
+        if (g_packed.binding.size() < 512 || g_packed.binding.count(key)) {
+            ++g_packed.binding[key];
+        }
+    }
+    ReleaseSRWLockExclusive(&g_packed.lock);
+}
+
+void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
+    const std::uint64_t key = content_key(container, bytes);
+    AcquireSRWLockExclusive(&g_packed.lock);
+    ++g_packed.named;
+    const bool fresh = g_packed.seen.size() < 262144 && g_packed.seen.insert(key).second;
     ReleaseSRWLockExclusive(&g_packed.lock);
     if (!fresh) {
         return;
@@ -3015,10 +3709,11 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
     const char* const kind_name = packed_kind_name(kind);
     bool decoded_ok = false, same = false;
     whiwhi::shell::ProgramShape shape;
+    whiwhi::shell::DecodedShader decoded;
     if (lands) {
         const std::size_t program_words = first_end - code_word + 1;
-        const whiwhi::shell::DecodedShader decoded = whiwhi::shell::decode_shader(
-            block.data() + code_word * 4, program_words * 4, whiwhi::shell::ShaderStage::kUnknown);
+        decoded = whiwhi::shell::decode_shader(block.data() + code_word * 4, program_words * 4,
+                                               whiwhi::shell::ShaderStage::kUnknown);
         decoded_ok = decoded.ok;
         if (decoded.ok) {
             shape = whiwhi::shell::shape_of(decoded);
@@ -3028,9 +3723,12 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
         same = g_programs.word_sums.count(sum) != 0;
         ReleaseSRWLockShared(&g_programs.lock);
     }
-    std::vector<std::string> table_says;
+    std::vector<std::string> table_says, opening_says;
+    whiwhi::shell::ModuleTables kept_tables;
     if (module && lands && decoded_ok) {
         table_statements(container, bytes, block, found, shape, table_says);
+        kept_tables = whiwhi::shell::read_module_tables(block.data(), size, found);
+        opening_statements(container, bytes, decoded, kept_tables, kind, shape, opening_says);
     }
 
     char text[128];
@@ -3092,6 +3790,20 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
     for (const std::string& statement : table_says) {
         bounded(g_packed.tables, std::string(kind_name) + ": " + statement);
     }
+    for (const std::string& statement : opening_says) {
+        bounded(g_packed.opening, std::string(kind_name) + ": " + statement);
+    }
+    if (g_packed.kept.size() < 262144) {
+        PackedCensus::Kept& kept = g_packed.kept[key];
+        kept.kind = kind;
+        if (!(module && lands && decoded_ok)) {
+            kept_tables.found = false;
+            kept_tables.reason = !module ? "the block is not a module"
+                                 : !lands ? "the module's program was not found (" + not_found + ")"
+                                          : "the instruction reader refused the program";
+        }
+        kept.tables = std::move(kept_tables);
+    }
     const unsigned long long shown = g_packed.unpacked;
     ReleaseSRWLockExclusive(&g_packed.lock);
 
@@ -3117,9 +3829,35 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
     if (private_diagnostics() && lands && decoded_ok) {
         static SRWLOCK shown_lock = SRWLOCK_INIT;
         static std::map<unsigned, int> shown_kinds;
+        // The open points of the tables: a module with a fixed-sampler entry (kind 4), one with a kind 5 entry,
+        // and one of each kind of shader, get their instructions listed too (private: a listing is game code).
+        unsigned listing_class = 0;
+        if (module) {
+            const whiwhi::shell::ModuleTables tables = whiwhi::shell::read_module_tables(block.data(), size, found);
+            if (tables.found) {
+                for (const whiwhi::shell::ModuleLayoutEntry& entry : tables.layout) {
+                    if (entry.kind == 5) {
+                        listing_class = 0x500;
+                    } else if (entry.kind == 4 && listing_class == 0) {
+                        listing_class = 0x400;
+                    }
+                }
+            }
+        }
         AcquireSRWLockExclusive(&shown_lock);
-        const bool show = shown_kinds[(module ? 0x100u : 0u) | (kind & 0xff)]++ < 3;
+        bool show = shown_kinds[(module ? 0x100u : 0u) | (kind & 0xff)]++ < 3;
+        const bool listing = shape.instructions <= (listing_class == 0x500 ? 6000u : 400u) &&
+                             shown_kinds[0x10000u | listing_class | (kind & 0xff)]++ < 2;
+        show = show || listing;
         ReleaseSRWLockExclusive(&shown_lock);
+        if (listing) {
+            logf("packed program #%llu (private): listing of %zu instruction(s), %s shader, table class 0x%x\n", shown,
+                 decoded.instructions.size(), kind_name, listing_class);
+            for (const whiwhi::shell::Instruction& instruction : decoded.instructions) {
+                logf("packed program #%llu (private):   +0x%03x %s\n", shown, instruction.pc,
+                     whiwhi::shell::describe_instruction(instruction).c_str());
+            }
+        }
         if (show) {
             std::string line;
             for (const whiwhi::shell::ResourceReference& ref : shape.resources) {
@@ -3434,6 +4172,13 @@ HRESULT __stdcall w_device_slot62(Wrap* self, const void* desc, void* third, voi
     if (!out || !desc || !can_read(desc, sizeof(D3D12_COMPUTE_PIPELINE_STATE_DESC))) {
         return pipeline_not_taken(where, "the description or the result place cannot be read");
     }
+    {
+        // The root signature and the container are named together: what the container's module says about its
+        // registers is compared with that root signature (a count; nothing is changed).
+        D3D12_COMPUTE_PIPELINE_STATE_DESC named;
+        std::memcpy(&named, desc, sizeof(named));
+        compare_binding(named.pRootSignature, named.CS.pShaderBytecode, named.CS.BytecodeLength);
+    }
     if (third || fourth) {
         return pipeline_not_taken(where, "its third or fourth argument is not zero (they were zero at the measured "
                                          "call; what they mean is not known)");
@@ -3478,6 +4223,42 @@ HRESULT __stdcall w_device_pipeline_request(Wrap*, const void* desc, const GUID*
     return 0x80004001L;
 }
 
+// A pipeline stream names a root signature and shader containers together: what each container's module says
+// about its registers is compared with that root signature (compare_binding). Reads only; a stream that does not
+// walk by the public shapes is left alone.
+void compare_stream_binding(const std::uint8_t* stream, std::size_t size) {
+    void* signature = nullptr;
+    const void* containers[8] = {};
+    std::size_t sizes[8] = {};
+    int count = 0;
+    for (std::size_t at = 0; at + 8 <= size;) {
+        unsigned type = 0;
+        std::memcpy(&type, stream + at, 4);
+        std::size_t payload_at = 0, payload_bytes = 0, whole = 0;
+        if (!stream_subobject_shape(type, payload_at, payload_bytes, whole) || whole == 0 || at + whole > size) {
+            return;
+        }
+        const std::uint8_t* payload = stream + at + payload_at;
+        if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE) {
+            std::memcpy(&signature, payload, 8);
+        } else if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS || type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS ||
+                   type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS || type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS ||
+                   type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS || type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS ||
+                   type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS || type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS) {
+            D3D12_SHADER_BYTECODE code;
+            std::memcpy(&code, payload, sizeof(code));
+            if (code.pShaderBytecode && count < 8) {
+                sizes[count] = code.BytecodeLength;
+                containers[count++] = code.pShaderBytecode;
+            }
+        }
+        at += whole;
+    }
+    for (int i = 0; i < count; ++i) {
+        compare_binding(signature, containers[i], sizes[i]);
+    }
+}
+
 // Slot 86: ({stream size, stream}, identifier, out) - the public "pipeline state from a stream" argument list.
 HRESULT __stdcall w_device_slot86(Wrap* self, const void* desc, const GUID*, void** out, void*, void*, void*, void*,
                                   void*) {
@@ -3496,6 +4277,7 @@ HRESULT __stdcall w_device_slot86(Wrap* self, const void* desc, const GUID*, voi
         return pipeline_not_taken(where, "the stream or the result place cannot be read, or its size is not a "
                                          "multiple of eight below 64 KiB");
     }
+    compare_stream_binding(stream, static_cast<std::size_t>(size));
     if (!on_device_thread()) {
         return pipeline_other_thread(where);
     }
