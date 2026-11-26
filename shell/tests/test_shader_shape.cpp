@@ -199,6 +199,23 @@ int main() {
         CHECK(register_set_text(s.scalar_inputs) == "-");
     }
 
+    // The parameter move (interpolation opcode 2) reads no register: its source field is the selector. Here the
+    // selectors 2 and 0 must not make v2 or v0 inputs; the interpolation step after them (opcode 0) really
+    // reads v1.
+    {
+        std::vector<std::uint32_t> q;
+        q.push_back(vintrp(2, 6, 0, 0, 2));   // v6 = attribute 0, value selected by 2
+        q.push_back(vintrp(2, 7, 0, 1, 0));   // v7 = attribute 0, value selected by 0
+        q.push_back(vintrp(0, 8, 1, 0, 1));   // v8 = first interpolation step, read through v1
+        q.push_back(kEndOfProgramWord);
+        const std::vector<std::uint8_t> c = bytes_of(q);
+        const DecodedShader d = decode_shader(c.data(), c.size(), ShaderStage::kPixel);
+        CHECK(d.ok);
+        const ProgramShape s = shape_of(d);
+        CHECK(s.interpolations == 3);
+        CHECK(register_set_text(s.vector_inputs) == "v1");
+    }
+
     // A three-operand compare (opcode 6) of v1 and v2 writes its lane mask into the scalar pair s10, s11; its
     // third source field holds 0 and is not a source, so s0 is not an input. A select (0x101) then reads that
     // mask from its third field (both registers of the pair), and a second select reads the pair at s20,
