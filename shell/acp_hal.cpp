@@ -9,15 +9,8 @@
 //   - ApuIsVirtualAddressValid checks the range is really committed host memory; ApuMapVirtualAddress /
 //     ApuMapApuAddress are the identity map (valid below 4 GiB by construction of the heap; above it the map
 //     answers 0 and logs, because a truncated identity would be a lie).
-// The audio device (AcpHalCreate) is an object the image drives through four of its methods (section 3.1 of the
-// mapping): start (slot 0), stop (slot 1), command (slot 2) and release (slot 5). On a PC:
-//   - start opens the PC's default sound output (WASAPI, shared mode) and starts it; its answer is the PC's;
-//   - stop stops that output, release closes it and frees the object;
-//   - command: what the console's commands mean is in its driver, not in the image. Command 2 (magic 0xf0f0f0f0,
-//     sent once at start-up, whose answer the start-up checks) is accepted without being carried out: a rule-4
-//     exception ExCorvus granted on 2026-11-26, said on stderr at every call. Every other command is refused.
-// The image's wait after start-up is on a status word it zeroes itself and only waits on while it is negative
-// (fn 0x43aec40), so nothing has to be written for it.
+// The one thing a PC cannot provide is the audio device itself: AcpHalCreate still answers E_NOTIMPL and writes
+// no handle, because the image waits on an async status word only the console's driver writes.
 // WHIWHI_ACP_TRACE=1 logs every call, not only the first of each.
 #include "acp_hal.h"
 
@@ -26,8 +19,6 @@
 #define _WIN32_WINNT 0x0A00
 #define NTDDI_VERSION 0x0A000007  // NTDDI_WIN10_VB: MEMORY_ADDRESS_REQUIREMENTS / VirtualAlloc2
 #include <windows.h>
-#include <audioclient.h>
-#include <mmdeviceapi.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -75,128 +66,6 @@ struct ApuHeap {
 ApuHeap g_heap;
 void* g_shape_contexts = nullptr;
 
-long g_always = 0;  // for messages said at every call
-
-// ---- the audio device -------------------------------------------------------------------------------------
-struct AudioDevice {
-    void* const* vtable = nullptr;
-    IAudioClient* client = nullptr;
-    bool com_started = false;
-    bool running = false;
-};
-
-long __stdcall device_start(AudioDevice* self, unsigned first, unsigned second) {
-    static long once = 0;
-    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    self->com_started = SUCCEEDED(com);
-    IMMDeviceEnumerator* enumerator = nullptr;
-    IMMDevice* endpoint = nullptr;
-    WAVEFORMATEX* format = nullptr;
-    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
-                                  reinterpret_cast<void**>(&enumerator));
-    if (SUCCEEDED(hr)) {
-        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &endpoint);
-    }
-    if (SUCCEEDED(hr)) {
-        hr = endpoint->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&self->client));
-    }
-    if (SUCCEEDED(hr)) {
-        hr = self->client->GetMixFormat(&format);
-    }
-    if (SUCCEEDED(hr)) {
-        hr = self->client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 1000000 /* 100 ms */, 0, format, nullptr);
-    }
-    if (SUCCEEDED(hr)) {
-        hr = self->client->Start();
-    }
-    self->running = SUCCEEDED(hr);
-    report(once, true,
-           "audio device %p: start(%#x, %#x) - the PC's default sound output %s (0x%lx)%s%s", static_cast<void*>(self),
-           first, second, self->running ? "is open and started" : "could not be opened",
-           static_cast<unsigned long>(hr), format ? ", mix format " : "",
-           format ? (format->nChannels == 2 ? "2 channels" : "not 2 channels") : "");
-    if (format) {
-        CoTaskMemFree(format);
-    }
-    if (endpoint) {
-        endpoint->Release();
-    }
-    if (enumerator) {
-        enumerator->Release();
-    }
-    if (!self->running && self->client) {
-        self->client->Release();
-        self->client = nullptr;
-    }
-    return hr;
-}
-
-long __stdcall device_stop(AudioDevice* self) {
-    static long once = 0;
-    if (self->client && self->running) {
-        self->client->Stop();
-        self->running = false;
-    }
-    report(once, trace_enabled(), "audio device %p: stop - the sound output is stopped", static_cast<void*>(self));
-    return 0;
-}
-
-long __stdcall device_command(AudioDevice* self, unsigned opcode, unsigned magic, unsigned third, const void* block,
-                              unsigned last) {
-    unsigned block_word = 0;
-    if (block) {
-        std::memcpy(&block_word, block, 4);
-    }
-    if (opcode == 2 && magic == 0xf0f0f0f0u) {
-        report(g_always, true,
-               "audio device %p: command 2 (%#x, %#x, {%#x}, %u) ACCEPTED WITHOUT BEING CARRIED OUT - its meaning is in "
-               "the console's driver; rule-4 exception granted by ExCorvus on 2026-11-26",
-               static_cast<void*>(self), magic, third, block_word, last);
-        return 0;
-    }
-    static long count = 0;
-    const long n = InterlockedIncrement(&count);
-    if (trace_enabled() || n <= 8 || (n & (n - 1)) == 0) {
-        report(g_always, true,
-               "audio device %p: command %u (%#x, %#x, {%#x}, %u) - its meaning is not known, refused (E_NOTIMPL); "
-               "%ld refused so far",
-               static_cast<void*>(self), opcode, magic, third, block_word, last, n);
-    }
-    return WHIWHI_ACP_HAL_NOT_PROVIDED;
-}
-
-long __stdcall device_unused(AudioDevice* self) {
-    report(g_always, true, "audio device %p: a method the image was not seen to call was called; refused",
-           static_cast<void*>(self));
-    return WHIWHI_ACP_HAL_NOT_PROVIDED;
-}
-
-long __stdcall device_release(AudioDevice* self) {
-    static long once = 0;
-    if (self->client) {
-        if (self->running) {
-            self->client->Stop();
-        }
-        self->client->Release();
-    }
-    if (self->com_started) {
-        CoUninitialize();
-    }
-    report(once, trace_enabled(), "audio device %p: released, the sound output is closed", static_cast<void*>(self));
-    delete self;
-    return 0;
-}
-
-void* const* device_vtable() {
-    static void* const table[8] = {
-        reinterpret_cast<void*>(&device_start),   reinterpret_cast<void*>(&device_stop),
-        reinterpret_cast<void*>(&device_command), reinterpret_cast<void*>(&device_unused),
-        reinterpret_cast<void*>(&device_unused),  reinterpret_cast<void*>(&device_release),
-        reinterpret_cast<void*>(&device_unused),  reinterpret_cast<void*>(&device_unused),
-    };
-    return table;
-}
-
 } // namespace
 
 extern "C" {
@@ -228,15 +97,11 @@ long AcpHalAllocateShapeContexts(void* config) {
 
 long AcpHalCreate(void** handle) {
     static long once = 0;
-    if (!handle) {
-        return WHIWHI_ACP_HAL_NOT_PROVIDED;
-    }
-    AudioDevice* device = new AudioDevice;
-    device->vtable = device_vtable();
-    *handle = device;
-    report(once, trace_enabled(), "AcpHalCreate: audio device %p made; the sound output opens when the image starts it",
-           static_cast<void*>(device));
-    return 0;
+    report(once, trace_enabled(),
+           "AcpHalCreate(handle=%p): the audio device itself is not provided on a PC (the image then waits on an "
+           "async status only the console driver writes); answering E_NOTIMPL, no handle written",
+           static_cast<void*>(handle));
+    return WHIWHI_ACP_HAL_NOT_PROVIDED;
 }
 
 long AcpHalReleaseShapeContexts(void* config) {
