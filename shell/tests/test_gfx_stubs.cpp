@@ -78,7 +78,7 @@ int main() {
     CHECK(xgr != nullptr);
     if (xgr) {
         const char* names[] = {"InitializeApiImpl", "InitializeApiImplEx", "InitializeApiImplEx2", "QueryApiImpl",
-                               "UninitializeApiImpl"};
+                               "UninitializeApiImpl", "XErrorReport"};
         for (const char* n : names) {
             CHECK(GetProcAddress(xgr, n) != nullptr);
         }
