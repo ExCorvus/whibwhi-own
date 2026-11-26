@@ -60,6 +60,30 @@ so the image never writes records itself and every command arrives as a method c
 the same public call on the PC list. The fields the image writes without checking (`+0x140`, `+0x544`,
 `+0x554`) must exist in the object it is given.
 
+**What runs have shown since (boots b74-b80).** The shell's list is now built that way: the object it hands the
+image has 4 KiB that belong to the image, with position and end both zero, and at the end of a run it reports
+whether the image wrote anything into its objects (so far: nothing). The table above held wherever a run has
+reached it, with one addition: slot 32 is `SetDescriptorHeaps` (public 28). So console slots **32 to 52 are the
+public methods four places up**:
+
+| console slot | public method | seen in a run |
+|---|---|---|
+| 32 | `SetDescriptorHeaps` | yes: (2, array of two heaps) |
+| 33, 34 | `SetComputeRootSignature`, `SetGraphicsRootSignature` | 34 yes |
+| 35, 36 | the two root descriptor tables | 36 yes |
+| 37, 38 / 39, 40 | one root constant / root constants | no |
+| 41..46 | root constant-buffer, shader-resource and unordered-access views | 44 called with (0, an address in the image's memory): the shape of `SetGraphicsRootShaderResourceView` |
+| 47, 48 | `IASetIndexBuffer`, `IASetVertexBuffers` | 47 called with null, 48 with (0, 1, pointer): matching shapes |
+| 50 | `OMSetRenderTargets` | yes |
+| 51, 52 | `ClearDepthStencilView`, `ClearRenderTargetView` | 52 yes |
+
+So console slots **27 to 31** are five methods where the public list has one (`ExecuteBundle` at 27): four of
+them are console-only, and which of the five is `ExecuteBundle`, if any, is not known. The public methods 28 to
+48 are at 32 to 52, and two public methods are absent between console 53 and 60. Slots 41
+to 48 are not answered yet: they carry addresses in the image's memory. Slot 20 is called with the number 0x11,
+which is not a public topology. Slot 139 (start recording on an allocator) is answered with the PC list's
+`Reset`. The console-only slots called in runs and not provided: 70, 71, 72, 74, 75, 126, 131, 132, 142, 146.
+
 ---
 
 ## 1. What the object is: a recorder with a title-writable command stream (V)
