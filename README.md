@@ -23,16 +23,21 @@ shell/                       our runtime (C++17, MSVC)
                              the PC's
   hosting.hpp / hosting.cpp  flat hosting model — one GPU backing over the game's flat VA space,
                              uniform heap_base shift, real pages bound on demand
+  shader_isa.hpp / .cpp      reads a console (RDNA2-class) shader's instruction words
+  shader_translate.hpp/.cpp  on-demand console-shader -> SPIR-V translator, in-memory cache
+  spirv.hpp / spirv.cpp      our own small SPIR-V writer
   tools/list_imports.cpp     prints an image's imported libraries and function counts
   tools/describe_image.cpp   prints what an image asks of a loader (sections, relocations, thread-local storage)
   tools/connect_imports.cpp  loads an image without starting it and reports which imports connect
   tests/                     unit tests (hosting, image, imports, loader, thread storage, console imports,
-                             memory library; no game data)
+                             memory library, shader translator; no game data)
   CMakeLists.txt             build definition (whiwhi_shell + whiwhi_tls.dll + xmem.dll + tools + tests, CTest)
   build.cmd                  build + test helper
 docs/
   exe-map/MAP.md             outward map of the original exe: memory model, GPU-address channels
   exe-map/CHANNELS.md        every channel that hands a heap address to the GPU
+  exe-map/GRAPHICS-CALLS.md  what the image asks the console graphics libraries (measured)
+  SHADER-TRANSLATOR.md       the shader translation plan and the first code
   EARLY-HISTORY.md           note on the early git and the restart
   RENDERING-PIPELINE.md      rendering-pipeline map (placeholder)
 scripts/
