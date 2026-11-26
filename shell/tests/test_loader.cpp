@@ -209,6 +209,33 @@ int main() {
     CHECK(bare.unprovided && bare.unprovided->size() == 2);
     unload_image(bare);
 
+    // Counting the calls (the game test): each slot goes through a stub that counts and jumps on.
+    set_count_import_calls(true);
+    LoadedImage counted;
+    CHECK(load_image(image, resolve, counted, reason));
+    set_count_import_calls(false);
+    if (counted.base) {
+        CHECK(counted.counted.size() == 2 && counted.counted_connected.size() == 2 && counted.call_counts);
+        const auto tick = reinterpret_cast<DWORD(WINAPI*)()>(read64(counted.base + kSlotPresent));
+        CHECK(reinterpret_cast<void*>(tick) != reinterpret_cast<void*>(
+                                                  GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetTickCount")));
+        const DWORD before = GetTickCount();
+        const DWORD through = tick();
+        tick();
+        tick();
+        CHECK(through >= before && through - before < 10000);
+        std::size_t present = 2;
+        for (std::size_t i = 0; i < counted.counted.size(); ++i) {
+            if (counted.counted[i].function == "GetTickCount") {
+                present = i;
+            }
+        }
+        CHECK(present < 2 && counted.counted_connected[present]);
+        CHECK(present < 2 && counted.call_counts[2 * present] == 3);
+        CHECK(present < 2 && counted.call_counts[2 * (1 - present)] == 0);
+    }
+    unload_image(counted);
+
     if (failures == 0) {
         std::printf("loader: all checks passed\n");
         return 0;
