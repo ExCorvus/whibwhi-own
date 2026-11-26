@@ -48,6 +48,11 @@ What works today, and where a run currently stops, is in the **Current state** b
    treat what it reached as progress of this project.
 10. **Measure against the game file, not against how far a run gets.** What the executable itself imports, calls
     and checks is the reference. Say what was measured and what is a guess.
+11. **Every test of the shell runs on the game's own code, read fresh** (ExCorvus, 2026-11-26: "every test of the
+    shell needs to run on the game's own new code, otherwise we are gonna be looping forever"). A test that says
+    something about the shell takes its input from the user's game copy at the time it runs: the game's real
+    shaders, files and calls, read-only and in memory. Hand-made sample programs and earlier results are not proof
+    that something works. Rules 1, 2 and 5 still hold: nothing of the game is written to the repository or to disk.
 
 ## How work is done
 
@@ -77,4 +82,6 @@ What works today, and where a run currently stops, is in the **Current state** b
 shell\build.cmd
 ```
 
-Builds the shell, the console libraries and the tools, and runs the 27 tests. No game files and no GPU are needed.
+Builds the shell, the console libraries and the tools, and runs the 27 tests. No game files and no GPU are needed
+for them. They check pieces on hand-made sample programs and are not proof that the shell works with the game
+(rule 11): that is tested only on the game's own code, read from the user's copy when the test runs.
