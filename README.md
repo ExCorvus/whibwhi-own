@@ -46,7 +46,7 @@ The measurements behind each point are in [FINDINGS.md](FINDINGS.md) and [docs/e
 
 ## What the earlier attempt got wrong
 
-Before this shell there was an attempt built on top of another project's runtime (Leonida, by NotRexed). None of
+Before this weave there was an attempt built on top of another project's runtime (Leonida, by NotRexed). None of
 that code is here. The attempt failed, and the reasons are why this project is shaped the way it is. The mistakes
 described are our own.
 
@@ -74,7 +74,7 @@ the program file itself, not the length of a run, as the reference. The longer a
 
 Points 1, 2, 3 and 5 work far enough that the game starts, sets itself up, opens all its packages, creates its
 window and presents frames. **The window is black**: that is the game's cleared surface, because point 4 is
-unfinished. The shell reads 927 of the first 1,024 shaders of a run and can write a PC shader for 496 of 505
+unfinished. The weave reads 927 of the first 1,024 shaders of a run and can write a PC shader for 496 of 505
 pixel and all 227 vertex shaders, but none has been given to the graphics card yet, so every draw is held.
 The exact state is the "Current state" block at the top of [FINDINGS.md](FINDINGS.md).
 
@@ -90,7 +90,7 @@ current projects, so i think there is no way to circumvent a shell when porting 
 ## Files
 
 ```
-shell/                         the runtime (C++17, MSVC); shell/README.md describes every file
+weave/                         the runtime (C++17, MSVC); weave/README.md describes every file
   image, imports, loader       read the game's executable, place it in memory, connect its imports
   tls_seat, thread_block.h     thread-local storage for the loaded game
   host_libraries, console      decide which library answers each import
@@ -118,7 +118,7 @@ shell/                         the runtime (C++17, MSVC); shell/README.md descri
   tests/                       27 tests, made-up inputs only
   CMakeLists.txt, build.cmd    build definition and the build-and-test script
 docs/
-  BUILD-AND-RUN.md             how to build, test and run the shell yourself
+  BUILD-AND-RUN.md             how to build, test and run the weave yourself
   exe-map/MAP.md               what the executable does: memory model, page mapper, watchdog
   exe-map/CHANNELS.md          every way the game hands a memory address to the GPU
   exe-map/GRAPHICS-CALLS.md    what the executable asks of the console graphics libraries
@@ -144,11 +144,11 @@ LICENSE                        GPLv3-or-later
 ## Build
 
 ```
-shell\build.cmd
+weave\build.cmd
 ```
 
-Builds the shell, the console libraries and the tools, and runs the 27 tests. No game files and no GPU are needed.
-To run the shell against your own copy of the game, see [docs/BUILD-AND-RUN.md](docs/BUILD-AND-RUN.md).
+Builds the weave, the console libraries and the tools, and runs the 27 tests. No game files and no GPU are needed.
+To run the weave against your own copy of the game, see [docs/BUILD-AND-RUN.md](docs/BUILD-AND-RUN.md).
 
 ## License
 
