@@ -2,6 +2,8 @@
 #include "console.hpp"
 
 #include <cctype>
+#include <cstdint>
+#include <cstring>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -261,6 +263,109 @@ bool is_kernel(const std::string& name) {
 
 void set_hosted_image_base(void* base) {
     g_hosted_base = base;
+}
+
+void* find_image_export(void* base, const char* name) {
+    if (!base || !name) {
+        return nullptr;
+    }
+    const auto* b = static_cast<const unsigned char*>(base);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(b);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) {
+        return nullptr;
+    }
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(b + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+        nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT) {
+        return nullptr;
+    }
+    const unsigned long long size = nt->OptionalHeader.SizeOfImage;
+    const IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (!dir.VirtualAddress || dir.Size < sizeof(IMAGE_EXPORT_DIRECTORY) ||
+        static_cast<unsigned long long>(dir.VirtualAddress) + dir.Size > size) {
+        return nullptr;
+    }
+    const auto* exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(b + dir.VirtualAddress);
+    const unsigned long long names = exports->AddressOfNames, ordinals = exports->AddressOfNameOrdinals,
+                             functions = exports->AddressOfFunctions;
+    if (names + 4ull * exports->NumberOfNames > size || ordinals + 2ull * exports->NumberOfNames > size ||
+        functions + 4ull * exports->NumberOfFunctions > size) {
+        return nullptr;
+    }
+    const std::size_t length = std::strlen(name);
+    for (DWORD i = 0; i < exports->NumberOfNames; ++i) {
+        DWORD name_rva = 0;
+        std::memcpy(&name_rva, b + names + 4ull * i, 4);
+        if (name_rva + length + 1 > size || std::memcmp(b + name_rva, name, length + 1) != 0) {
+            continue;
+        }
+        WORD ordinal = 0;
+        std::memcpy(&ordinal, b + ordinals + 2ull * i, 2);
+        if (ordinal >= exports->NumberOfFunctions) {
+            return nullptr;
+        }
+        DWORD rva = 0;
+        std::memcpy(&rva, b + functions + 4ull * ordinal, 4);
+        const bool forwarded = rva >= dir.VirtualAddress && rva < dir.VirtualAddress + dir.Size;
+        if (!rva || rva >= size || forwarded) {
+            return nullptr;
+        }
+        return const_cast<unsigned char*>(b) + rva;
+    }
+    return nullptr;
+}
+
+namespace {
+
+using SetAllocationHooks = void (*)(void*, void*);
+
+SetAllocationHooks memory_library_hooks() {
+    const HMODULE xmem = GetModuleHandleA("xmem.dll");
+    return xmem ? reinterpret_cast<SetAllocationHooks>(GetProcAddress(xmem, "whiwhi_xmem_set_allocation_hooks"))
+                : nullptr;
+}
+
+} // namespace
+
+void connect_allocation_hooks() {
+    const SetAllocationHooks set = memory_library_hooks();
+    void* table = find_image_export(g_hosted_base, "__XMemAllocationHooks__");
+    if (!set || !table) {
+        return;
+    }
+    // The symbol is a table whose first two entries are the allocating and the freeing routine. Both have to be
+    // code inside the image, otherwise the table is not what it is taken for and nothing is connected.
+    const auto* b = static_cast<const unsigned char*>(g_hosted_base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+        b + reinterpret_cast<const IMAGE_DOS_HEADER*>(b)->e_lfanew);
+    const std::uintptr_t begin = reinterpret_cast<std::uintptr_t>(b);
+    const std::uintptr_t end = begin + nt->OptionalHeader.SizeOfImage;
+    std::uintptr_t routines[2] = {};
+    if (reinterpret_cast<std::uintptr_t>(table) + sizeof(routines) > end) {
+        return;
+    }
+    std::memcpy(routines, table, sizeof(routines));
+    char line[200];
+    int n = 0;
+    if (routines[0] < begin || routines[0] >= end || routines[1] < begin || routines[1] >= end) {
+        n = wsprintfA(line, "[console] the image exports __XMemAllocationHooks__, but its entries do not point "
+                            "into the image; not connected\r\n");
+    } else {
+        set(reinterpret_cast<void*>(routines[0]), reinterpret_cast<void*>(routines[1]));
+        n = wsprintfA(line,
+                      "[console] the image's allocation routines (image+0x%I64x, image+0x%I64x) now answer "
+                      "XMemAlloc and XMemFree\r\n",
+                      static_cast<unsigned long long>(routines[0] - begin),
+                      static_cast<unsigned long long>(routines[1] - begin));
+    }
+    DWORD written = 0;
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, static_cast<DWORD>(n), &written, nullptr);
+}
+
+void disconnect_allocation_hooks() {
+    if (const SetAllocationHooks set = memory_library_hooks()) {
+        set(nullptr, nullptr);
+    }
 }
 
 void set_package_root(const std::wstring& folder) {
