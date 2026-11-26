@@ -723,6 +723,11 @@ void test_sop2() {
         state.sgpr[2] = 0x0FF00FF0u;
         run(decode_one({sop2(14, 1, 2, 0)}), state);
         CHECK(state.sgpr[1] == 0x00F000F0u);
+        CHECK(state.scc);  // the result is not zero
+        state.sgpr[2] = 0x0F0F0F0Fu;
+        run(decode_one({sop2(14, 1, 2, 0)}), state);
+        CHECK(state.sgpr[1] == 0u);
+        CHECK(!state.scc);  // the result is zero
     }
     {  // s_and_b64 across the word boundary: s10/s11 & s12/s13
         MachineState state = fresh_state();
@@ -730,9 +735,16 @@ void test_sop2() {
         state.sgpr[11] = 0xFFFF0000u;
         state.sgpr[12] = 0xFFFF0000u;
         state.sgpr[13] = 0x0000FFFFu;
+        state.scc = true;
         run(decode_one({sop2(15, 4, 12, 10)}), state);
         CHECK(state.sgpr[4] == 0u);
         CHECK(state.sgpr[5] == 0u);
+        CHECK(!state.scc);  // a 64-bit result of zero clears the condition
+        state.sgpr[13] = 0x00010000u;  // now the high words share a bit
+        run(decode_one({sop2(15, 4, 12, 10)}), state);
+        CHECK(state.sgpr[4] == 0u);
+        CHECK(state.sgpr[5] == 0x00010000u);
+        CHECK(state.scc);  // a bit in the high word alone sets it
     }
     {  // s_andn2_b64: a AND NOT b = all ones AND NOT 0x00000000FFFFFFFF = 0xFFFFFFFF00000000
         MachineState state = fresh_state();
@@ -743,12 +755,23 @@ void test_sop2() {
         run(decode_one({sop2(21, 4, 12, 10)}), state);
         CHECK(state.sgpr[4] == 0u);
         CHECK(state.sgpr[5] == 0xFFFFFFFFu);
+        CHECK(state.scc);
+        state.sgpr[13] = 0xFFFFFFFFu;  // a AND NOT all ones = 0
+        run(decode_one({sop2(21, 4, 12, 10)}), state);
+        CHECK(state.sgpr[4] == 0u && state.sgpr[5] == 0u);
+        CHECK(!state.scc);
     }
     {  // s_lshl_b32: 3 << 4 = 48; 3 << 31 = 0x80000000 (the low 31 bits of 3 shifted out); 3 << 0 = 3
         MachineState state = fresh_state();
         state.sgpr[0] = 3;
         run(decode_one({sop2(30, 1, 128 + 4, 0)}), state);
         CHECK(state.sgpr[1] == 48u);
+        CHECK(state.scc);
+        state.sgpr[0] = 2;
+        run(decode_one({sop2(30, 1, 128 + 31, 0)}), state);
+        CHECK(state.sgpr[1] == 0u);
+        CHECK(!state.scc);  // every set bit was shifted out
+        state.sgpr[0] = 3;
         run(decode_one({sop2(30, 1, 128 + 31, 0)}), state);
         CHECK(state.sgpr[1] == 0x80000000u);
         run(decode_one({sop2(30, 1, kInlineZero, 0)}), state);
