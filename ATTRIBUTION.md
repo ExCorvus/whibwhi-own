@@ -19,7 +19,8 @@ repository; they are kept because the ideas were ExCorvus's, not because they de
 2. **The AI trap — outward, not from within.** The trap is looking at the code from within instead of outward:
    "fixing" the game's allocation/refusal/error paths into success rather than observing what the game does from
    outside and hosting the environment it expects. The project is a shell that hosts the game, not an emulator.
-   "When you guys inspect code you fix it instead of keeping the scope."
+   "When you guys inspect code you fix it instead of keeping the scope." (Corrected by item 14: outward is not
+   the answer either.)
 3. **The Xbox APU / unified-memory insight.** The Xbox shares RAM and VRAM; some addresses the game uses belong to
    system RAM, which a discrete PC GPU cannot see unless they are shared.
 4. **The game's own code adjusts the heaps.** The cleaner path is to host the game's own heap-adjusting code rather
@@ -37,6 +38,20 @@ repository; they are kept because the ideas were ExCorvus's, not because they de
     original executable; a shell, not an emulator.
 13. **One singular piece of software — a shell that wires the game into it.** The game is mapped into the shell,
     its imports resolved to the shell's shims, its memory hosted by the shell; the whole is one program.
+14. **A weave, not a wrapper (the latest find, 2026-11-26).** By its code the shell is the same as a shell, but it
+    is not wrapped around the executable: it is woven all through it. Its entry point is neither outside the code
+    nor inside it, but in the middle, like a crochet: every loop holds the loops beside it, and pulling the wrong
+    thread makes the whole system collapse. This corrects item 2: looking from outside was not the answer either.
+    The layers are inside each other, not next to each other: the program, the console libraries it imports, the
+    libraries shipped beside it, the shaders and the memory the CPU and the GPU both use are one fabric, and only
+    the shell reaches out of it (to Windows, the graphics card, the sound device). So no piece can be read or
+    changed on its own: a change to one loop is a change to the fabric. ExCorvus proposes to call the project a
+    shell-based weave.
+    An example from the same day: the program starts the installation's own ray-tracing builder; the builder's
+    shaders call console functions (named `xbox.`) that are in none of the shipped files, because the console's
+    graphics library supplies them at the moment it builds those shaders - and the result runs on the GPU in
+    memory the CPU side uses too. One thread runs through the program, a shipped library, the graphics library
+    and the GPU.
 
 ## The agent's work (the implementation)
 
