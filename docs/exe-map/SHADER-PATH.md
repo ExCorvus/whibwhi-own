@@ -253,8 +253,9 @@ corrects two expectations above.
   header names the stage (vertex, pixel, compute) and shader model 6.6.
 - **The DXIL part holds no portable code.** Its header gives a code size of four bytes, and those four bytes are
   the letters "NOBC". Between the header and those letters lie a few hundred bytes (about 450 to 800 in the
-  shaders looked at) whose meaning is not known; they contain no end-of-program word of the hardware instruction
-  set. So the PC device cannot build a pipeline from these containers, and the shell does not hand them over.
+  shaders looked at) that were not understood at this point: they are a directory and a zlib-packed block
+  that holds the console's program (section 10). The PC device cannot build a pipeline from these containers,
+  and the shell does not hand them over.
 - **Where the hardware code is.** In the slot 67 description the block of the third pair, and in the slot 57
   description two blocks, each contain exactly one end-of-program word of the hardware instruction set
   (0xBF810000), some way before the block's end. Those blocks are the precompiled programs. The other blocks of
@@ -272,4 +273,56 @@ corrects two expectations above.
   decision.
 
 Section 6's expectation that the first pipeline's compute container "is a real shader container" the translator
-could read is therefore wrong in one respect: the container is real, but the instructions are not in it.
+could read was first judged wrong here ("the container is real, but the instructions are not in it"). That
+judgement was itself wrong: the instructions are in the container, packed. See section 10.
+
+## 10. Correction (boots b89-b96; measured): the container carries the console's program, packed
+
+**The directory.** Inside the 'DXIL' part, right after the public 24-byte program header:
+
+| at | what |
+|---|---|
+| +0x18 | the bytes 'XDAT' |
+| +0x1c | a word, 3 in every container seen (meaning not established) |
+| +0x20 | size of the entries in bytes (36 in every container seen) |
+| +0x24 | entries of 12 bytes: kind, offset from the start of the part, size |
+
+Every container of a run has the same three kinds, in this order: 0x12 (16 bytes), 0x0D (the packed block),
+0x07 (28 bytes, the last four being the letters "NOBC" that the public header names as its code).
+
+**The packed block (kind 0x0D).** The bytes 'XBCH', a word (3 in every container seen), the packed size, 0,
+the unpacked size, 0, then one zlib stream. `shell/shader_program.*` (`read_packed_program`) reads the
+directory and unpacks the block in memory; a field that does not hold up is refused with a reason.
+
+**The unpacked block is a module.** Measured over all 581 distinct containers of boot b96:
+
+| at | what |
+|---|---|
+| +0x00 | the bytes 'FSSM' |
+| +0x04 | 0x101 in all 581 |
+| +0x08 | the block's size minus 16 in all 581 |
+| +0x10 | 6 in all 581 |
+| +0x18 .. +0x70, eight bytes apart | a padding value, except one place that holds a number: +0x38 in vertex shader modules (6 of 6), +0x40 in pixel shader modules (567 of 567), +0x70 in compute shader modules (8 of 8) |
+
+The number plus 0x10 is the place of a record. The record's first word plus 0x10 is where the code starts;
+its third word is the code's size in bytes. The code is the program up to its end-of-program word, then
+filler words (0xBF9F0000) to the code's end. In all 581: a walk from the code's first word lands exactly on
+the block's one end-of-program word, only filler follows inside the code, and the instruction reader decodes
+the program. `find_module_program` does this and refuses any block laid out differently.
+
+**Not established:** the record's other words; the tables before the code (in pixel shader modules also seven
+slots of 0x194 bytes with short instruction sequences that end in export instructions); what follows the
+code (a table of numbers, then the shader's name as text); entry kinds 0x12 and 0x07; the two words that are
+3.
+
+**The module's program and the precompiled program are not the same words** (0 of 581 matched a program
+handed over through device slots 57 or 67 in the same run). Why is not established.
+
+**What this changes.** When the shell refuses slots 57 and 67, the game asks again through slots 62 and 86
+with public pipeline descriptions and these containers. So the shell does not need the precompiled
+descriptions: the container has the program, and its public parts (ISG1, OSG1, PSV0) say what the shader
+takes in, puts out and binds.
+
+**A warning for the next reader.** A walk that lands on the end word does not prove where a program starts:
+zero words, and the module's first words, read as one-word instructions, so a walk started there lands too.
+Two such starts were taken for real before the header was read.
