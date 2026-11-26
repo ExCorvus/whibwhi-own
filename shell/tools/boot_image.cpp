@@ -19,6 +19,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
+#include <intrin.h>
 #include <fstream>
 #include <iterator>
 #include <mutex>
@@ -177,6 +179,37 @@ struct EntryContext {
     void* entry;
 };
 
+// The game derives its install directory from GetModuleFileNameW(NULL) (fn 0x55e2910): on the console that is
+// the game's own exe path. In this process the main module is the tool, so we point the PEB's main-module and
+// process image path at the game exe - the environment the game expects, not a change to the game's logic.
+void set_main_module_path(const char* game_exe) {
+    static wchar_t full[MAX_PATH * 2];
+    static wchar_t base[MAX_PATH];
+    const int n = MultiByteToWideChar(CP_UTF8, 0, game_exe, -1, full, MAX_PATH * 2);
+    if (n <= 0) {
+        return;
+    }
+    const wchar_t* slash = wcsrchr(full, L'\\');
+    wcscpy_s(base, slash ? slash + 1 : full);
+    auto set_us = [](void* us, wchar_t* buf) {
+        auto* u = static_cast<unsigned short*>(us);              // UNICODE_STRING {Len, Max, pad, Buffer}
+        auto** pbuf = reinterpret_cast<wchar_t**>(reinterpret_cast<unsigned char*>(us) + 8);
+        const unsigned short len = static_cast<unsigned short>(wcslen(buf) * 2);
+        u[0] = len;
+        u[1] = len + 2;
+        *pbuf = buf;
+    };
+    auto* peb = reinterpret_cast<unsigned char*>(__readgsqword(0x60));
+    auto* ldr = *reinterpret_cast<unsigned char**>(peb + 0x18);
+    auto* first = *reinterpret_cast<unsigned char**>(ldr + 0x10);  // InLoadOrderModuleList.Flink = main module
+    set_us(first + 0x48, full);   // FullDllName
+    set_us(first + 0x58, base);   // BaseDllName
+    auto* params = *reinterpret_cast<unsigned char**>(peb + 0x20);
+    set_us(params + 0x60, full);  // ImagePathName
+    std::fprintf(stderr, "[boot] main module path set to %s\n", game_exe);
+    std::fflush(stderr);
+}
+
 DWORD WINAPI run_entry(void* param) {
     auto* ctx = static_cast<EntryContext*>(param);
     {
@@ -251,6 +284,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     g_loaded = &loaded;
+    set_main_module_path(image_path);
 
     std::printf("placed at 0x%llx (%s), %zu bytes, %zu relocations applied, %zu exception-table entries\n",
                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(loaded.base)),
