@@ -32,6 +32,7 @@
 // were read and matched: 8 queue, 9 allocator, 14 descriptor heap, 26 custom heap properties, 41 command
 // signature, and the console-only methods above slot 43). See docs/exe-map/GRAPHICS-CALLS.md.
 #include "d3d12_xs.h"
+#include "shader_check.hpp"      // a second, minimal reader of the shader tables, for the check
 #include "shader_container.hpp"  // the chunks of a shader container
 #include "shader_isa.hpp"        // the console instruction reader
 #include "shader_pc.hpp"         // the pass that writes a PC shader for a console program, and the shell's layout
@@ -2025,11 +2026,17 @@ std::string describe_root_signature(const void* blob, std::size_t size) {
     return text;
 }
 
+bool shader_check_on();
+void check_keep_signature(const void* object, const void* blob, std::size_t size);
+
 // Device slot 16, CreateRootSignature(node mask, blob, size, identifier, out): made as before; recorded.
 HRESULT __stdcall w_device_slot16(Wrap* self, void* a1, void* a2, void* a3, void* a4, void* a5, void* a6, void* a7,
                                   void* a8) {
     const HRESULT hr = create_thunk<16, 4, 5, kRootSignature>(self, a1, a2, a3, a4, a5, a6, a7, a8);
     void** const out = static_cast<void**>(a5);
+    if (hr == 0 && out && *out && shader_check_on()) {
+        check_keep_signature(*out, a2, reinterpret_cast<std::size_t>(a3));
+    }
     if (hr == 0 && out && *out && rs_record()) {
         const std::string text = describe_root_signature(a2, reinterpret_cast<std::size_t>(a3));
         AcquireSRWLockExclusive(&g_rs_lock);
@@ -2090,6 +2097,297 @@ void record_shader_against_signature(const void* signature, const std::uint8_t* 
     ReleaseSRWLockExclusive(&g_rs_lock);
 }
 
+// ---- a check of the shader tables against the root signatures (a measurement) -------------------------------
+//
+// WHIWHI_SHADER_CHECK=<file>: every shader a pipeline request names is read by the second, minimal reader
+// (shader_check.*), and each claim shader_program.hpp makes about the raw words of its tables is checked against
+// the root signature the request names, as the PC's own reader of root signatures reads it. The file gets one
+// line for each claim with how often it held and how often not, and a few examples of each claim that did not.
+// Nothing of the program's code or data is written: numbers only.
+struct CheckSignature {
+    unsigned id = 0;
+    ID3D12VersionedRootSignatureDeserializer* reader = nullptr;
+    const D3D12_ROOT_SIGNATURE_DESC1* desc = nullptr;
+};
+SRWLOCK g_check_lock = SRWLOCK_INIT;
+std::string g_check_path;  // empty: the check is off
+std::map<const void*, CheckSignature> g_check_signatures;
+std::set<std::pair<unsigned, unsigned long long>> g_check_pairs;
+std::map<std::string, std::pair<unsigned long long, unsigned long long>> g_check_counts;  // claim -> (held, not)
+std::map<std::string, std::vector<std::string>> g_check_examples;
+std::map<std::uint32_t, std::set<unsigned>> g_check_keys;  // PRIV key -> signatures named with it
+std::map<std::string, unsigned long long> g_check_refusals;
+
+bool shader_check_on() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        char path[MAX_PATH] = {};
+        if (GetEnvironmentVariableA("WHIWHI_SHADER_CHECK", path, sizeof(path)) > 0) {
+            g_check_path = path;
+            logf("shader table check: written to %s\n", path);
+        }
+    });
+    return !g_check_path.empty();
+}
+
+void write_shader_check();
+
+// Device slot 16 keeps the blob's description for the check (called only when the check is on).
+void check_keep_signature(const void* object, const void* blob, std::size_t size) {
+    using Create = HRESULT(WINAPI*)(const void*, SIZE_T, REFIID, void**);
+    static const auto create = reinterpret_cast<Create>(
+        GetProcAddress(LoadLibraryA("d3d12.dll"), "D3D12CreateVersionedRootSignatureDeserializer"));
+    CheckSignature kept;
+    if (!create || !blob || !can_read(blob, size) ||
+        create(blob, size, __uuidof(ID3D12VersionedRootSignatureDeserializer), reinterpret_cast<void**>(&kept.reader)) !=
+            0 ||
+        !kept.reader) {
+        return;
+    }
+    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* d = nullptr;
+    if (kept.reader->GetRootSignatureDescAtVersion(D3D_ROOT_SIGNATURE_VERSION_1_1, &d) != 0 || !d) {
+        kept.reader->Release();
+        return;
+    }
+    kept.desc = &d->Desc_1_1;
+    AcquireSRWLockExclusive(&g_check_lock);
+    kept.id = static_cast<unsigned>(g_check_signatures.size());
+    g_check_signatures[object] = kept;  // the reader is kept for the whole run: it owns the description
+    ReleaseSRWLockExclusive(&g_check_lock);
+}
+
+// Under g_check_lock.
+void check_claim(const std::string& claim, bool held, const std::string& example) {
+    auto& count = g_check_counts[claim];
+    (held ? count.first : count.second) += 1;
+    if (!held) {
+        auto& examples = g_check_examples[claim];
+        if (examples.size() < 6) {
+            examples.push_back(example);
+        }
+    }
+}
+
+D3D12_DESCRIPTOR_RANGE_TYPE class_range_type(unsigned resource_class) {
+    switch (resource_class) {
+    case 0: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    case 1: return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+    case 2: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+    default: return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    }
+}
+
+void check_shader_tables(const void* signature, const std::uint8_t* container, std::uint32_t bytes, bool vertex) {
+    if (!shader_check_on()) {
+        return;
+    }
+    unsigned long long key = 1469598103934665603ull;
+    for (std::uint32_t i = 0; i < bytes; ++i) {
+        key = (key ^ container[i]) * 1099511628211ull;
+    }
+    AcquireSRWLockShared(&g_check_lock);
+    const auto found = g_check_signatures.find(signature);
+    const bool known = found != g_check_signatures.end();
+    const CheckSignature named = known ? found->second : CheckSignature{};
+    ReleaseSRWLockShared(&g_check_lock);
+    AcquireSRWLockExclusive(&g_check_lock);
+    const bool fresh = g_check_pairs.insert({known ? named.id : 0xFFFFFFFFu, key}).second;
+    ReleaseSRWLockExclusive(&g_check_lock);
+    if (!fresh) {
+        return;
+    }
+    const whiwhi::shell::check::TableRead read = whiwhi::shell::check::read_tables(container, bytes);
+    AcquireSRWLockExclusive(&g_check_lock);
+    if (!read.ok) {
+        ++g_check_refusals[read.reason];
+        ReleaseSRWLockExclusive(&g_check_lock);
+        return;
+    }
+    ++g_check_refusals["(read)"];
+    if (!known) {
+        ++g_check_refusals["(read, but the request names no root signature the check kept)"];
+        ReleaseSRWLockExclusive(&g_check_lock);
+        return;
+    }
+    if (read.priv_found) {
+        g_check_keys[read.priv_key].insert(named.id);
+    } else {
+        ++g_check_refusals["(read, the container has no PRIV part)"];
+    }
+    const D3D12_ROOT_SIGNATURE_DESC1& r = *named.desc;
+    char where[96];
+    std::snprintf(where, sizeof(where), "%s %016llx signature %u", vertex ? "vertex" : "pixel", key, named.id);
+    char part[160];
+    for (const auto& w : read.first) {
+        const unsigned kind = w[0], count = w[2], reg = w[3], scalar = w[4] & 0xff, param = (w[4] >> 8) & 0xff;
+        std::snprintf(part, sizeof(part), "%s: first [%x %x %x %x %x]", where, w[0], w[1], w[2], w[3], w[4]);
+        if (kind == 4) {
+            const bool fits = param < r.NumStaticSamplers;
+            check_claim("first table kind 4: second byte of word 4 numbers a fixed sampler of the named signature", fits,
+                        part);
+            if (fits) {
+                check_claim("first table kind 4: word 3 is that fixed sampler's register",
+                            r.pStaticSamplers[param].ShaderRegister == reg, part);
+            }
+            continue;
+        }
+        if (kind == 5 || kind == 6) {
+            if (param >= r.NumParameters) {
+                const unsigned flag = kind == 5 ? D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
+                                                : D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
+                check_claim("first table kind 5/6 past the last parameter: the named signature indexes that heap "
+                            "directly",
+                            (r.Flags & flag) != 0, part);
+                continue;
+            }
+        }
+        const bool fits = param < r.NumParameters;
+        check_claim("first table: second byte of word 4 numbers a parameter of the named signature", fits, part);
+        if (!fits) {
+            continue;
+        }
+        const D3D12_ROOT_PARAMETER1& q = r.pParameters[param];
+        switch (kind) {
+        case 0:
+            check_claim("first table kind 0: the parameter is constants", q.ParameterType ==
+                                                                              D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+                        part);
+            if (q.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+                check_claim("first table kind 0: word 3 is the constants' register", q.Constants.ShaderRegister == reg,
+                            part);
+                check_claim("first table kind 0: word 2 is the number of constants", q.Constants.Num32BitValues == count,
+                            part);
+            }
+            break;
+        case 1: {
+            const bool root = q.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV ||
+                              q.ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV ||
+                              q.ParameterType == D3D12_ROOT_PARAMETER_TYPE_UAV;
+            check_claim("first table kind 1: the parameter is a root descriptor", root, part);
+            if (root) {
+                check_claim("first table kind 1: word 3 is the root descriptor's register",
+                            q.Descriptor.ShaderRegister == reg, part);
+            }
+            break;
+        }
+        case 3:
+        case 5:
+        case 6:
+            check_claim("first table kind 3/5/6: the parameter is a descriptor table",
+                        q.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, part);
+            break;
+        default:
+            check_claim("first table: word 0 is one of the kinds 0, 1, 3, 4, 5, 6", false, part);
+            break;
+        }
+        (void)scalar;
+    }
+    for (const auto& w : read.second) {
+        const unsigned resource_class = w[0] & 0xff, arrival = (w[0] >> 8) & 0xff, offset = w[1], reg = w[2],
+                       words = w[4] & 0xff, param = (w[4] >> 16) & 0xff;
+        std::snprintf(part, sizeof(part), "%s: second [%x %x %x %x %x]", where, w[0], w[1], w[2], w[3], w[4]);
+        if (arrival == 4) {
+            const bool fits = param < r.NumStaticSamplers;
+            check_claim("second table arrival 4: third byte of word 4 numbers a fixed sampler", fits, part);
+            if (fits) {
+                check_claim("second table arrival 4: word 2 is that fixed sampler's register",
+                            r.pStaticSamplers[param].ShaderRegister == reg, part);
+            }
+            continue;
+        }
+        const bool fits = param < r.NumParameters;
+        check_claim("second table: third byte of word 4 numbers a parameter of the named signature", fits, part);
+        if (!fits) {
+            continue;
+        }
+        const D3D12_ROOT_PARAMETER1& q = r.pParameters[param];
+        if (arrival == 0) {
+            const bool constants = q.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+            check_claim("second table arrival 0: the parameter is constants", constants, part);
+            if (constants) {
+                check_claim("second table arrival 0: word 2 is the constants' register",
+                            q.Constants.ShaderRegister == reg, part);
+            }
+        } else if (arrival == 1) {
+            const bool root = q.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE &&
+                              q.ParameterType != D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+            check_claim("second table arrival 1: the parameter is a root descriptor", root, part);
+            if (root) {
+                check_claim("second table arrival 1: word 2 is the root descriptor's register",
+                            q.Descriptor.ShaderRegister == reg, part);
+            }
+        } else if (arrival == 3) {
+            const bool table = q.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            check_claim("second table arrival 3: the parameter is a descriptor table", table, part);
+            if (!table) {
+                continue;
+            }
+            // Which range of the named table holds this class and register, and at what position.
+            int position = -1, at = 0;
+            for (UINT i = 0; i < q.DescriptorTable.NumDescriptorRanges; ++i) {
+                const D3D12_DESCRIPTOR_RANGE1& g = q.DescriptorTable.pDescriptorRanges[i];
+                const int start = g.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
+                                      ? at
+                                      : static_cast<int>(g.OffsetInDescriptorsFromTableStart);
+                const bool unbounded = g.NumDescriptors == UINT_MAX;
+                if (g.RangeType == class_range_type(resource_class) && reg >= g.BaseShaderRegister &&
+                    (unbounded || reg < g.BaseShaderRegister + g.NumDescriptors)) {
+                    position = start + static_cast<int>(reg - g.BaseShaderRegister);
+                    break;
+                }
+                at = start + (unbounded ? 0 : static_cast<int>(g.NumDescriptors));
+            }
+            check_claim("second table arrival 3: the named table has a range of this class holding word 2's register",
+                        position >= 0, part);
+            if (position >= 0) {
+                check_claim("second table arrival 3: word 1 is 8 words times the register's position in the table",
+                            offset == 8u * static_cast<unsigned>(position), part);
+                check_claim("second table arrival 3: word 1 is the low byte of word 4 times that position",
+                            offset == words * static_cast<unsigned>(position), part);
+            }
+        } else {
+            check_claim("second table: second byte of word 0 is one of the arrivals 0, 1, 3, 4", false, part);
+        }
+    }
+    const bool write_now = g_check_pairs.size() % 32 == 0;
+    ReleaseSRWLockExclusive(&g_check_lock);
+    if (write_now) {
+        write_shader_check();  // the run may end at the image's own breakpoint, with no report at the end
+    }
+}
+
+// Writes the whole check file again (each time, so that it is whole however the run ends).
+void write_shader_check() {
+    if (g_check_path.empty()) {
+        return;
+    }
+    AcquireSRWLockExclusive(&g_check_lock);
+    std::FILE* f = std::fopen(g_check_path.c_str(), "w");
+    if (!f) {
+        ReleaseSRWLockExclusive(&g_check_lock);
+        return;
+    }
+    std::fprintf(f, "pairs of a shader and the root signature its request names: %zu; root signatures kept: %zu\n",
+                 g_check_pairs.size(), g_check_signatures.size());
+    for (const auto& item : g_check_refusals) {
+        std::fprintf(f, "reading\t%llu\t%s\n", item.second, item.first.c_str());
+    }
+    for (const auto& item : g_check_counts) {
+        std::fprintf(f, "claim\theld %llu\tnot %llu\t%s\n", item.second.first, item.second.second, item.first.c_str());
+        for (const std::string& example : g_check_examples[item.first]) {
+            std::fprintf(f, "  not:\t%s\n", example.c_str());
+        }
+    }
+    unsigned keys_with_more = 0;
+    for (const auto& item : g_check_keys) {
+        keys_with_more += item.second.size() > 1 ? 1u : 0u;
+    }
+    std::fprintf(f, "PRIV keys: %zu; keys named with more than one root signature: %u\n", g_check_keys.size(),
+                 keys_with_more);
+    std::fclose(f);
+    ReleaseSRWLockExclusive(&g_check_lock);
+}
+
 HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const GUID* riid, void** out, void*, void*,
                                            void*, void*, void*) {
     using whiwhi::shell::PcStage;
@@ -2145,6 +2443,8 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
                 }
                 record_shader_against_signature(game_signature, static_cast<const std::uint8_t*>(code.pShaderBytecode),
                                                 static_cast<std::uint32_t>(code.BytecodeLength), vertex);
+                check_shader_tables(game_signature, static_cast<const std::uint8_t*>(code.pShaderBytecode),
+                                    static_cast<std::uint32_t>(code.BytecodeLength), vertex);
                 auto shader = translated_shader(static_cast<const std::uint8_t*>(code.pShaderBytecode),
                                                 static_cast<std::uint32_t>(code.BytecodeLength),
                                                 vertex ? PcStage::kVertex : PcStage::kPixel);
@@ -3845,6 +4145,7 @@ unsigned long long __stdcall whiwhi_d3d12_view_pages_shown(void) {
 
 unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
     log_pipeline_refusals();
+    write_shader_check();
     // Per kind of object: which offsets of the image's area are not zero in at least one live object.
     std::map<std::string, std::pair<std::size_t, std::vector<bool>>> by_kind;
     AcquireSRWLockShared(&g_wraps_lock);
