@@ -105,25 +105,28 @@ end of a PC vtable.
 | 48 | creates four more command queues right after the main one: (device, 16-byte description, the public identifier of ID3D12CommandQueue, output). The descriptions are {2, 0, 1, 0}, {2, 0, 2, 0}, {2, 0, 3, 0}, {2, 0, 0, 1}; the main queue (slot 8) uses {0, 0, 0, 1}. A failure is fatal by the game's own check. Meaning of the third number: not known | fn 0x2478440, calls at 0x2478813, 0x2478853, 0x2478893, 0x24788d3 |
 | 49 | one call with two integers, after a version-string comparison | fn 0x2478440 |
 | 55 | derived pipeline state (a pipeline made from a base pipeline of slot 57) | fn 0x2479f40 |
-| 57 | base pipeline state (a pipeline derived from it) | fn 0x24774c0 |
-| 61 | one call in the shader system | fn 0x12b9800 |
-| 62 | compute pipeline state: desc {pointer at +0, count 1 at +0x18}, riid, out | fn 0x247fd30 |
-| 67 | pipeline state from a stream description; called on a cache miss | fn 0x2480050 |
-| 70 | view creation from raw descriptor words (6 callers) | 0x4d9dce0, 0x4d9f200, 0x4e31bb0, 0x4e32500, 0x4ecc800, 0x4eecb40 |
+| 57 | graphics pipeline state from a precompiled description that names the console's compiled programs: (device, description, the public pipeline-state identifier, out) | fn 0x24774c0, call at 0x2477578 |
+| 61 | creates a sampler at a place in the image's descriptor memory: (device, console-layout description, destination). See DESCRIPTORS.md | fn 0x12b9800 |
+| 62 | compute pipeline state from the public compute description {root signature, shader pointer, length, 1}; used when slot 67 fails | fn 0x247fd30, call at 0x247fe66 |
+| 67 | compute pipeline state from a precompiled description found by key in the image's own table: (device, description, identifier, out); tried before slot 62 | fn 0x2480050, call at 0x24800d5 |
+| 70 | writes a shader-resource view at a place in the image's descriptor memory from two description blocks: (device, resource description or buffer size, view description, destination); 11 call sites. See DESCRIPTORS.md | through fn 0x4ecc800 (6 call sites), and directly in 0x4d9dce0, 0x4d9f200, 0x4e31bb0, 0x4e32500, 0x4eecb40 |
 | 71 | second view creation path | 0xa71de0, 0x511f160 |
 | 73 | creates a command list: 16-byte desc, allocator, 0, riid, out | fn 0x2478440 |
 | 74 | pool registration: (pool address, pages, out) | fn 0x1e6c110 (MAP.md §1.2) |
 | 78 | SetFrameIntervalX | fn 0x247ab10 |
 | 79 | ScheduleFrameEventX | 0x247ab10, 0x2490080, 0x2478440 |
 | 80 | WaitFrameEventX | 0x2481e90, 0x24845b0 |
-| 81 | frame statistics | 0x24826a0 |
+| 81 | frame statistics: (device, a frame token, 0x11100, a place holding the number 6, a place for records); a failure is tolerated | fn 0x24826a0, call at 0x2482710 |
+| 86 | pipeline state from the public stream description: (device, {size, stream}, the public pipeline-state identifier, out) - the argument list of the public CreatePipelineState | fn 0x2479760, call at 0x2479a87 |
+| 101 | the argument list of the public CreateStateObject, with a ray-tracing pipeline description | SHADER-PATH.md §1.1 |
+| 108 | the argument list of the public GetResourceAllocationInfo2, place for the result first | fn 0xabfae0 |
 | 119 | unknown; one call in the device reset/teardown area | fn 0x2474630 |
+| 127 | the argument list of the public CreateCommittedResource3 | fn 0x193de10, call at 0x193e1b4 |
 | 132 | notification from the fatal stop (argument 3) | fn 0x2474500 (MAP.md §2.1) |
-| 133 | placed resource at a title address (4 callers) | 0x6dc20, 0x193de10, 0x1e86440, 0x56f7fc0 |
+| 133 | placed resource at a title address (4 callers): (device, address, public resource description, initial layout, clear value, identifier, out) | 0x6dc20, 0x193de10, 0x1e86440, 0x56f7fc0 |
 
-The console-only slots above 43 are answered as not provided today (logged once each). A run stops at the first
-of them, slot 48. After it, the ones the shell must answer for a frame are 73 (command list) and 78-81 (frame
-events).
+Which of these the shell answers today is in sections 2.2b and 2.2d below and in the Current state block of
+FINDINGS.md.
 
 ### 2.2a Argument order of methods that return a structure (measured)
 
@@ -185,24 +188,70 @@ block; nothing is stored in the block.
 
 ### 2.2c The command list: which slots are known
 
-The shell forwards command-list slots 3..26 by the public order: the image's calls of slot 9 (Close), slot 15
-(the five arguments of CopyBufferRegion) and slot 26 (ResourceBarrier) agree with it. One call does not: the
-image executes its command signatures through slot 61 with exactly the arguments of ExecuteIndirect (at
-0x248cdef and in fn 0x94360), which the public list has at slot 59. So the order above slot 26 is not taken
-from the public list; every other slot is answered "not provided" and logged with its arguments until the
-image's own calls show what it is. Slots 131 and 132 are called on the first lists with numbers that look like
-sizes ((0x700000, 0, 0, ...) and (0xc3c0, 0x80020000, 0, ...)); their results are not checked.
-docs/exe-map/COMMAND-LIST.md has the list of call sites.
+The console command list is an object the image writes into as well as calls. It compares a write position at
+`+0x18` with an end at `+0x30`; while there is room it writes hardware command records into the list's memory
+itself, and it calls a method only when there is none (COMMAND-LIST-ORDER.md section 1). The shell's list keeps
+both numbers at zero, so every command arrives as a method call. The shell never decodes hardware command
+records.
+
+What the slots are, as far as it is known (boots b74-b80):
+
+- Slots 3 to 26 are in the public order. Measured by the image's own calls: slot 9 (Close), slot 15 (the five
+  arguments of CopyBufferRegion), slot 26 (ResourceBarrier). Slot 20 has the shape of the primitive-topology
+  call; the image passes it the number 0x11, which is not a public topology, so the shell does not pass it on
+  and holds draws.
+- Slots 32 to 52 are the public methods four places up. Seen in runs with matching arguments and carried out on
+  the PC list: 32 (SetDescriptorHeaps with two heaps), 34 (graphics root signature), 36 (graphics root
+  descriptor table), 50 (OMSetRenderTargets), 52 (ClearRenderTargetView). Written by the same rule and not yet
+  seen: 33, 35, 37-40, 51. Not answered yet although the shapes match: 41-48 (root buffer addresses, the index
+  buffer, vertex buffers), because they carry addresses in the image's memory that the shell cannot yet turn
+  into PC buffer addresses.
+- ExecuteIndirect is slot 61 (at 0x248cdef and in fn 0x94360); the public list has it at 59. So two public
+  methods are missing somewhere between slots 53 and 60.
+- Slot 139 starts recording on an allocator: (list, allocator, 0, 0), a failure is fatal (fn 0x2474cc0). The
+  shell answers it with the PC list's Reset.
+- Slots 70, 71, 72, 74, 75, 126, 131, 132, 142, 146 are console-only, are called in runs, and are not provided.
+  Slots 131 and 132 are called on the first lists with numbers that look like sizes; their results are not
+  checked.
+
+docs/exe-map/COMMAND-LIST.md has the call sites; docs/exe-map/COMMAND-LIST-ORDER.md every slot the image calls.
+
+### 2.2d What later runs established (boots b65-b87)
+
+| object, slot | what the image passes | what the shell does |
+|---|---|---|
+| device 25 | allocation info: (place for the result, device, 1, 1, description). For a volume the image writes the layout number 0x105 itself, and it stops itself unless the size fits in 32 bits (fn 0x343e80) | buffers: the PC device's values; textures: the total size of the shell's untiled layout (docs/console-libs/xg-xs.md section 0) |
+| device 108 | the same question in the public GetResourceAllocationInfo2 form (fn 0xabfae0) | the same answers, and the 24-byte record filled |
+| device 133 | a buffer or a texture placed at an address in the image's memory; the fourth argument is the initial layout, the fifth a clear value | buffer: a PC buffer over the image's own memory, no copy (it starts at the 64 KiB boundary below the address). Texture: a real PC texture - its pixels are in the PC device's memory, NOT at the image's address |
+| device 61, 70 | a sampler / a view written at a place in the image's descriptor memory (DESCRIPTORS.md) | not provided; the image does not check the result |
+| device 81 | frame statistics | not provided; tolerated |
+| device 57, 67 | precompiled pipeline descriptions that carry the console's compiled programs | read and counted (SHADER-PATH.md section 9), then refused: there is no translator for those programs yet |
+| device 62, 86 | the public compute description / the public stream description, with shader containers that have the public container's parts but no portable code | made on the PC device only for a container that holds portable code; none has been seen, so none is made |
+| device 101 | a ray-tracing pipeline | refused |
+| fence 8 | completed value, called with the fence alone (fn 0x4dad090); all ones = device lost | the PC fence's value |
+| fence 12 | returns the ADDRESS of the fence's 64-bit completed value; the image then reads that memory again and again without calling anything (fn 0x4fb0ad0) | the number is kept in the shell's object and refreshed at each call and whenever the PC fence reaches a value the image signalled |
+| resource 8, 9 | Map, Unmap | a buffer over the image's memory: the image's address. A texture placed at an image address: refused, because its pixels are not there |
+| resource 10 | description, with the object first and the place second (0x501f80b) | answered in either order |
+| resource 11 | GPU address | the image's address for a resource placed at one |
+| allocator 9 | (allocator, a function of the image that hands out memory, a context) (fn 0x188430) | kept on record; never called |
+
+Pipeline requests come almost entirely from the image's worker threads. The shell makes pipeline states only
+on the thread that created the device (rule 7 of AGENTS.md); requests from other threads are counted and
+refused.
 
 ### 2.3 Queue slots
 
-| slot | method | caller |
-|---|---|---|
-| 31 | CopyPageMappingsBatchX (fills the GPU view) | fn 0xf2c470, the page mapper (MAP.md §1.3) |
-| 32 | presentation | 0x248b570, 0x248d810 |
-| 23, 24 | two queue calls made by the frame step | fn 0x2490080 |
-| 18 | one call (timestamp/clock family) | fn 0x2484180 |
-| 2 | Release | fn 0x248b570 |
+| slot | method | caller | what the shell does |
+|---|---|---|---|
+| 16 | Signal(fence, value) - the public method two places up | 0x2482608 in the present function fn 0x2481e90 | the PC queue's Signal |
+| 18 | GetTimestampFrequency(place for a 64-bit number) - the public method two places up | 0x24841a6 in fn 0x2484180 | the PC queue's value |
+| 31 | CopyPageMappingsBatchX (fills the GPU view) | fn 0xf2c470, the page mapper (MAP.md §1.3) | recorded exactly; nothing reads the record yet |
+| 32 | present: (plane count, plane records of 0x48 bytes, present parameters). A plane record holds the frame token, a pointer to the surface entry, a rectangle and a colour space | 0x24824c1 in fn 0x2481e90 | the surface is copied to a swap chain on the image's own window, one picture per frame-clock interval |
+| 35 | submit command lists: (count, lists, frame token, 0 or 3) | 0x2482689 in fn 0x2482660 (frame lists, last argument 0); 0x24821dd in fn 0x2481e90 (per-thread lists, last argument 3) | the PC queue's ExecuteCommandLists; the token and the last number are logged, not used |
+| 23, 24 | two queue calls made by the frame step; not identified | fn 0x2490080 | not provided |
+| 2 | Release | fn 0x248b570 | Release |
+
+Nothing of the public queue order is passed on unseen: only the slots in this table are answered.
 
 The pool queue (global 0x71bfce8) is separate from the frame queue (global 0x8759ff8): the page mapper uses the
 pool queue's slot 31, and the frame code uses the frame queue.
