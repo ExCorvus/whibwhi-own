@@ -46,5 +46,9 @@ long __stdcall UninitializeApiImpl(void*) {
     once("UninitializeApiImpl: answered success");
     return 0;
 }
+long __stdcall XErrorReport(void*, void*, void*) {
+    once("XErrorReport: logged, answered success");
+    return 0;
+}
 
 } // extern "C"
