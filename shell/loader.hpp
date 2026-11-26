@@ -37,7 +37,19 @@ struct LoadedImage {
     bool thread_storage = false;            // the image has thread-local storage and holds the shell's block
     std::size_t thread_storage_bytes = 0;   // initial data plus zero-filled bytes, per thread
     std::size_t thread_callbacks = 0;
+    // When counting was asked for (set_count_import_calls): every import slot goes through a small stub that
+    // counts the calls and jumps on to what the slot is connected to. counted[i] names the import whose count is
+    // call_counts[2 * i] (the word after each count holds the stub's target).
+    std::vector<UnprovidedImport> counted;  // every import, in the order of the import table
+    std::vector<bool> counted_connected;    // whether the shell provides it
+    const volatile std::uint64_t* call_counts = nullptr;
+    void* counting_stubs = nullptr;
+    std::size_t counting_bytes = 0;
 };
+
+// Asks the next load_image to count every call the image makes through its import table (for the game test).
+// The stubs keep the image's stack and arguments as they are: they count and jump.
+void set_count_import_calls(bool count);
 
 // Decides what an import slot is connected to. Returns nullptr for an import the shell does not provide.
 using ImportResolver = std::function<void*(const std::string& library, const ImportedFunction& fn)>;
