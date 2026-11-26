@@ -1121,3 +1121,19 @@ frames a second instead of about 2). Pipelines made in the run: 4,096 against 16
 made in the same time is not known (open). ExCorvus: the watchdog checks the loop's pace (measured in the map:
 one-second passes, 30 ticks re-armed by progress, so about 30 seconds without progress stops it), and a program
 that runs slower than it should skews boot results - earlier frame counts are not comparable with this one.
+
+## 2026-11-26 - the program's progress reports, read during a run (game tests 21:08 and 21:12)
+
+The boot tool now reads, every half second and without writing anything, the time of the program's last progress
+report (image+0x71b6338; written by one function of the program; its watchdog thread compares it once a second,
+and when about 30 passes go by without a new one - 300 s while a watch scope is open - the program stops itself,
+docs/exe-map/MAP.md sections 2.2 and 4). The game test lists the number of new reports and the longest time
+without one.
+
+- 60-second run (21:08): PASS; 1 new report, about 6 s before the end; last frame token 1,581; 4,096 pipelines.
+- 150-second run (21:12): PASS, alive after 150 s; still 1 new report, then 96.6 s without another, and the
+  program did not stop itself; last frame token 1,561 (about the same as after 60 s); 26,310 pipelines.
+
+So around the first minute the program reports progress once, its frame count stops rising, and it keeps making
+pipelines while it allows itself more than 30 s. That a watch scope is open then (the 300 s budget) is inferred
+from the map, not measured. Not chased further (written down for ExCorvus).
