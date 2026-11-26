@@ -19,17 +19,6 @@ It is not vendored into this repository: build it separately (see `docs/BUILD-AN
 these notices on 2026-11-24. The LGPL requires that users can relink/replace it — that holds here, since it is
 loaded by file name at run time and the system d3d12.dll is the fallback.
 
-## Third-party library used at run time: libopus (BSD-3-Clause)
-
-The shell's `xapu.dll` decodes the game's Opus sound packets with **libopus**, the reference Opus codec,
-copyright Xiph.Org Foundation, Skype Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory
-Maxwell, Mark Borgerding, Erik de Castro Lopo, Mozilla, Amazon and contributors, licensed under the
-**3-clause BSD licence**; source and licence at <https://github.com/xiph/opus> (see its `COPYING`). It is not
-vendored into this repository: build it separately (see `docs/BUILD-AND-RUN.md`) and place the built `opus.dll`
-beside the shell executable. The shell calls only its public C interface. ExCorvus approved using public
-libraries with credit on 2026-11-26. As the BSD licence requires, its copyright notice, conditions and
-disclaimer are kept: they are in libopus's `COPYING`, which ships with every copy of its source.
-
 ## Required credit (additional term under GNU GPL v3 §7(b)–(c))
 
 This program is free software under the GNU General Public License v3 (or later). In addition, as permitted
