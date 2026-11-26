@@ -1376,3 +1376,13 @@ Follow-up, lane functions (game test 00:40, run-20261127-004049; FAIL about 5 s 
   same place as at 00:22 and 00:24) while the 32nd is made. The translator set no lane count in this run. So that
   place in the driver is not reached only through the lane count. Which shader the 32nd pipeline holds was not
   recorded.
+Follow-up, the typed load (game test 00:49, run-20261127-004956; FAIL about 5 s in, the copy's folder unchanged):
+- xbox.TypedLoad.i32 has the shape of dx.op.bufferLoad (handle, index, a result of four values and a status). In
+  the one shader that uses it, the handle is a raw buffer (DXIL resource kind 11) passed by GPU address and the
+  last argument is 65 at both calls. The formats the program uses are the PC's DXGI numbers (28, 39, ... in every
+  log), and DXGI 65 is A8_UNORM, one byte; the index is built as "x3 + ..." and "x9 + ...", and the shader keeps
+  only the low four bits of the result. Taught as: the byte at byte offset index, as an integer in the first
+  value (inferred from these fits, not written anywhere); other formats and buffer kinds are refused.
+- Checker (its root-constant limit raised from 16 to 64 words, a limit of the checker only): 52 of 52 accepted.
+- Game test: 31 builder pipelines made, none refused, then the driver fails in the same place as at 00:40, while
+  the 32nd is made. So the driver failure does not depend on which builder shaders the translator understands.
