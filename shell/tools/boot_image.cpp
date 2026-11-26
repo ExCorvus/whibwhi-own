@@ -284,7 +284,15 @@ int main(int argc, char** argv) {
         return 1;
     }
     g_loaded = &loaded;
-    set_main_module_path(image_path);
+    // The game derives its install dir from GetModuleFileNameW(NULL). By default we run from a staged work
+    // folder that holds our binaries plus links to the game files, so the natural path is already right.
+    // WHIWHI_PEB_GAME=1 forces the PEB image path to the game exe instead (for a bare game-folder layout).
+    {
+        char v[8] = {};
+        if (GetEnvironmentVariableA("WHIWHI_PEB_GAME", v, sizeof(v)) > 0 && v[0] == '1') {
+            set_main_module_path(image_path);
+        }
+    }
 
     std::printf("placed at 0x%llx (%s), %zu bytes, %zu relocations applied, %zu exception-table entries\n",
                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(loaded.base)),
