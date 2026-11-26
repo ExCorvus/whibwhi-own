@@ -38,6 +38,7 @@ docs/
   exe-map/CHANNELS.md        every channel that hands a heap address to the GPU
   exe-map/GRAPHICS-CALLS.md  what the image asks the console graphics libraries (measured)
   SHADER-TRANSLATOR.md       the shader translation plan and the first code
+  BUILD-AND-RUN.md           how to build and run the shell on your own machine, no agent needed
   EARLY-HISTORY.md           note on the early git and the restart
   RENDERING-PIPELINE.md      rendering-pipeline map (placeholder)
 scripts/
@@ -56,7 +57,8 @@ shell\build.cmd
 ```
 
 Builds `whiwhi_shell`, `whiwhi_tls.dll`, `xmem.dll` and the tools, and runs the tests via CTest. No game data or
-GPU needed.
+GPU needed. To build and run the shell against your own copy of the game by hand, see
+[docs/BUILD-AND-RUN.md](docs/BUILD-AND-RUN.md).
 
 ## License
 
