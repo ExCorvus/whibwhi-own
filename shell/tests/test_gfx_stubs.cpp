@@ -20,15 +20,40 @@ int main() {
     const HMODULE xg = LoadLibraryA("xg_xs.dll");
     CHECK(xg != nullptr);
     if (xg) {
-        const auto create = reinterpret_cast<long (*)(void*, void*, void*, void*)>(
+        // Two arguments each, as the game calls them: a description and a place for the answer.
+        const auto create = reinterpret_cast<long (*)(const void*, void**)>(
             GetProcAddress(xg, "XGCreateTextureComputer"));
-        const auto suggest = reinterpret_cast<long (*)(unsigned, unsigned, void*)>(
+        const auto suggest = reinterpret_cast<long (*)(const void*, unsigned, unsigned*)>(
             GetProcAddress(xg, "XGSuggestSwizzleMode"));
-        CHECK(create != nullptr && suggest != nullptr);
-        if (create && suggest) {
-            void* out = nullptr;
-            CHECK(create(nullptr, nullptr, nullptr, &out) == 0x80004001L);
-            CHECK(suggest(0, 0, &out) == 0x80004001L);
+        const auto counts = reinterpret_cast<void (*)(unsigned long long*, unsigned long long*)>(
+            GetProcAddress(xg, "whiwhi_xg_counts"));
+        CHECK(create != nullptr && suggest != nullptr && counts != nullptr);
+        if (create && suggest && counts) {
+            // A made-up description: two-dimensional, 64 x 32, 3 mips.
+            unsigned char description[0x40] = {};
+            *reinterpret_cast<unsigned*>(description + 0x00) = 3;
+            *reinterpret_cast<unsigned long long*>(description + 0x10) = 64;
+            *reinterpret_cast<unsigned*>(description + 0x18) = 32;
+            *reinterpret_cast<unsigned short*>(description + 0x1c) = 1;
+            *reinterpret_cast<unsigned short*>(description + 0x1e) = 3;
+            *reinterpret_cast<unsigned*>(description + 0x20) = 28;
+            *reinterpret_cast<unsigned*>(description + 0x24) = 4;
+            unsigned* mode = reinterpret_cast<unsigned*>(description + 0x2c);
+            *mode = 0x1234;
+
+            // A refusal clears the place for the object, so a caller that does not look at the answer cannot
+            // use a leftover value.
+            void* object = reinterpret_cast<void*>(static_cast<size_t>(0xdeadbeef));
+            CHECK(create(description, &object) == 0x80004001L);
+            CHECK(object == nullptr);
+            CHECK(create(description, nullptr) == 0x80004001L);
+            CHECK(create(nullptr, &object) == 0x80004001L);
+            // The mode is left as the caller had it.
+            CHECK(suggest(description, 0, mode) == 0x80004001L);
+            CHECK(*mode == 0x1234);
+            unsigned long long creates = 0, suggestions = 0;
+            counts(&creates, &suggestions);
+            CHECK(creates == 3 && suggestions == 1);
         }
     }
 
