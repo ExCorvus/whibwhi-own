@@ -22,6 +22,7 @@ shell/                         the runtime (C++17, MSVC); shell/README.md descri
   image, imports, loader       read the game's executable, place it in memory, connect its imports
   tls_seat, thread_block.h     thread-local storage for the loaded game
   host_libraries, console      decide which library answers each import
+  offline                      refuses the game's network imports: no socket, no name lookup, no HTTP request
   hosting                      address model for showing the game's memory to the GPU
   shader_container, shader_isa, shader_translate, spirv
                                shader container reader, console shader reader, translator to SPIR-V, SPIR-V writer
@@ -32,7 +33,7 @@ shell/                         the runtime (C++17, MSVC); shell/README.md descri
   acp_hal, xapu, chad          AcpHal.dll, xapu.dll, chad.dll - console audio libraries (skeletons)
   xg_xs, xbox_bvh_builder      xg_xs.dll, XboxBvhBuilder.dll - texture layout and ray-tracing builder (skeletons)
   tools/                       list_imports, describe_image, connect_imports, boot_image, vkhost_probe
-  tests/                       14 tests, made-up inputs only
+  tests/                       15 tests, made-up inputs only
   CMakeLists.txt, build.cmd    build definition and the build-and-test script
 docs/
   BUILD-AND-RUN.md             how to build, test and run the shell yourself
@@ -60,7 +61,7 @@ LICENSE                        GPLv3-or-later
 shell\build.cmd
 ```
 
-Builds the shell, the console libraries and the tools, and runs the 14 tests. No game files and no GPU are needed.
+Builds the shell, the console libraries and the tools, and runs the 15 tests. No game files and no GPU are needed.
 To run the shell against your own copy of the game, see [docs/BUILD-AND-RUN.md](docs/BUILD-AND-RUN.md).
 
 ## License
