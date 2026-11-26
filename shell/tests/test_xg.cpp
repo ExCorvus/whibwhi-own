@@ -147,6 +147,24 @@ int main() {
                       static_cast<const void*>(source.data()), 128u, 2048u) == 0);
             CHECK(std::memcmp(texture.data() + stride + 8192, source.data(), 2048) == 0);
             CHECK(texture[stride + 8192 - 1] == 0xee && texture[stride + 8192 + 2048] == 0xee);
+
+            // The library remembers the memory it wrote, by its start, with the description and a number that
+            // grows with every copy into it; memory it did not write is not known.
+            const auto written_at = reinterpret_cast<int (*)(unsigned long long, Description*, unsigned long long*)>(
+                GetProcAddress(xg, "whiwhi_xg_written_at"));
+            CHECK(written_at != nullptr);
+            if (written_at) {
+                const auto start = reinterpret_cast<unsigned long long>(texture.data());
+                Description seen{};
+                unsigned long long first = 0, second = 0;
+                CHECK(written_at(start, &seen, &first) == 1);
+                CHECK(std::memcmp(&seen, &d, sizeof(d)) == 0 && first != 0);
+                CHECK(written_at(start + 8192, &seen, &second) == 0);
+                CHECK(call<long, void*, unsigned, unsigned, const void*, unsigned, unsigned>(
+                          object, 0x40, static_cast<void*>(texture.data()), 0u, 4u,
+                          static_cast<const void*>(source.data()), 128u, 2048u) == 0);
+                CHECK(written_at(start, nullptr, &second) == 1 && second > first);
+            }
             // And back out again.
             std::vector<unsigned char> out(2048 + 16, 0x33);
             CHECK(call<long, void*, unsigned, unsigned, unsigned, const void*, unsigned, unsigned>(
