@@ -300,7 +300,7 @@ ModuleTables read_module_tables(const std::uint8_t* block, std::size_t size, con
         entry.last = dword(at + 16);
         entry.scalar_register = static_cast<std::uint8_t>(entry.last & 0xFF);
         entry.fixed_index = static_cast<std::uint8_t>((entry.last >> 8) & 0xFF);
-        const bool known = entry.kind == 0 || entry.kind == 1 || entry.kind == 3 || entry.kind == 4 || entry.kind == 6;
+        const bool known = entry.kind == 0 || entry.kind == 1 || (entry.kind >= 3 && entry.kind <= 6);
         if (!known && tables.understood) {
             tables.understood = false;
             tables.not_understood = "first table, entry " + std::to_string(i) + ": kind " + std::to_string(entry.kind);
