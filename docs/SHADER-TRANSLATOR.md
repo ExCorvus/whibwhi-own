@@ -284,14 +284,14 @@ reader of the stream means the two can never disagree about where an instruction
   absolute/negate-hi, op_sel, output modifier/op_sel-hi, negate); the offsets, flags, address/data registers and
   resource fields of DS, FLAT, MUBUF, MTBUF and SMEM; the export mask, target and four sources of EXP; the
   address, data, resource, sampler, dimension, mask and cache fields of MIMG. MIMG's extra address words (the
-  count is in bits 2..1) are kept raw: this reader does not establish from its sources which bits of those words
-  hold a register number, so it decodes nothing from them.
+  count is in bits 2..1) are kept raw by this reader. The access pass of section 25 decodes them: each word
+  holds up to four 8-bit register numbers.
 - One constant word after an instruction is identified by the walk's length, not by re-testing the 255 fields.
   That covers the source-is-255 case, the six two-source vector opcodes that always take a constant, and the
   scalar constant-format opcode that does the same.
 
 **What is still raw.** The trap temporaries (112..123) are kept as numbers; an inline code outside the ranges
-above keeps its code and is marked as having no known value; MIMG's extra address words are raw; the packed
+above keeps its code and is marked as having no known value; MIMG's extra address words are raw in this reader (section 25's pass decodes them); the packed
 format's op_sel bits are reported as one group (they mean different things per opcode); the format and number
 of an MIMG/MTBUF resource field are the encoded fields (`srsrc >> 2`, the combined 7-bit buffer format), not
 expanded into register indices or format enumerations. A program whose walk meets a word of no format, or that
@@ -663,7 +663,8 @@ whether the simple links between those lists and the program's own instructions 
   ordinary input. In 13 programs some declared input is never interpolated.
 - 146 programs declare the position input (system value 1). Vector registers read before they are written:
   v0 and v1 in 431 programs (354 without a declared position, 77 with), v0 to v3 in 68 programs that all
-  declare the position, v2 alone in 1, none in 5. Reading, not established: v0 and v1 carry the two
+  declare the position, v2 alone in 1, none in 5. (The "v2 alone" was a mistake of the shape pass, corrected in
+  section 25: that program reads no vector register.) Reading, not established: v0 and v1 carry the two
   interpolation weights and, when the shader reads the position, v2 and v3 carry its x and y.
 - Exports: in all 505 the colour export targets are exactly the registers of the render-target output
   elements (system value 64) and every such element is exported; no program exports or declares depth. Every
@@ -709,3 +710,58 @@ the PC instructions that compute the same thing for one pixel, vertex or thread,
 from the module's tables and a PC root signature to match (section 20). Until that pass exists and its output
 has drawn a picture that can be compared with what the game means to show, none of the above has been checked
 by eye.
+
+## 25. What the memory, image, interpolation and export instructions touch (a helper's pass, reviewed; boot b115)
+
+`shell/shader_access.*` answers, for one decoded instruction that touches memory, an image, an interpolated
+attribute or an output, which registers hold what, in which order, and how many. It describes; it does not
+execute. Every statement and its public source is in [SHADER-ACCESS.md](SHADER-ACCESS.md). What a translator
+takes from it:
+
+| group | what the pass tells |
+|---|---|
+| scalar memory loads | the base is a pair of scalar registers; a 21-bit byte offset; an optional register offset, where the number 125 in the field means none; 1, 2, 4, 8 or 16 words into consecutive scalar registers |
+| scalar buffer loads | the same through a four-word buffer descriptor, checked against the descriptor's size; a read outside it gives zero |
+| vector buffer loads and stores | the descriptor's four scalar registers, the index and offset registers, a 12-bit byte offset, how many components |
+| image instructions | the image descriptor's eight scalar registers and the sampler's four; the order of the address words (offset, bias, compare value, derivatives, coordinates, slice or face, sample number, level of detail); the extra address words, each holding up to four register numbers; which result components are written |
+| interpolation | the two steps and the move, the attribute number and component, the register each step reads through |
+| export | the target number and its class (colour, depth, position, parameter), the four source registers, the packed form (two 16-bit values in a register), the last-export and valid-mask flags |
+| whole-wave instructions | the quad-mask instruction, the wait counters, the hints a one-pixel translation can leave out |
+
+Tested on instruction words built by hand only. No pass uses it on the game's programs yet.
+
+**Review before folding.** The coordinator rebuilt the helper's branch, ran the game-data check and compared
+five of its statements with the public files it had read (the address-word order comment in LLVM's intrinsic
+definitions, the parameter names, the extra address words and the "no register offset" number in Mesa's
+assembler). Four agreed. One did not, and it exposed two mistakes of our own:
+
+1. **The parameter move's source field.** The helper took the field of `v_interp_mov_f32` for an
+   inline-constant code (128 for 0, 130 for 2). Both public sources say otherwise: Mesa's assembler writes the
+   number 0, 1 or 2 straight into the field, and LLVM's printer reads the field as that plain number. With the
+   helper's reading every real move would have been refused. Corrected in `shader_access.cpp` and its test.
+2. **The reader did not record what the interpolation steps read.** `shader_isa.*` kept the source field of the
+   interpolation format as a raw number and never listed it among the instruction's operands. Now the two steps
+   (opcodes 0 and 1) have one source operand, a vector register; the move (opcode 2) has none, and its field is
+   marked as a selector.
+3. **The shape pass counted the move's selector as a register read.** A move with selector 2 looked like "reads
+   v2". Corrected in `shader_shape.cpp`, with a test.
+
+**Measured, boot b115** (the pixel programs of the first 1,024 different containers of the run: 505, of which
+500 interpolate; game folder unchanged):
+
+| statement | programs |
+|---|---|
+| uses the two interpolation steps only | 499 |
+| in those: the first step reads through v0 and the second through v1, and no other register | 499 of 499 |
+| uses the move only, with selector 2 | 1 |
+| vector registers read before written: v0 and v1 | 431 (354 without a declared position input, 77 with) |
+| the same: v0 to v3 | 68, all declaring the position input |
+| the same: none | 6 (the 5 that do not interpolate, and the one that uses the move) |
+
+So the "v2 alone" program of section 23 does not exist: it was the move-only program with its selector read as
+a register.
+
+**Not established.** What v2 and v3 hold in the 68 programs that read them (the position's x and y is a
+reading). The arithmetic of the two steps: the operand roles are from public source, the polynomial is a
+reading of the public names. What the value in M0 means. Whether the game's programs ever use the image forms
+the pass refuses.
