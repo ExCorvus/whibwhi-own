@@ -1,55 +1,72 @@
 # shell
 
-The runtime core.
+The runtime, the console libraries it provides, the tools and the tests. All of it is our own code.
 
-- `image.hpp` / `image.cpp` — PE image mapper. Parses a PE64 image and maps it flat (headers at 0, each section
-  at its RVA). PE structures defined from the public PE spec.
-- `imports.hpp` / `imports.cpp` — import table reader. Lists every library the mapped image imports and, per
-  function, its name or ordinal and the address-table slot the loader fills.
-- `loader.hpp` / `loader.cpp` — image loader. Places the image at its preferred address (or elsewhere, applying
-  its relocations), connects each import through a resolver, gives the image thread-local storage, sets every
-  section's page protection and registers the exception table. An import nothing provides gets a stub that names
-  the function if it is called. The loader does not start the image.
-- `thread_block.h` / `thread_block.cpp` — `whiwhi_tls.dll`, a small library built without the C runtime whose
-  thread-local section is one empty 64 KiB block. Windows gives thread-local storage only to libraries it loaded
-  itself, so the loader lends this library's storage index and per-thread blocks to the image: each thread gets
-  the image's initial data, and once the image is started its thread-storage callbacks are called for every
-  thread that starts or ends. One loaded image can hold the block at a time.
-- `host_libraries.hpp` / `host_libraries.cpp` — resolver that connects an import to the same-named library on
-  the PC (or in a folder added to the search), and records which libraries do not load.
-- `xmem.h` / `xmem.cpp` — `xmem.dll`, the console's memory library, answered on a PC. An image imports it by that
-  file name, so it is a real library beside the shell (never in the game folder). Physical pages are 64 KiB pieces
-  of pagefile-backed memory; a range for pages is a Windows placeholder reservation, and each mapped page is its
-  own view, so changing one page never disturbs another. It answers 9 of the 12 functions an image imports; the
-  three whose meaning is not known are left out and name themselves if called. Every region keeps the flags it
-  was asked for with, graphics bits included, for the shell to read.
-- `console.hpp` / `console.cpp` — where an import of a console image is connected. Everything goes to the
-  same-named library except `VirtualFree`, which the memory library answers: an image frees what
-  `XMemVirtualAlloc` gave it with `VirtualFree`.
-- `hosting.hpp` / `hosting.cpp` — flat hosting model. One contiguous GPU backing over the game's flat VA space;
-  `device_address = heap_base + (game_va - flat_base)`; real pages bound on demand.
-- `shader_isa.hpp` / `shader_isa.cpp` — reads a console (RDNA2-class) shader's instruction words: instruction
-  format, opcode, register fields, the inline constants the translator implements. An instruction it cannot
-  classify is reported, never guessed at.
-- `shader_translate.hpp` / `shader_translate.cpp` — the on-demand translator: console shader in, SPIR-V module
-  out, cached by content in memory only. A shader is translated whole or refused with a precise diagnostic.
-- `spirv.hpp` / `spirv.cpp` — our own small SPIR-V writer (module header, instruction framing, the opcodes the
-  translator emits). No third-party SPIR-V code.
-- `tools/` — command-line tools:
-  - `list_imports <image file>` prints the imported libraries and function counts.
-  - `describe_image <image file>` prints what the image asks of a loader: base, sections, data directories,
-    relocations, thread-local storage.
-  - `connect_imports <image file> [library folder] [--names]` loads the image without starting it and reports
-    where it was placed, its thread-local storage, which imports the shell's own libraries answer, which connect
-    to the PC's, and which are not provided.
-- `tests/` — unit tests (no game data).
+## The core (static library `whiwhi_shell`)
 
-## Build + test
+- `image.hpp` / `image.cpp` — reads a 64-bit Windows executable image: headers, sections, data directories. Can
+  lay the image out as it sits in memory.
+- `imports.hpp` / `imports.cpp` — lists every library the image imports and, per function, its name or ordinal
+  and the slot the loader fills.
+- `loader.hpp` / `loader.cpp` — places the image at its preferred address (or elsewhere, applying its
+  relocations), connects each import, gives the image thread-local storage, sets page protections and registers
+  its exception table. An import nothing provides gets a stub that reports the call. In its in-memory copy only,
+  the loader also replaces breakpoint bytes in stubs that the image's tables point at, and a breakpoint that
+  directly follows an indirect call (`nop_loader_stubs`). The loader does not start the image.
+- `thread_block.h` / `tls_seat.cpp` — the 64 KiB per-thread block lent to the loaded image. It lives in the
+  thread-local section of the tool's own executable, so Windows gives it storage index 0, the index the game
+  expects to own.
+- `host_libraries.hpp` / `host_libraries.cpp` — connects an import to the library of the same name: the shell's
+  own library beside the tool first, otherwise the PC's.
+- `console.hpp` / `console.cpp` — the few imports that are not answered by the same-named library: `VirtualFree`
+  goes to the memory library, and `GetModuleHandleA/W(NULL)` answers with the loaded game image.
+- `hosting.hpp` / `hosting.cpp` — address model for showing the game's memory to the GPU: one range,
+  `device_address = heap_base + (game_va - flat_base)`. Not yet connected to a GPU.
+- `shader_isa.hpp` / `shader_isa.cpp` — reads the instruction words of a console shader. An instruction it cannot
+  classify is reported, not guessed.
+- `shader_translate.hpp` / `shader_translate.cpp` — translates a console shader to SPIR-V, kept in memory. Today
+  it handles straight-line compute shaders of a handful of instructions and refuses everything else.
+- `spirv.hpp` / `spirv.cpp` — our own small SPIR-V writer.
+
+## The console libraries (one DLL each, named as the game imports them)
+
+- `xmem.h` / `xmem.cpp` → `xmem.dll`. The console's memory library: 64 KiB physical pages, address ranges the
+  pages are mapped into, committed memory. Keeps a record of every region with the flags the game asked for.
+- `d3d12_xs.h` / `d3d12_xs.cpp` → `d3d12_xs.dll`. The console's three graphics entry points. Creates a PC D3D12
+  device and hands the game a wrapper around it: standard functions are forwarded, most console-only functions
+  log once and answer "not implemented".
+- `xcrdapi.h` / `xcrdapi.cpp` → `XCRDAPI.dll`. The console's file-read library: our own factory, file, status
+  array and queue; a read goes straight from the file into the address the game names.
+- `xgameruntime.h` / `xgameruntime.cpp` → `xgameruntime.dll`. The runtime library the game loads at start:
+  initialise and uninitialise answer success, queries answer "not implemented".
+- `acp_hal.h` / `acp_hal.cpp` → `AcpHal.dll`. Console audio hardware library: the memory functions are real, the
+  audio device answers "not implemented".
+- `xapu.h` / `xapu.cpp` → `xapu.dll`, `chad.h` / `chad.cpp` → `chad.dll`. Console audio command libraries:
+  skeletons that log and answer failure.
+- `xg_xs.h` / `xg_xs.cpp` → `xg_xs.dll`, `xbox_bvh_builder.h` / `xbox_bvh_builder.cpp` → `XboxBvhBuilder.dll`.
+  Texture layout and ray-tracing builder libraries: skeletons that log and answer failure.
+
+## Tools
+
+- `list_imports <image file>` — the imported libraries and function counts.
+- `describe_image <image file>` — what the image asks of a loader: base, sections, data directories,
+  relocations, thread-local storage.
+- `connect_imports <image file> [library folder] [--names]` — loads the image without starting it and reports
+  which imports connect.
+- `boot_image <image file> [library folder] [--seconds N] [--no-callbacks] [--same-thread]` — loads the image
+  and starts its entry point; logs calls to imports nothing provides, and faults with a backtrace.
+- `vkhost_probe` — checks that the GPU can read ordinary host memory without a copy. Built only when the Vulkan
+  SDK is installed.
+
+## Tests
+
+`tests/` holds 13 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
+acpxapu, chad, xcrdapi, gfx_stubs). They use made-up inputs only: no game files, no GPU.
+
+## Build and test
 
 ```
 build.cmd
 ```
 
-MSVC + the bundled CMake/Ninja. Builds `whiwhi_shell`, `whiwhi_tls.dll`, `xmem.dll` and the tools, and runs
-`test_hosting`, `test_image`, `test_imports`, `test_loader`, `test_thread_storage`, `test_console`, `test_xmem`,
-`test_d3d12_xs` and `test_shader` via CTest. No GPU needed.
+MSVC with the CMake and Ninja that come with the Visual Studio Build Tools.
