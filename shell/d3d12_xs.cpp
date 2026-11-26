@@ -30,6 +30,7 @@
 #undef D3D12SerializeVersionedRootSignature
 
 #include <atomic>
+#include <string>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -253,7 +254,27 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
         return 0x80004003L;
     }
     *device = nullptr;
-    const HMODULE d3d12 = LoadLibraryA("d3d12.dll");
+    // Prefer a vkd3d-built d3d12.dll beside the shell (D3D12 on Vulkan, so the game's own memory can be imported
+    // into the GPU zero-copy); fall back to the system's native d3d12.dll.
+    HMODULE d3d12 = nullptr;
+    {
+        char self[MAX_PATH * 2] = {};
+        if (GetModuleFileNameA(nullptr, self, sizeof(self)) > 0) {
+            std::string dir = self;
+            const std::size_t slash = dir.find_last_of("\\/");
+            if (slash != std::string::npos) {
+                dir.resize(slash + 1);
+            }
+            const std::string vk = dir + "d3d12_vk.dll";
+            d3d12 = LoadLibraryExA(vk.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+            if (d3d12) {
+                logf("using the vkd3d-built d3d12.dll at %s (D3D12 on Vulkan)\n", vk.c_str());
+            }
+        }
+    }
+    if (!d3d12) {
+        d3d12 = LoadLibraryA("d3d12.dll");
+    }
     if (!d3d12) {
         logf("d3d12.dll could not be loaded\n");
         return 0x80004005L;
