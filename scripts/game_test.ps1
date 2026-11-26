@@ -1,6 +1,6 @@
-# The game test (AGENTS.md rule 11): runs the real game from your own copy inside the shell, once, and records
-# what the game did - every call it made through its import table and how the shell answered it, which calls the
-# shell said "not provided" to, where the run ended, frames and pipelines - then compares that with the last run
+# The game test (AGENTS.md rule 11): runs the real game from your own copy inside the weave, once, and records
+# what the game did - every call it made through its import table and how the weave answered it, which calls the
+# weave said "not provided" to, where the run ended, frames and pipelines - then compares that with the last run
 # you accepted, and with the map the project already has of the executable (docs/exe-map, docs/console-libs):
 # every call of the run is looked up there, and one the map does not name is listed as "not in the map", to be
 # read from the executable before anything is built for it (against-the-map.txt). Nothing of the game is written anywhere: the record holds names, counts and addresses only, and it
@@ -10,7 +10,7 @@
 #
 #   -Game     the folder of your game copy (read-only; checked unchanged after the run). Or set WHIWHI_GAME.
 #   -Seconds  how long the game runs (default 60).
-#   -NoBuild  use the build in shell\build as it is (default: build and run the sample tests first).
+#   -NoBuild  use the build in weave\build as it is (default: build and run the sample tests first).
 #   -Accept   if the verdict is PASS, this run becomes the baseline later runs are compared with.
 #   -Show     start the game where you can see it, and open a second window that shows its log as it is written
 #             (default: the game starts hidden).
@@ -30,7 +30,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$build = Join-Path $repo 'shell\build'
+$build = Join-Path $repo 'weave\build'
 if (-not $Game -or -not (Test-Path -LiteralPath $Game)) { throw 'give -Game <your game folder> (or set WHIWHI_GAME)' }
 $Game = (Resolve-Path -LiteralPath $Game).Path
 $exe = Get-ChildItem -LiteralPath $Game -Filter '*.exe' | Where-Object { $_.Name -like 'game_*' } | Select-Object -First 1
@@ -40,7 +40,7 @@ if ($outFull.StartsWith($Game, [StringComparison]::OrdinalIgnoreCase)) { throw '
 if (Get-Process boot_image -ErrorAction SilentlyContinue) { throw 'a run is already going (one at a time)' }
 
 if (-not $NoBuild) {
-    $buildLog = & (Join-Path $repo 'shell\build.cmd') 2>&1
+    $buildLog = & (Join-Path $repo 'weave\build.cmd') 2>&1
     if (-not ($buildLog -match '100% tests passed')) { $buildLog | Select-Object -Last 15; throw 'the build or its sample tests failed: the game was not started' }
 }
 
@@ -63,13 +63,13 @@ $work = Join-Path $outFull 'work'
 New-Item -ItemType Directory -Force -Path $run, $work | Out-Null
 Get-ChildItem -LiteralPath $work -File | Remove-Item -Force
 Copy-Item (Join-Path $build '*.exe'), (Join-Path $build '*.dll') $work -Force
-# A library the installation ships itself is loaded from the installation, not from the shell's build: the shell's
+# A library the installation ships itself is loaded from the installation, not from the weave's build: the weave's
 # file of the same name would win (host_libraries.cpp loads from beside boot_image.exe first).
 Get-ChildItem -LiteralPath $work -File | Where-Object { Test-Path -LiteralPath (Join-Path $Game $_.Name) } |
-    ForEach-Object { Write-Host "the installation ships $($_.Name) itself - the shell's file is left out"; Remove-Item -LiteralPath $_.FullName -Force }
+    ForEach-Object { Write-Host "the installation ships $($_.Name) itself - the weave's file is left out"; Remove-Item -LiteralPath $_.FullName -Force }
 $buildHash = Get-BuildHash $work
 $commit = (git -C $repo rev-parse --short HEAD).Trim()
-$dirty = @(git -C $repo status --porcelain -- shell scripts).Count
+$dirty = @(git -C $repo status --porcelain -- weave scripts).Count
 
 $before = Get-Listing $Game
 $exeHashBefore = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash
@@ -106,7 +106,7 @@ if ($p) { $progressReports = $p.Matches[0].Groups[1].Value; $progressLongest = $
 $frame = 0
 foreach ($m in ($text | Select-String -Pattern 'frame token (\d+)')) { $frame = [Math]::Max($frame, [int]$m.Matches[0].Groups[1].Value) }
 $made = 0
-foreach ($m in ($text | Select-String -Pattern 'device slot 86 #\d+:.*?; (\d+) made|pipelines built by the shell.*?: (\d+) built')) {
+foreach ($m in ($text | Select-String -Pattern 'device slot 86 #\d+:.*?; (\d+) made|pipelines built by the weave.*?: (\d+) built')) {
     $g = $m.Matches[0].Groups; $v = if ($g[1].Success) { $g[1].Value } else { $g[2].Value }
     $made = [Math]::Max($made, [int]$v)
 }
@@ -157,7 +157,7 @@ foreach ($l in $notProvided) {
 }
 $mapRows | Set-Content -LiteralPath (Join-Path $run 'against-the-map.txt') -Encoding utf8
 $summary = [ordered]@{
-    time = $stamp; commit = $commit; uncommitted_shell_files = $dirty; build = $buildHash; seconds = $Seconds
+    time = $stamp; commit = $commit; uncommitted_weave_files = $dirty; build = $buildHash; seconds = $Seconds
     elapsed = $elapsed; game_folder_unchanged = $unchanged; alive_at_end = $alive; end = $endLine
     imports_called = $called.Count; imports_called_not_provided = ($calledUnprovided -join ' ')
     last_frame_token = $frame; pipelines_made = $made; not_provided_answers = @($notProvided).Count
@@ -198,7 +198,7 @@ if (Test-Path (Join-Path $baseline 'summary.txt')) {
 }
 foreach ($r in $mapRows) { if ($r -match "^answer`t(.*)`tNOT IN THE MAP$") { $note.Add("not in the map yet: $($Matches[1])") } }
 $verdict = if ($fail.Count) { 'FAIL' } else { 'PASS' }
-$report = @("GAME TEST $verdict  ($stamp, commit $commit, $dirty uncommitted file(s) under shell/ and scripts/)") +
+$report = @("GAME TEST $verdict  ($stamp, commit $commit, $dirty uncommitted file(s) under weave/ and scripts/)") +
     ($summary.GetEnumerator() | ForEach-Object { '  {0}: {1}' -f $_.Key, $_.Value }) +
     ($fail | ForEach-Object { "  FAIL: $_" }) + ($note | Select-Object -First 60 | ForEach-Object { "  note: $_" })
 $report | Set-Content -LiteralPath (Join-Path $run 'verdict.txt') -Encoding utf8

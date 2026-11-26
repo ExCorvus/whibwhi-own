@@ -46,8 +46,8 @@ __pycache__/
 *.bcph
 *.bcph.stamp
 
-# our shell build artifacts
-shell/build/
+# our weave build artifacts
+weave/build/
 
 # agent state (not project content)
 .opencode/
