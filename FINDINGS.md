@@ -1206,3 +1206,20 @@ itself. Result of that run (FAIL, 5 s, the copy's folder unchanged):
 
 Also noted, not followed: the tool connect_imports now ends with a Windows heap-corruption stop (0xc0000374)
 before printing its report, with and without the installation folder.
+
+Follow-up, game tests 22:39, 22:40, 22:42 (all FAIL at the same step, the copy's folder unchanged; recording only,
+nothing answered differently): boot_image.cpp now records every C++ exception (its type names, a number's value,
+and the calls that led to it) and every text written for a debugger (OutputDebugString); d3d12_xs.cpp records a
+refused D3D12SerializeVersionedRootSignature (the description's parts and d3d12.dll's reason), the answer staying
+d3d12.dll's.
+- What is thrown: a `long`, value 0x80070057 (E_INVALIDARG), thrown inside the installation's XboxBvhBuilder.dll,
+  called from the program's construction of the builder (returns to image+0x2479455).
+- Why (the builder's own code, read from the copy: the path that ends in the throw follows a failed
+  D3D12SerializeVersionedRootSignature): the builder describes a root signature of version 1.1 with three
+  parameters (a shader-resource view, an unordered-access view, 16 constants, all registers 0, visible to all) and
+  root signature flags 0x3000000. d3d12.dll refuses it: "Unsupported bit-flag set (root signature flags 3000000)".
+  The builder then writes "D3D12 XDXR Error: Unexpected internal Failure:
+  D3D12SerializeVersionedRootSignature(&desc, &pRootSignatureBlob, nullptr)" and throws.
+- The two bits 0x1000000 and 0x2000000 are not among the PC's root signature flags. They are console additions to an
+  otherwise public description. What they mean is not known: nothing in the executable or the builder reads them
+  back; they are for the console's own graphics library.
