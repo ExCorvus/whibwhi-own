@@ -28,6 +28,13 @@ The runtime core.
   `XMemVirtualAlloc` gave it with `VirtualFree`.
 - `hosting.hpp` / `hosting.cpp` — flat hosting model. One contiguous GPU backing over the game's flat VA space;
   `device_address = heap_base + (game_va - flat_base)`; real pages bound on demand.
+- `shader_isa.hpp` / `shader_isa.cpp` — reads a console (RDNA2-class) shader's instruction words: instruction
+  format, opcode, register fields, the inline constants the translator implements. An instruction it cannot
+  classify is reported, never guessed at.
+- `shader_translate.hpp` / `shader_translate.cpp` — the on-demand translator: console shader in, SPIR-V module
+  out, cached by content in memory only. A shader is translated whole or refused with a precise diagnostic.
+- `spirv.hpp` / `spirv.cpp` — our own small SPIR-V writer (module header, instruction framing, the opcodes the
+  translator emits). No third-party SPIR-V code.
 - `tools/` — command-line tools:
   - `list_imports <image file>` prints the imported libraries and function counts.
   - `describe_image <image file>` prints what the image asks of a loader: base, sections, data directories,
@@ -44,5 +51,5 @@ build.cmd
 ```
 
 MSVC + the bundled CMake/Ninja. Builds `whiwhi_shell`, `whiwhi_tls.dll`, `xmem.dll` and the tools, and runs
-`test_hosting`, `test_image`, `test_imports`, `test_loader`, `test_thread_storage`, `test_console` and `test_xmem`
-via CTest. No GPU needed.
+`test_hosting`, `test_image`, `test_imports`, `test_loader`, `test_thread_storage`, `test_console`, `test_xmem`,
+`test_d3d12_xs` and `test_shader` via CTest. No GPU needed.
