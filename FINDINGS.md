@@ -941,3 +941,32 @@ What happened, written down at ExCorvus's request as research on AI agents (2026
    or scripts/ unless the game test passed on that exact build. First baseline (2026-11-26, 60 s): the game was
    alive at the end, it called 133 of its 587 imports (770,462 calls), none of them unprovided, 16,384 pipelines
    were made, and the shell gave 19 distinct "not provided" answers.
+
+## 2026-11-26 - the game's own root signatures say where each shader finds its data (measured, game test 18:48)
+
+ExCorvus: the shell has to be "the same as in the original exe"; what it provides is the rehydration of what the
+game itself describes. So before anything else was changed, this run recorded the game's own root signatures
+next to its shader modules (`WHIWHI_ROOT_SIGNATURE_RECORD`, device slot 16 and slot 86 in shell/d3d12_xs.cpp;
+the record stays on the user's PC).
+
+Game test 2026-11-26 18:48 (60 s, PASS, game folder unchanged):
+
+- The game made 15 root signatures. The PC's own root-signature reader reads every one of the game's blobs as an
+  ordinary version-1.1 root signature. Examples: one parameter that is a root buffer (t0, space 3); a root buffer
+  plus two root constants at b500, space 0; a descriptor table with t266, u23 and b27 in space 1, plus 22 fixed
+  samplers in space 1.
+- 714 shader modules were named next to a root signature, every one next to a signature the game had made.
+- Each entry of a module's first table names a root parameter, and the game's root signature has the matching
+  kind of parameter at that number:
+  - 710 entries of kind 0 (constants) name root constants at b500 with the same register number (500), and
+    their count is the number of 32-bit values (2);
+  - 2 entries of kind 1 (a buffer's address) name a root buffer (t0, space 3);
+  - 2,591 entries of kind 3 (a descriptor table's address) name a descriptor table;
+  - 704 entries of kind 6 (the sampler heap) and 6 of kind 5 (by number) name the number of a descriptor table;
+  - kind 4 (fixed sampler) entries name a fixed sampler, not a parameter (their number is not a parameter of
+    that signature, as the field's description in shader_program.hpp says).
+
+So the game's own description is enough: a translated shader can take each resource from the register and space
+the game's own root signature gives it, and the pipeline can use the game's own root signature. The shell's own
+layout (one root signature of the shell's, an arguments buffer, heap places) is not needed. That is the next
+change; nothing of it is built yet.
