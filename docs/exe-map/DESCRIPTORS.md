@@ -390,18 +390,18 @@ way as one made through the console call.
 
 ---
 
-## E. What the shell needs in order to answer slots 61 and 70
+## E. What the weave needs in order to answer slots 61 and 70
 
 Only what follows from A to C:
 
 1. **A sampler descriptor has to be written at an address the image chose**, and that address is inside the image's
    memory: `[0x75e7428] + id * [0x75e7438]`, where 0x75e7428 is the start of a heap the image created through
-   device slot 14 and 0x75e7438 is the descriptor increment the shell itself reported for heap type 1. The shell
-   already gives the image that address range (§"descriptor heaps" in `shell/d3d12_xs.cpp`), so slot 61 must
+   device slot 14 and 0x75e7438 is the descriptor increment the weave itself reported for heap type 1. The weave
+   already gives the image that address range (§"descriptor heaps" in `weave/d3d12_xs.cpp`), so slot 61 must
    translate the destination to the PC heap's matching position and write one PC sampler descriptor there.
    Because the *record of truth* is the image's memory, the translated PC descriptor is what the GPU reads — the
    image's bytes stay a parallel copy.
-2. **The description is 0x54 bytes of a console layout**, not `D3D12_SAMPLER_DESC`. To answer slot 61 the shell
+2. **The description is 0x54 bytes of a console layout**, not `D3D12_SAMPLER_DESC`. To answer slot 61 the weave
    must build a `D3D12_SAMPLER_DESC` from it: the three address modes are already in public numbering at
    +0x18/+0x1c/+0x20, the bias is a float at +0x30, Min/MaxLOD are floats at +0x24/+0x28, the 16-byte block at
    +0x44 is most likely the border colour. The filter, comparison and mip-filter fields (+0x04, +0x08, +0x0c,
@@ -410,7 +410,7 @@ Only what follows from A to C:
 3. **Slot 70 needs two descriptions, and neither is a public struct.** A (0x38 bytes) is the texture's tiling
    description — the same one xg_xs is asked about — and B (0x40 bytes) is a console-shaped SRV description with
    the format at +0 and the dimension at +4 in public numbering, the mip/array numbers at +0x10..+0x1c, the
-   resource address at +0x28. To answer slot 70 the shell must read block A's shape code (+0) and dimension hints
+   resource address at +0x28. To answer slot 70 the weave must read block A's shape code (+0) and dimension hints
    and block B's dimension (+4) and produce a real `D3D12_SHADER_RESOURCE_VIEW_DESC` plus a PC resource for the
    address at +0x28. A shape code of 1 with dimension 1 means a buffer; the width field at +0x10 is then a byte
    count (rounded to 16), not a texel count.
@@ -418,16 +418,16 @@ Only what follows from A to C:
    header). A translation table is needed for the values above 0x63; below that the DXGI number can be used
    directly.
 5. **The image copies descriptor records as raw 32-byte memory** (C.2) and turns a descriptor address into an
-   index by dividing by the increment (C.3). So the shell must keep the image's memory and the PC heap in step:
-   after any write through slot 61/70/18/19/17/20/21 the shell has to have written the same slot in the PC heap,
+   index by dividing by the increment (C.3). So the weave must keep the image's memory and the PC heap in step:
+   after any write through slot 61/70/18/19/17/20/21 the weave has to have written the same slot in the PC heap,
    and a **copy the image performs itself** (fn 0x555eb70, fn 0x4fd2b50/bf0/c60, fn 0x4e31bb0) will not reach the
-   PC heap unless the shell notices it. Today the shell has no mechanism for that. The image asks the library for
-   the copy instead when the device object's byte +0x18 is non-zero (slot 24) — that byte is the shell's lever: if
-   the shell is the object at 0x8759d00, it decides which of the two branches the image takes.
+   PC heap unless the weave notices it. Today the weave has no mechanism for that. The image asks the library for
+   the copy instead when the device object's byte +0x18 is non-zero (slot 24) — that byte is the weave's lever: if
+   the weave is the object at 0x8759d00, it decides which of the two branches the image takes.
 6. **Slot 22 is never called**, so samplers cannot be handled by forwarding a public call; slot 61 is the only
    sampler path that exists in this image.
 7. **The null descriptors** (C.2) are made through the public slot 18 at device start-up and then referenced by
-   index, so the shell's slot 18 answer has to be a real descriptor for a null resource (resource = null) at the
+   index, so the weave's slot 18 answer has to be a real descriptor for a null resource (resource = null) at the
    positions the image computed.
 
 ### Unknowns
