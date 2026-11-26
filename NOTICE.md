@@ -10,12 +10,12 @@ The reverse-engineering findings, the memory/rendering model, and the porting ap
 
 ## Third-party library used at run time: vkd3d-proton (LGPL-2.1)
 
-The shell can answer the game's D3D12 calls through **vkd3d-proton** (D3D12 implemented on Vulkan), which lets the
-shell import the game's own memory into the GPU zero-copy. vkd3d-proton is copyright its authors (Valve /
+The weave can answer the game's D3D12 calls through **vkd3d-proton** (D3D12 implemented on Vulkan), which lets the
+weave import the game's own memory into the GPU zero-copy. vkd3d-proton is copyright its authors (Valve /
 Hans-Kristian Vole / contributors) and licensed under the **GNU Lesser General Public License v2.1**; its source
 and license are at <https://github.com/HansKristian-Work/vkd3d-proton> (see its `LICENSE` and `COPYING.LESSER`).
 It is not vendored into this repository: build it separately (see `docs/BUILD-AND-RUN.md`) and place the built
-`d3d12.dll` (as `d3d12_vk.dll`) and `d3d12core.dll` beside the shell executable. ExCorvus approved reusing it with
+`d3d12.dll` (as `d3d12_vk.dll`) and `d3d12core.dll` beside the weave executable. ExCorvus approved reusing it with
 these notices on 2026-11-24. The LGPL requires that users can relink/replace it — that holds here, since it is
 loaded by file name at run time and the system d3d12.dll is the fallback.
 
