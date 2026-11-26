@@ -28,7 +28,8 @@ ctest --test-dir shell\build --output-on-failure
 ```
 
 Everything lands in `shell\build`: the `whiwhi_shell` library, the console libraries (`xmem.dll`, `d3d12_xs.dll`,
-`AcpHal.dll`, `xapu.dll`, `chad.dll`, `XCRDAPI.dll`, `whiwhi_tls.dll`) and the tools.
+`XCRDAPI.dll`, `xgameruntime.dll`, `AcpHal.dll`, `xapu.dll`, `chad.dll`, `xg_xs.dll`, `XboxBvhBuilder.dll`) and
+the tools.
 
 ## Test
 
@@ -36,32 +37,48 @@ Everything lands in `shell\build`: the `whiwhi_shell` library, the console libra
 ctest --test-dir shell\build --output-on-failure
 ```
 
-Twelve tests, no GPU and no game files needed (all fixtures are synthetic).
+13 tests, no GPU and no game files needed (all inputs are made up).
 
 ## Run the shell against the game
 
+The game looks for `xgameruntime.dll` in the folder of the running program and reads its own files from there,
+so the shell is run from a folder that holds both our programs and the game's files. Build that folder without
+touching the game folder:
+
+1. Make an empty work folder and copy `shell\build\*.exe` and `shell\build\*.dll` into it.
+2. For every file in the game folder, make a hard link of the same name in the work folder
+   (`mklink /H <work>\<name> <game folder>\<name>`); for every subfolder, a junction (`mklink /J ...`). Skip a
+   name that already exists in the work folder.
+3. Run from the work folder:
+
 ```
-shell\build\boot_image.exe "C:\XboxGames\GTA6.Xbox.v1.0.2.1\game_scarlett_master.exe" "C:\XboxGames\GTA6.Xbox.v1.0.2.1" --seconds 120
+boot_image.exe "C:\XboxGames\GTA6.Xbox.v1.0.2.1\game_scarlett_master.exe" "C:\XboxGames\GTA6.Xbox.v1.0.2.1" --seconds 120
 ```
 
-What it does, in order: parses the game executable, places it in memory at its own preferred address, applies
-relocations if that address was taken, connects its imports (PC libraries by the same name; the console-only
-libraries resolve to the DLLs built beside the tool), gives it thread-local storage, runs its thread-storage
-callbacks, then calls its entry point on a new thread. Every import the shell does not provide is logged and
-answered with failure, so the game's own error handling decides what happens next; exceptions are logged with
-their address in the game. The game folder is never written.
+The game also reads the registry value `ForceUseLocalServices` (a DWORD) under
+`HKLM\Software\Microsoft\GamingServices`; with it set to 1 the game searches the program's folder for
+`xgameruntime.dll`. Setting it needs administrator rights and is your decision.
 
-Tools:
+What `boot_image` does, in order: reads the game executable, places it in memory at its own preferred address
+(applying relocations if that address was taken), connects its imports (the shell's own console libraries
+beside the tool; otherwise the PC's library of the same name), gives it thread-local storage, runs its
+thread-storage callbacks, then calls its entry point on a new thread. A call to an import nothing provides is
+logged and answered with failure, so the game's own error handling decides what happens next. Faults are logged
+with a backtrace. The game folder is never written.
+
+The other tools:
 
 - `list_imports <image>` — the libraries and functions an image imports.
-- `describe_image <image>` — what an image asks of a loader (base, sections, directories, TLS).
-- `connect_imports <image> [library folder] [--names]` — loads an image without starting it and reports what connects.
+- `describe_image <image>` — what an image asks of a loader (base, sections, directories, thread-local storage).
+- `connect_imports <image> [library folder] [--names]` — loads an image without starting it and reports what
+  connects.
 
-Environment variables:
+Environment variables read by the tools and libraries:
 
-- `WHIWHI_GAME_DIR` — the folder console-style paths map onto (default the XboxGames install path).
-- `WHIWHI_TLS_REDIRECT=0` — leave TLS array entry 0 alone (default redirects it; the console gives the game index 0).
-- `WHIWHI_WATCH=<rva>` — arm a 1-byte write watchpoint on `image+<rva>` on the entry thread (diagnostics).
+- `WHIWHI_GAME_DIR` — the folder console-style file paths are mapped onto (default the XboxGames install path).
+- `WHIWHI_PEB_GAME=1` — make the process report the game executable as its main program file (not needed when
+  running from a work folder as above).
+- `WHIWHI_WATCH=<address inside the image, hex>` — stop when one byte at that address is written (diagnostics).
 - `WHIWHI_XMEM_TRACE=1` — log every call to the memory library.
 
 ## Using vkd3d (D3D12 on Vulkan) underneath
@@ -79,11 +96,12 @@ copy build\libs\d3d12\d3d12.dll  shell\build\d3d12_vk.dll
 copy build\libs\d3d12core\d3d12core.dll  shell\build\d3d12core.dll
 ```
 
-With those two files beside the tools, `boot_image` logs "using the vkd3d-built d3d12.dll" and the game's D3D12
-calls run on Vulkan — which is what lets the shell import the game's own memory into the GPU zero-copy later.
+With those two files beside the tools, `boot_image` logs "using the vkd3d-built d3d12.dll" and the PC device the
+shell creates runs on Vulkan. The plan is to use that to show the game's own memory to the GPU without copying it;
+that part is not built yet.
 
 ## Status and limits
 
-See `FINDINGS.md` for the measured log. Short version: the shell loads the game, connects 578 of its 587 imports,
-and runs its own start-up up to the game's file layer. The game currently stops at a stub slot in its own vtable
-that is an `int3` in the retail file (the console's loader fills such slots); the shell does not patch game code.
+The current state is the block at the top of `FINDINGS.md`. Short version: the shell loads the game, connects 586
+of its 587 imports and starts it; the game gets through part of its own start-up and stops. Nothing is drawn on
+screen yet.
