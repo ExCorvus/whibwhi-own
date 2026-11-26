@@ -406,6 +406,12 @@ void decode_fields(Instruction* ins) {
             f.attrchan = (w0 >> 8) & 0x3u;
             f.attr = (w0 >> 10) & 0x3Fu;
             f.vdst = (w0 >> 18) & 0xFFu;
+            // The two interpolation steps read a vector register; the parameter move's field is a selector
+            // and names no register (see VintrpFields).
+            f.vsrc_is_selector = ins->opcode == 2;
+            if (ins->opcode < 2) {
+                add_source(ins, 0, source_field(f.vsrc, true));
+            }
             break;
         }
         case WalkFormat::kDs: {
