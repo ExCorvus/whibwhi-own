@@ -1014,6 +1014,13 @@ StepResult step_sop2(MachineState& state, const Instruction& ins) {
             }
             return ok_step();
         }
+        // The four instructions below write SCC as well as their result: LLVM's SOPInstructions.td defines the
+        // logical and the shift instructions inside `let Defs = [SCC]`. The value is "the result is not zero":
+        // Mesa's compiler ends a program early on the SCC of s_andn2 of the live mask and the discarded lanes,
+        // and keeps or clears EXEC by it (aco_insert_exec_mask.cpp, the discard and demote handling), which
+        // only works with that meaning. For the plain AND and the shift the same meaning is taken from the
+        // same definition group; no file read for this work spells it out for them. An earlier form of this
+        // step left SCC as it was after these four; that was wrong.
         case 14: {  // s_and_b32
             std::uint32_t a = 0;
             std::uint32_t b = 0;
@@ -1021,6 +1028,7 @@ StepResult step_sop2(MachineState& state, const Instruction& ins) {
                 !store32(state, ins, a & b, &why)) {
                 return refuse_instruction(ins, why);
             }
+            state.scc = (a & b) != 0;
             return ok_step();
         }
         case 15: {  // s_and_b64
@@ -1030,6 +1038,7 @@ StepResult step_sop2(MachineState& state, const Instruction& ins) {
                 !store64(state, ins, a & b, &why)) {
                 return refuse_instruction(ins, why);
             }
+            state.scc = (a & b) != 0;
             return ok_step();
         }
         case 21: {  // s_andn2_b64: the first source AND NOT the second (LLVM's pattern: (and src0, (not src1)))
@@ -1039,6 +1048,7 @@ StepResult step_sop2(MachineState& state, const Instruction& ins) {
                 !store64(state, ins, a & ~b, &why)) {
                 return refuse_instruction(ins, why);
             }
+            state.scc = (a & ~b) != 0;
             return ok_step();
         }
         case 30: {  // s_lshl_b32: dst = src0 << src1 (the plain, not reversed, order)
@@ -1055,6 +1065,7 @@ StepResult step_sop2(MachineState& state, const Instruction& ins) {
             if (!store32(state, ins, a << b, &why)) {
                 return refuse_instruction(ins, why);
             }
+            state.scc = (a << b) != 0;
             return ok_step();
         }
         case 39: {  // s_bfe_u32: the field described by src1: offset in bits [4:0], width in bits [22:16]
