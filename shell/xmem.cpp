@@ -12,6 +12,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -817,7 +818,12 @@ int XMemMapPhysicalPagesScatter(void* const* addresses, unsigned long long count
     }
 }
 
-void* XMemAlloc(unsigned long long size, unsigned long long attributes) {
+// The image's allocation routines, when it has given them (whiwhi_xmem_set_allocation_hooks). They are called
+// with no lock of this library held, because they come back in through XMemAllocDefault / XMemFreeDefault.
+std::atomic<WhiwhiXmemAllocRoutine> g_alloc_routine{nullptr};
+std::atomic<WhiwhiXmemFreeRoutine> g_free_routine{nullptr};
+
+void* XMemAllocDefault(unsigned long long size, unsigned long long attributes) {
     Guard guard;
     ++state().stats.calls_alloc;
     try {
@@ -828,7 +834,7 @@ void* XMemAlloc(unsigned long long size, unsigned long long attributes) {
     }
 }
 
-void XMemFree(void* pointer, unsigned long long attributes) {
+void XMemFreeDefault(void* pointer, unsigned long long attributes) {
     Guard guard;
     ++state().stats.calls_free;
     try {
@@ -838,12 +844,37 @@ void XMemFree(void* pointer, unsigned long long attributes) {
     }
 }
 
-void* XMemAllocDefault(unsigned long long size, unsigned long long attributes) {
-    return XMemAlloc(size, attributes);
+void* XMemAlloc(unsigned long long size, unsigned long long attributes) {
+    if (const WhiwhiXmemAllocRoutine routine = g_alloc_routine.load()) {
+        {
+            Guard guard;
+            ++state().stats.calls_through_image_routines;
+        }
+        return routine(size, attributes);
+    }
+    return XMemAllocDefault(size, attributes);
 }
 
-void XMemFreeDefault(void* pointer, unsigned long long attributes) {
-    XMemFree(pointer, attributes);
+void XMemFree(void* pointer, unsigned long long attributes) {
+    if (const WhiwhiXmemFreeRoutine routine = g_free_routine.load()) {
+        {
+            Guard guard;
+            ++state().stats.calls_through_image_routines;
+        }
+        routine(pointer, attributes);
+        return;
+    }
+    XMemFreeDefault(pointer, attributes);
+}
+
+void whiwhi_xmem_set_allocation_hooks(WhiwhiXmemAllocRoutine alloc, WhiwhiXmemFreeRoutine free_routine) {
+    // Both or neither: an allocation made by the image's routine has to be freed by the image's routine.
+    if (!alloc || !free_routine) {
+        alloc = nullptr;
+        free_routine = nullptr;
+    }
+    g_alloc_routine.store(alloc);
+    g_free_routine.store(free_routine);
 }
 
 int XMemGetWorkingSetStatistics(unsigned long kind, void* statistics) {
