@@ -6,6 +6,13 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 
 ## Current state (2026-11-26)
 
+- **Newest (game test 23:13):** run with the installation's own libraries (the ray-tracing builder, FidelityFX,
+  Bink, libHttpClient load from the copy). The run stops about 5 s in, inside the installation's ray-tracing
+  builder: its shaders call 33 console shader functions named `xbox.` (AMD GPU operations, see the entry "the
+  builder's shaders call the console's own shader functions"), which vkd3d-proton's shader converter does not
+  have. vkd3d-proton is built from the fork ExCorvus/vkd3d-proton (branch whibwhi-own) with ExCorvus/dxil-spirv
+  (branch whibwhi-own: reads `insertvalue`). The shell changes of that run are not committed yet: no game test has
+  passed on them. The blocks below are older.
 - **Returned to this state on 2026-11-26** (bugfix: undid an AI trap). Everything built after boot b80 was
   taken out of the repository again; see the last dated entry. This block describes the b80 state, re-measured
   in boot b169.
