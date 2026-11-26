@@ -105,6 +105,7 @@ int main(int argc, char** argv) {
         std::printf("usage: boot_image <image file> [folder with the image's own libraries] [--seconds N]\n");
         return 2;
     }
+    std::setvbuf(stdout, nullptr, _IONBF, 0);  // a crash must not lose the report
     std::ifstream file(image_path, std::ios::binary);
     if (!file) {
         std::printf("cannot open %s\n", image_path);
