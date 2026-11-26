@@ -458,11 +458,11 @@ Counted over the 505 pixel and 227 vertex programs of a run:
 
 | link | holds in |
 |---|---|
-| pixel: attribute number n of an interpolation = the n-th input element that is not a system value, by rising register; channels inside its mask | 500 of 500 that interpolate |
+| pixel: attribute number n of an interpolation = the n-th register among the registers of the input elements that are not system values, in rising order (two elements may share a register; an earlier wording said "the n-th input element"); channels inside the mask of the elements at that register | 500 of 500 that interpolate |
 | pixel: colour export targets = the registers of the render-target outputs, each exported | 505 of 505 |
 | pixel: exports compressed, with the valid-mask flag, the done flag on the last one | 505 of 505 |
 | vertex: input element r arrives in the vector registers v(4 + 4r) to v(7 + 4r), one for each component | 227 of 227 |
-| vertex: parameter export target 32 + k = the k-th output element that is not the position, by rising register | 224 of 227 |
+| vertex: parameter export target 32 + k = the k-th register among the registers of the output elements that are not the position, in rising order | 224 of 227 |
 | vertex: the position is exported to target 12 | 227 of 227 |
 
 The 3 vertex programs outside the fifth row declare only the position and still export one parameter. The one
