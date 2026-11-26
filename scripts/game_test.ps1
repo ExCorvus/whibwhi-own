@@ -1,7 +1,9 @@
 # The game test (AGENTS.md rule 11): runs the real game from your own copy inside the shell, once, and records
 # what the game did - every call it made through its import table and how the shell answered it, which calls the
 # shell said "not provided" to, where the run ended, frames and pipelines - then compares that with the last run
-# you accepted. Nothing of the game is written anywhere: the record holds names, counts and addresses only, and it
+# you accepted, and with the map the project already has of the executable (docs/exe-map, docs/console-libs):
+# every call of the run is looked up there, and one the map does not name is listed as "not in the map", to be
+# read from the executable before anything is built for it (against-the-map.txt). Nothing of the game is written anywhere: the record holds names, counts and addresses only, and it
 # stays on your PC (under -Out), never in the repository.
 #
 #   scripts\game_test.ps1 -Game <your game folder> [-Seconds 60] [-NoBuild] [-Accept] [-Out <folder>]
@@ -103,11 +105,42 @@ if (Test-Path $ledger) {
 }
 $called = @($calls.Keys | Where-Object { $calls[$_].count -gt 0 })
 $calledUnprovided = @($called | Where-Object { $calls[$_].answer -eq 'not-provided' })
+
+# Against the map the project already has (docs/exe-map and docs/console-libs, measured from the executable):
+# where each call this run made is described there. A call the map does not name is listed as not in the map,
+# so it is read from the executable and written into the map before anything is built for it.
+$mapFiles = @(Get-ChildItem -LiteralPath (Join-Path $repo 'docs\exe-map'), (Join-Path $repo 'docs\console-libs') -Filter '*.md')
+$mapText = @{}
+foreach ($m in $mapFiles) { $mapText[$m.Name] = Get-Content -LiteralPath $m.FullName -Raw }
+function Find-InMap([string]$pattern, [string[]]$only = @()) {
+    @($mapText.Keys | Where-Object { (-not $only.Count -or $only -contains $_) -and $mapText[$_] -match $pattern } | Sort-Object)
+}
+$mapRows = New-Object System.Collections.Generic.List[string]
+$unmappedImports = 0
+foreach ($k in ($called | Sort-Object)) {
+    $name = ($k -split '!', 2)[1]
+    $where = Find-InMap ('\b' + [regex]::Escape($name) + '\b')
+    if (-not $where.Count) { $unmappedImports++ }
+    $mapRows.Add($(if ($where.Count) { "import`t$k`tin the map: $($where -join ', ')" } else { "import`t$k`tNOT IN THE MAP" }))
+}
+$unmappedAnswers = 0
+foreach ($l in $notProvided) {
+    $where = @()
+    if ($l -match '\] device: method slot (\d+)') { $where = Find-InMap ("slot $($Matches[1])\b|\| *$($Matches[1]) *\|") @('GRAPHICS-CALLS.md') }
+    elseif ($l -match '\] command list: method slot (\d+)') { $where = Find-InMap ("slot $($Matches[1])\b|\| *$($Matches[1]) *\|") @('COMMAND-LIST-ORDER.md', 'COMMAND-LIST.md') }
+    elseif ($l -match 'provider \{([0-9a-f]{8})') { $where = Find-InMap $Matches[1] }
+    elseif ($l -match '^\[xcrdapi\] queue method (\+0x[0-9a-f]+)') { $where = Find-InMap ([regex]::Escape($Matches[1])) @('xcrdapi-dstorage.md') }
+    elseif ($l -match '^\[\w+\] (\w+)::') { $where = Find-InMap ('\b' + $Matches[1] + '\b') }
+    if (-not $where.Count) { $unmappedAnswers++ }
+    $mapRows.Add($(if ($where.Count) { "answer`t$l`tin the map: $($where -join ', ')" } else { "answer`t$l`tNOT IN THE MAP" }))
+}
+$mapRows | Set-Content -LiteralPath (Join-Path $run 'against-the-map.txt') -Encoding utf8
 $summary = [ordered]@{
     time = $stamp; commit = $commit; uncommitted_shell_files = $dirty; build = $buildHash; seconds = $Seconds
     elapsed = $elapsed; game_folder_unchanged = $unchanged; alive_at_end = $alive; end = $endLine
     imports_called = $called.Count; imports_called_not_provided = ($calledUnprovided -join ' ')
     last_frame_token = $frame; pipelines_made = $made; not_provided_answers = @($notProvided).Count
+    imports_called_not_in_map = $unmappedImports; answers_not_in_map = $unmappedAnswers
 }
 $summary.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, $_.Value } | Set-Content -LiteralPath (Join-Path $run 'summary.txt') -Encoding utf8
 
@@ -141,6 +174,7 @@ if (Test-Path (Join-Path $baseline 'summary.txt')) {
 } else {
     $note.Add('no baseline yet: run again with -Accept to make one')
 }
+foreach ($r in $mapRows) { if ($r -match "^answer`t(.*)`tNOT IN THE MAP$") { $note.Add("not in the map yet: $($Matches[1])") } }
 $verdict = if ($fail.Count) { 'FAIL' } else { 'PASS' }
 $report = @("GAME TEST $verdict  ($stamp, commit $commit, $dirty uncommitted file(s) under shell/ and scripts/)") +
     ($summary.GetEnumerator() | ForEach-Object { '  {0}: {1}' -f $_.Key, $_.Value }) +
