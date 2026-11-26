@@ -76,8 +76,8 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
   program's descriptor loads up in the module's tables, takes inputs and outputs from the container's lists,
   and writes the result with `shader_dxbc`. It refuses a whole program rather than leave an instruction out.
   Checked against the reference interpreter of `shader_meaning` on thousands of random hand-built programs.
-  Run in memory on the game's programs: 281 of 505 pixel and 129 of 227 vertex programs of a run are written.
-  Nothing it writes is given to the graphics device yet. `docs/SHADER-TRANSLATOR.md` section 26.
+  Run in memory on the game's programs: 415 of 505 pixel and 224 of 227 vertex programs of a run are written.
+  Nothing it writes is given to the graphics device yet. `docs/SHADER-TRANSLATOR.md` sections 26 and 27.
 - `shader_translate.hpp` / `shader_translate.cpp` — translates a console shader to SPIR-V, kept in memory. Today
   it handles straight-line compute shaders of a handful of instructions and refuses everything else.
 - `spirv.hpp` / `spirv.cpp` — our own small SPIR-V writer.
