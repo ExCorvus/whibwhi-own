@@ -35,10 +35,10 @@ int main() {
     // The memory library's own functions come from the xmem.dll beside this test.
     void* alloc = resolve_console_import(host, "xmem.dll", named("XMemVirtualAlloc"));
     CHECK(alloc != nullptr && alloc == in_library("xmem.dll", "XMemVirtualAlloc"));
-    // Functions whose meaning is not known are not in it.
-    CHECK(resolve_console_import(host, "xmem.dll", named("XMemGetWorkingSetStatistics")) == nullptr);
-    CHECK(resolve_console_import(host, "xmem.dll", named("XMemIsToolsMemAvailable")) == nullptr);
-    CHECK(resolve_console_import(host, "xmem.dll", named("XMemTransferMemory")) == nullptr);
+    // The three answered with the PC's own numbers are in it as well.
+    CHECK(resolve_console_import(host, "xmem.dll", named("XMemGetWorkingSetStatistics")) != nullptr);
+    CHECK(resolve_console_import(host, "xmem.dll", named("XMemIsToolsMemAvailable")) != nullptr);
+    CHECK(resolve_console_import(host, "xmem.dll", named("XMemTransferMemory")) != nullptr);
 
     // VirtualFree from Windows' memory library is answered by the memory library, under any of its names.
     void* ours = in_library("xmem.dll", "whiwhi_xmem_virtual_free");
