@@ -149,6 +149,7 @@ struct Factory {
 struct File {
     Com com;
     HANDLE handle = nullptr;
+    std::wstring name;  // the PC path, for messages
 };
 
 constexpr long kPending = static_cast<long>(0x8000000AL);  // E_PENDING: no result yet
@@ -232,18 +233,20 @@ long __stdcall f_openfile(Factory* self, const wchar_t* path, const GUID* riid, 
     }
     bool existed = false;
     const std::wstring mapped = map_path(path, existed);
-    if (shown.fetch_add(1) < 5) {
+    if (shown.fetch_add(1) < 32) {
         logf("OpenFile: \"%ls\" -> \"%ls\" (%s)\n", path, mapped.c_str(), existed ? "found" : "NOT found");
     }
     HANDLE h = CreateFileW(mapped.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-        if (shown.load() <= 5) {
+        if (shown.load() <= 32) {
             logf("OpenFile: CreateFileW failed, error %lu\n", GetLastError());
         }
         return 0x80004005L;  // E_FAIL
     }
-    *out = make_file(h);
+    File* made = make_file(h);
+    made->name = mapped;
+    *out = made;
     return 0;
 }
 long __stdcall f_createstatusarray(Factory* self, unsigned long capacity, const wchar_t* name, const GUID* riid,
@@ -458,11 +461,21 @@ bool can_write(unsigned long long address, unsigned long long bytes) {
     return true;
 }
 
-// Reads exactly `bytes` at `offset`. The handle was opened for overlapped use.
+// Reads exactly `bytes` at `offset`. The handle was opened for overlapped use, and several threads read through
+// the same handle at once: each read waits on an event of its own, because a wait on the handle itself would
+// also wake for another thread's read and take its own as finished with nothing read (measured in boot b147:
+// reads well inside audio.rpf came back with 0 bytes).
 bool read_exactly(HANDLE file, unsigned long long offset, void* to, unsigned long bytes, unsigned long& error) {
+    thread_local HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!event) {
+        error = GetLastError();
+        return false;
+    }
     unsigned long done = 0;
     while (done < bytes) {
         OVERLAPPED ov{};
+        ov.hEvent = event;
+        ResetEvent(event);
         const unsigned long long at = offset + done;
         ov.Offset = static_cast<unsigned long>(at & 0xFFFFFFFFull);
         ov.OffsetHigh = static_cast<unsigned long>(at >> 32);
@@ -546,8 +559,11 @@ long carry_out(Queue* q, const unsigned char* r, unsigned long long number) {
     unsigned long error = 0;
     if (options == 0) {
         if (!read_exactly(file->handle, offset, reinterpret_cast<void*>(destination), source_bytes, error)) {
-            logf("request #%llu: reading %lu bytes at offset 0x%llx failed, error %lu\n", number, source_bytes,
-                 offset, error);
+            LARGE_INTEGER size{};
+            GetFileSizeEx(file->handle, &size);
+            logf("request #%llu: reading %lu bytes at offset 0x%llx of \"%ls\" (0x%llx bytes long) failed, error %lu\n",
+                 number, source_bytes, offset, file->name.c_str(), static_cast<unsigned long long>(size.QuadPart),
+                 error);
             return kFail;
         }
         if (number <= 3) {
@@ -559,8 +575,10 @@ long carry_out(Queue* q, const unsigned char* r, unsigned long long number) {
 
     std::vector<std::uint8_t> packed(source_bytes);
     if (!read_exactly(file->handle, offset, packed.data(), source_bytes, error)) {
-        logf("request #%llu: reading %lu bytes at offset 0x%llx failed, error %lu\n", number, source_bytes, offset,
-             error);
+        LARGE_INTEGER size{};
+        GetFileSizeEx(file->handle, &size);
+        logf("request #%llu: reading %lu bytes at offset 0x%llx of \"%ls\" (0x%llx bytes long) failed, error %lu\n",
+             number, source_bytes, offset, file->name.c_str(), static_cast<unsigned long long>(size.QuadPart), error);
         return kFail;
     }
     const whiwhi::shell::InflateOutcome o = whiwhi::shell::inflate_zlib(
