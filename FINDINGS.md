@@ -62,7 +62,9 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   slots 57, 62, 67 and 86; each request is read, its shaders are translated and a PC root signature is built
   (49,533 whole requests prepared in boot b137), but none is given to the device yet, so every draw is held. The
   command-list methods at slots 70, 71, 72, 74, 75, 126, 131, 132, 142 and 146 (what they are is not known).
-  The primitive topology number 0x11 (not a PC topology). Views made from raw descriptor words (device slot 70).
+  The primitive topology number 0x11 (not a PC topology). Device slot 70 (views) is answered for buffers and
+  for textures the game placed through slot 133; views of textures that exist only as memory and a tiling
+  description (most of them) are not written yet (boot b144).
   Reading or writing a texture the game keeps at its own address (its Map is refused).
   Device slot 81 (a per-frame query; the game tolerates the refusal). The queue's page-mapping call (slot 31)
   is recorded but nothing reads the record. The game runtime library answers every interface query with "no
@@ -1437,3 +1439,27 @@ The audio heap, shape contexts and first allocation are made; AcpHalCreate is re
 breakpoint, image+0x43ad94e, with the same unwind as b137. The process ended after 35 s. The entry for b141 says
 "8 presented frames": that number counted log lines, which the shell writes only at 1, 2, 4, 8, ... frames; b141
 in fact presented at least 128.
+
+## 2026-11-26 - device slot 70: real views of buffers and placed textures (measured, boot b144)
+
+- **What slot 70 is** (measured in the image, docs/exe-map/DESCRIPTORS.md section B): (device, block A, block B,
+  destination). Block B's first 0x28 bytes have the layout of the public `D3D12_SHADER_RESOURCE_VIEW_DESC`:
+  format, view dimension, component mapping, then the union at +0x10 (it is 8-byte aligned because the buffer
+  member starts with an 8-byte number). The copy sizes fn 0x4ecc890 uses for each view dimension are the sizes
+  of the public union members, the buffer path's +0x1c is the structure size (the count is size / that number)
+  and +0x20 = 1 only with format 39 (R32_TYPELESS), which is the public "raw" flag. After the public part comes
+  the resource's GPU address at +0x28. So slot 70 is CreateShaderResourceView with the resource named by its
+  address instead of by an object. (Section B.3 of the descriptor map said the union starts at +0x0c; corrected.)
+- **Built** (`shell/d3d12_xs.cpp`, `w_device_slot70`): the destination is turned into the PC heap position; the
+  address is looked up as a PC buffer the game asked the address of, a buffer placed over the game's memory, or
+  the game's memory opened on the PC device; for a texture view, a texture the game placed at that address
+  (slot 133). The PC view is written with the public call. Refused and counted: a format above the public
+  numbers, address 0, a structure size together with a format, a buffer that starts inside an element of the
+  PC buffer that holds it, a texture address the shell has no texture for, a dimension that does not fit.
+- **Boot b144** (40 s, game folder unchanged): 14 buffer views and 8 texture views written; not written: 52
+  texture views (the address is not a texture the game placed) and 4 structured-buffer views (not on an element
+  boundary of the PC buffer). The run ends as b143 did, at the audio start-up (AcpHalCreate refused, the game's
+  own breakpoint at image+0x43ad94e).
+- **Next for views**: the 52 textures exist on the console only as memory plus block A (the tiling description,
+  the same one xg_xs is asked about). A PC view of them needs a PC texture made from block A whose pixels come
+  from that memory, untiled. That is the texture-upload work, not started.
