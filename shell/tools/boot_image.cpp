@@ -8,6 +8,7 @@
 #include "host_libraries.hpp"
 #include "image.hpp"
 #include "loader.hpp"
+#include "offline.hpp"
 #include "thread_block.h"
 #include "xmem.h"
 
@@ -186,6 +187,7 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
         const auto key = std::make_pair(code, rip);
         std::lock_guard<std::mutex> lock2(g_log);
         if (!seen_bp.insert(key).second) {
+            offline_report();
             TerminateProcess(GetCurrentProcess(), 5);
         }
     }
@@ -315,6 +317,11 @@ int main(int argc, char** argv) {
     }
 
     AddVectoredExceptionHandler(1, &on_exception);
+    // When nothing handles an exception the process ends; say first what the network boundary refused.
+    SetUnhandledExceptionFilter([](EXCEPTION_POINTERS*) -> LONG {
+        offline_report();
+        return EXCEPTION_CONTINUE_SEARCH;
+    });
     set_unprovided_handler(&on_unprovided);
 
     LoadedImage loaded;
@@ -412,6 +419,7 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lock(g_log);
             std::fprintf(stderr, "[boot] still running after %us - the image is alive; ending the boot\n", seconds);
             std::fflush(stderr);
+            offline_report();
             TerminateProcess(GetCurrentProcess(), 0);
         }
         DWORD code = 0;
@@ -419,6 +427,7 @@ int main(int argc, char** argv) {
         CloseHandle(thread);
         std::fprintf(stderr, "[boot] entry thread finished with code %lu\n", code);
         std::fflush(stderr);
+        offline_report();
     }
 
     if (const HMODULE memory = GetModuleHandleA("xmem.dll")) {
