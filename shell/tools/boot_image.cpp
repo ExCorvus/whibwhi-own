@@ -16,6 +16,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -193,6 +194,16 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
     }
     std::fflush(stderr);
     if (code == 0x80000003) {
+        // The image installs an unhandled-exception filter of its own, so a run that ends at one of its
+        // breakpoints may never come back through ours: the report is printed at the first breakpoint inside
+        // the image as well.
+        static std::atomic<bool> reported_at_breakpoint{false};
+        if (g_loaded && g_loaded->base) {
+            const std::uintptr_t image = reinterpret_cast<std::uintptr_t>(g_loaded->base);
+            if (rip >= image && rip < image + g_loaded->size && !reported_at_breakpoint.exchange(true)) {
+                end_of_run_report();
+            }
+        }
         // A breakpoint may be handled by the image's own SEH (debug probes); let the process decide. Only when
         // it comes back as unhandled (second chance, seen before at the same address) do we end the boot.
         static std::set<std::pair<unsigned long, std::uintptr_t>> seen_bp;
