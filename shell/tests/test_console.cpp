@@ -54,6 +54,32 @@ int main() {
     void* tick = resolve_console_import(host, "KERNEL32.dll", named("GetTickCount"));
     CHECK(tick != nullptr && tick == in_library("kernel32.dll", "GetTickCount"));
 
+    // The network boundary: creating a socket (ordinal 23) and opening an HTTP session are connected to the
+    // shell's refusals, not to the PC's libraries; starting the socket library (ordinal 115) is the one call
+    // that goes to the real library, and a harmless helper (htons, ordinal 9) does too.
+    {
+        ImportedFunction by_ordinal;
+        by_ordinal.by_ordinal = true;
+        by_ordinal.ordinal = 23;
+        void* socket_answer = resolve_console_import(host, "WS2_32.dll", by_ordinal);
+        // A refusal does not even load the real library; the two calls that pass through do.
+        by_ordinal.ordinal = 115;
+        void* start_answer = resolve_console_import(host, "WS2_32.dll", by_ordinal);
+        by_ordinal.ordinal = 9;
+        void* htons_answer = resolve_console_import(host, "WS2_32.dll", by_ordinal);
+        const HMODULE ws2 = GetModuleHandleA("ws2_32.dll");
+        CHECK(ws2 != nullptr);
+        CHECK(socket_answer != nullptr &&
+              socket_answer != reinterpret_cast<void*>(GetProcAddress(ws2, "socket")));
+        CHECK(start_answer != nullptr && start_answer == reinterpret_cast<void*>(GetProcAddress(ws2, "WSAStartup")));
+        CHECK(htons_answer != nullptr && htons_answer == reinterpret_cast<void*>(GetProcAddress(ws2, "htons")));
+        void* http_open = resolve_console_import(host, "WINHTTP.dll", named("WinHttpOpen"));
+        CHECK(http_open != nullptr && http_open != in_library("winhttp.dll", "WinHttpOpen"));
+        // The refusal really refuses: no socket, and the error says the network is down.
+        const auto refuse_socket = reinterpret_cast<std::uintptr_t (__stdcall*)(int, int, int)>(socket_answer);
+        CHECK(refuse_socket(2, 1, 6) == static_cast<std::uintptr_t>(~0ull));
+    }
+
     // The export reader, on real libraries of this process: it finds what the Windows loader finds, and answers
     // nothing for a name that is not there, for a missing base, and for memory that is not an image.
     {
