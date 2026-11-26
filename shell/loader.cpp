@@ -26,9 +26,9 @@ constexpr unsigned kRelocation64 = 10;        // IMAGE_REL_BASED_DIR64
 
 UnprovidedHandler g_unprovided_handler = nullptr;
 
-void unprovided_called(const UnprovidedImport* which) {
+std::uintptr_t unprovided_called(const UnprovidedImport* which) {
     if (g_unprovided_handler) {
-        g_unprovided_handler(*which);
+        return g_unprovided_handler(*which);
     }
     if (which->by_ordinal) {
         std::fprintf(stderr, "the image called %s ordinal %u, which the shell does not provide\n",
@@ -39,12 +39,12 @@ void unprovided_called(const UnprovidedImport* which) {
     }
     std::fflush(stderr);
     TerminateProcess(GetCurrentProcess(), 3);
-    std::abort();
+    return 0;
 }
 
-// mov rcx, which ; mov rax, unprovided_called ; jmp rax
+// mov rcx, which ; mov rax, unprovided_called ; jmp rax  (unprovided_called's return becomes the call's result)
 void write_stub(std::uint8_t* at, const UnprovidedImport* which) {
-    void (*target)(const UnprovidedImport*) = &unprovided_called;
+    std::uintptr_t (*target)(const UnprovidedImport*) = &unprovided_called;
     at[0] = 0x48;
     at[1] = 0xB9;
     std::memcpy(at + 2, &which, 8);
