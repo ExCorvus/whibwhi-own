@@ -6,23 +6,28 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 
 ## Current state (2026-11-26)
 
-- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 13 tests pass.
+- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 14 tests pass.
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
-- **Running:** the game's entry point is started. The furthest run (boot b51) goes through the game's memory
+- **Running:** the game's entry point is started. The furthest run (boot b64) goes through the game's memory
   start-up, loads the game runtime library, opens all of the game's package files (read-only, through the
   package drive the shell answers), creates a real graphics device (Direct3D 12 on Vulkan, through vkd3d-proton,
-  on the RX 9070 XT), reads heap properties from it, creates its main command queue and a fence, and then stops
-  at the first console-only device function the shell does not provide: device slot 48, which the game uses to
-  create four more command queues. The game treats that failure as fatal, by its own check.
-- **Not built:** anything that draws. The console-only device functions (slot 48 onward: more queues, command
-  lists, pipeline states, views, frame events) answer "not implemented". The shader translator handles only
-  straight-line compute test shaders. The game runtime library answers every interface query with "no such
-  interface". The audio device, the ray-tracing builder and the texture layout library are skeletons that
+  on the RX 9070 XT), and completes the game's graphics start-up function: five command queues, fences,
+  command allocators and lists, a frame clock, descriptor heaps at the addresses the game chose, two
+  3840 x 2160 display surfaces, command signatures, and two pieces of the game's own memory opened on the
+  device without a copy (a 174 MiB buffer and the 6.2 GiB page pool).
+- **Where it stops:** when the game creates its first texture it asks the texture layout library
+  (`xg_xs.dll`) for a layout computer. The shell's library is a skeleton and refuses. The game does not check
+  that answer and faults on it (a read at an invalid address at image+0x16f71fb).
+- **Not built:** anything that draws. The texture layout library. Pipeline states (the shader translator
+  handles only straight-line compute test shaders). Command-list methods above slot 26, except indirect
+  execution. Views made from raw descriptor words (device slot 70), device slots 61 and 86, presentation
+  (nothing is shown), the page-mapping batch on the queue (slot 31). The game runtime library answers every
+  interface query with "no such interface". The audio device and the ray-tracing builder are skeletons that
   answer failure.
-- **Proven separately:** the GPU in this machine can read ordinary host memory without a copy
-  (`shell/tools/vkhost_probe.cpp`).
+- **Answers that are less than the full work** are listed in the entry "answers that say yes" below; each one
+  is a place to look first when the game behaves wrongly later.
 - **Nothing has been drawn on screen.**
 
 ## 2026-11-25 - the project restarts as its own shell
@@ -449,3 +454,80 @@ All 12 tests passed at that point.
   folder itself (only the shell's own programs and libraries beside boot_image.exe, no game files, no links)
   reaches the same point (boots b52, b53). The run wrote nothing into that folder. docs/BUILD-AND-RUN.md
   describes this way of running; the earlier staged folder with links to the game's files is superseded.
+
+## 2026-11-26 - the game's graphics start-up completes; the next stop is the texture layout library (measured, boots b54-b64)
+
+The game folder listing was identical before and after every run. docs/exe-map/GRAPHICS-CALLS.md section 2.2b
+has the table of every device call seen, with addresses.
+
+- **The game always gets the shell's own objects.** vkd3d-proton checks that the objects it is handed are its
+  own, so the method table of a real PC object cannot be replaced. Every object the device returns is wrapped,
+  and a wrapper the game passes back as an argument is replaced by its PC object before the PC library sees it.
+- **A wrapper's reference count started at 0 instead of 1** (an initialisation mistake in the shell). Fixed.
+- **Queues, lists, frame clock.** Device slot 48 creates four more queues and slot 73 the command lists; both
+  take a 16-byte description whose first number is the public type; the remaining numbers are not understood
+  and not applied. Device slots 78, 79 and 80 (frame interval, frame events, waiting for an event) are answered
+  by a clock in the shell at the interval the game sets (33,333 microseconds in the runs). The clock is a
+  timer, not a display. Four choices in it are the shell's own and not measured console behaviour; they are
+  written in the comment above the clock in shell/d3d12_xs.cpp.
+- **A buffer over the game's own memory.** The game reserves one range, splits it into five pieces, maps pages
+  into them (one run of pages crosses from one piece into the next; the memory library now allows that) and
+  asks the device (slot 133) for a buffer of 182,452,224 bytes at an address inside it. The shell opens that
+  memory as a heap on the PC device and places a real buffer on it: the GPU device has the game's memory, with
+  no copy. The same is done for the game's 6,236 MiB page pool when the game registers it (slot 74).
+- **The game's allocation routines.** The game exports a table named `__XMemAllocationHooks__` with an allocate
+  and a free routine. The shell's memory library now sends XMemAlloc and XMemFree through them (inferred from
+  the name and from the routines' own structure; the console's memory library was not read). The game uses
+  this to choose where a descriptor heap's memory lies and then checks it; with the routines connected that
+  check passes. Descriptor handles the game passes are moved from that address range to the PC heap's handles.
+  Not established: whether the game also writes descriptor records into that memory itself.
+- **Structure-returning methods.** Measured in runs: a 16-byte result is asked with the place first and the
+  object second (device slots 25, 26); an 8-byte result with the object first, answered in the register
+  (descriptor heap slot 9).
+- **Display surfaces.** Device slot 127 has the argument list of the public CreateCommittedResource3; the game
+  creates two 3840 x 2160 surfaces with the "can be displayed" heap flag, and the shell creates real PC
+  surfaces. The game also expects the graphics library to take those surfaces' memory from a 64 MiB block of
+  its own through XMemAlloc, and stops itself unless nearly all of that block was taken. The shell's library
+  makes that request for each surface, as the console's library is inferred to. The pixels are in the PC
+  device's memory; nothing is stored in the block. (This is in the list below.)
+- **Command signatures.** The game creates five. Four are real PC signatures. One has argument type 105 with
+  12-byte records, which a PC device does not have and whose meaning is not known; it is kept as a description
+  only, and executing it draws nothing and logs that.
+- **The command list's method order is not the public one above slot 26.** The game executes its signatures
+  through list slot 61 with the arguments of ExecuteIndirect; the public list has that at slot 59. The shell
+  now forwards only slots 3..26 (three of the game's calls agree with the public order there) and slot 61; all
+  other list slots answer "not provided" and log their arguments.
+- **Next stop.** After the graphics start-up the game calls device slots 61 and 86 (not provided, tolerated),
+  then XGSuggestSwizzleMode and XGCreateTextureComputer in the texture layout library. Both are refused, and
+  the game faults at image+0x16f71fb inside its texture creation (call chain +0x193df50, +0x34c001,
+  +0x19f545f). What the game asks of that library is in docs/exe-map/GRAPHICS-CALLS.md section 3.
+
+## 2026-11-26 - answers that say yes with less than the full work behind them
+
+Rule 4 says a library function must not answer success for work that was not done. These are the places where
+the shell's answer is success, or an object, with less behind it than on the console. Each is stated at the
+place in the code as well. They are the first places to look when the game later behaves wrongly.
+
+| where | what is answered | what is behind it |
+|---|---|---|
+| xgameruntime.dll, InitializeApiImpl / Ex / Ex2 | success | nothing is initialised; every interface query is then refused |
+| xmem.dll, XMemIsToolsMemAvailable | yes | a PC has no tools memory; the meaning of the answer to the game is not known |
+| xmem.dll, XMemTransferMemory | success | nothing is moved |
+| xmem.dll, XMemGetWorkingSetStatistics | success | the PC's memory totals, at field positions that are guessed |
+| d3d12_xs.dll, D3D12ConfigureVirtualMemoryX | success | nothing is configured |
+| XCRDAPI.dll, SetStagingBufferSize | success | there is no staging buffer; reads go straight to the destination |
+| d3d12_xs.dll, frame interval and frame events | success | a timer in the shell, not a display |
+| d3d12_xs.dll, queues (slot 48) and lists (slot 73) | real PC objects | two or three numbers of each description are ignored |
+| d3d12_xs.dll, resource descriptions (slots 25, 127, 133) | real PC objects | console-only flag bits 0x20000 and 0x300000 are dropped |
+| d3d12_xs.dll, display surfaces (slot 127) | real PC surfaces | the memory block the game budgets for them is requested but not used |
+| d3d12_xs.dll, command signature with argument type 105 | an object | a description only; executing it draws nothing |
+| fences | real PC fences | the PC library ignores the "shared" flag the game sets |
+| shell/loader.cpp | - | breakpoint bytes in stubs are replaced in memory (the one stated exception in rule 4) |
+
+Outside the repository: one registry value was set on the development PC with ExCorvus's agreement
+(`ForceUseLocalServices`, described in docs/BUILD-AND-RUN.md).
+
+**Network.** Rule 3 says nothing online. The game's network imports (the Windows socket and HTTP libraries, and
+the two HTTP libraries shipped with the game) are connected to the real libraries, and the shell does not yet
+refuse or log network calls at its boundary. No run so far has got past the graphics start-up, but nothing
+stops a later run from opening a connection. A refusal at the boundary is the next thing to build here.
