@@ -535,6 +535,18 @@ struct PcMachine {
                     ++pc;
                     continue;
                 }
+                case dx::Opcode::kLd: {
+                    // A texel read: the address is whole numbers; no sampler takes part.
+                    SampleCall call;
+                    call.how = ins.opcode;
+                    call.where = read(o[1]);
+                    call.texture_id = o[2].index0;
+                    call.texture_register = o[2].index1;
+                    samples.push_back(call);
+                    write(o[0], sample ? sample(call) : Vec4());
+                    ++pc;
+                    continue;
+                }
                 case dx::Opcode::kLdRaw: {
                     const std::uint32_t address = read(o[1]).c[0];
                     Vec4 value;
@@ -1902,6 +1914,118 @@ int main() {
         expect_lines(disassembler, "pixel program that reads the position", shader.container,
                      {"dcl_input_ps_siv linear noperspective v0.xy, position", "dcl_input_ps linear v1.x",
                       "dcl_output o0.xyzw", "ret"});
+    }
+
+    // ---- 4a3. a pixel program that reads a texel at its own pixel ----------------------------------------
+    // The position's x and y (v2, v3) become whole numbers, a 2-D texture's components z and w are read at
+    // that place into v8 and v9, and the program goes on with them as floats (each times 255). Variant 1 takes
+    // the first of them as a whole number instead; variant 2 only moves it; variant 3 uses it as a float, but
+    // after another instruction wrote a new value into the register: in all three nothing tells the pass that
+    // the texture holds floats, and nothing is written.
+    // Variant 4: the read is marked as giving 16-bit data, which the pass does not carry.
+    for (int variant = 0; variant < 5; ++variant) {
+        ModuleTables tables;
+        tables.found = true;
+        tables.understood = true;
+        tables.layout = {layout_entry(3, 8, 1, 23, 8, 0)};
+        tables.resources = {resource_entry(0, 3, 8, 23, 8, 8, 0)};
+        DeclaredResources declared;
+        declared.found = true;
+        declared.resources = {DeclaredResource{3, 1, 23, 23}};
+        Signature inputs, outputs;
+        inputs.found = outputs.found = true;
+        inputs.elements = {element("SV_Position", 0, 1, 3, 0, 0xF)};
+        inputs.elements[0].use_mask = 0x3;
+        outputs.elements = {element("SV_Target", 0, 64, 3, 0, 0xF)};
+        P p;
+        leading_no_operations(p);
+        smem(p, 3, 20, 8, kNoRegister, 0x20);  // the texture's eight words: the table's entry at byte 0x20
+        vop1(p, 8, 6, V(2));                   // v6 = whole number of v2
+        vop1(p, 8, 7, V(3));                   // v7 = whole number of v3
+        mimg(p, 0, 1, 0xC, 20, 6, 8, 0);       // read the texel at (v6, v7): components z, w into v8, v9
+        p[p.size() - 2] |= 1u << 12;           // "the address is not normalized", as a compiler sets it on a read
+        if (variant == 4) {
+            p[p.size() - 1] |= 1u << 31;       // 16-bit data: not carried
+        }
+        if (variant == 1) {
+            vop2(p, 37, 8, V(8), 8);           // v8 = v8 + v8 as whole numbers
+        } else if (variant == 2) {
+            vop1(p, 1, 8, V(8));               // v8 = v8
+            vop1(p, 1, 9, V(9));
+        } else if (variant == 3) {
+            vop1(p, 1, 8, V(6));               // v8 and v9 get other values before any use
+            vop1(p, 1, 9, V(7));
+        }
+        if (variant != 2) {
+            vop2(p, 8, 8, kLit, 8, fbits(255.0f));  // v8 = 255 * v8
+            vop2(p, 8, 9, kLit, 9, fbits(255.0f));
+        }
+        vop2(p, 47, 10, V(8), 9);              // pack v8, v9 as halves, twice
+        vop2(p, 47, 11, V(8), 9);
+        exp(p, 0, 0xF, true, true, true, 10, 11, 0, 0);
+        const DecodedShader program = decode(p, ShaderStage::kPixel);
+        CHECK(program.ok);
+        PcShaderInput input;
+        input.stage = PcStage::kPixel;
+        input.program = &program;
+        input.tables = &tables;
+        input.inputs = &inputs;
+        input.outputs = &outputs;
+        input.declared = &declared;
+        const PcShader shader = write_pc_shader(input);
+        if (variant == 4) {
+            CHECK(!shader.ok && shader.reason.find("16-bit data") != std::string::npos);
+            continue;
+        }
+        if (variant != 0) {
+            CHECK(!shader.ok && shader.reason.find("a texel read") != std::string::npos);
+            if (variant == 1) {
+                CHECK(shader.reason.find("whole numbers") != std::string::npos);
+            } else {
+                CHECK(shader.reason.find("no use of its values") != std::string::npos);
+            }
+            continue;
+        }
+        if (!shader.ok) {
+            std::printf("FAIL: the pixel program that reads a texel was not written: %s\n", shader.reason.c_str());
+            ++failures;
+            continue;
+        }
+        const PcBinding* texture = binding_of(shader, PcBindingKind::kTexture);
+        CHECK(shader.bindings.size() == 1 && texture != nullptr);
+        if (texture != nullptr) {
+            CHECK(texture->shader_register == 23 && texture->space == 1 && texture->offset_words == 8);
+            CHECK(texture->dimension == static_cast<std::uint32_t>(dx::ResourceDimension::kTexture2d));
+        }
+        PcMachine machine = machine_for(shader);
+        machine.inputs[0].c[0] = fbits(100.5f);
+        machine.inputs[0].c[1] = fbits(7.5f);
+        machine.sample = [](const SampleCall&) {
+            Vec4 texel;
+            texel.c[0] = fbits(9.0f);
+            texel.c[1] = fbits(9.0f);
+            texel.c[2] = fbits(0.5f);
+            texel.c[3] = fbits(0.25f);
+            return texel;
+        };
+        machine.run(shader.listing);
+        CHECK(machine.error.empty() && machine.finished && !machine.discarded);
+        CHECK(machine.samples.size() == 1);
+        if (machine.samples.size() == 1 && texture != nullptr) {
+            const SampleCall& call = machine.samples[0];
+            CHECK(call.how == dx::Opcode::kLd);
+            CHECK(call.texture_id == texture->id && call.texture_register == 23);
+            // Whole-number coordinates, nothing in the third place, level 0 in the fourth.
+            CHECK(call.where.c[0] == 100 && call.where.c[1] == 7 && call.where.c[2] == 0 && call.where.c[3] == 0);
+        }
+        CHECK(machine.outputs[0].c[0] == fbits(127.5f) && machine.outputs[0].c[1] == fbits(63.75f));
+        CHECK(machine.outputs[0].c[2] == fbits(127.5f) && machine.outputs[0].c[3] == fbits(63.75f));
+        expect_lines(disassembler, "pixel program that reads a texel", shader.container,
+                     {"dcl_resource_texture2d (float,float,float,float) T0[23:23], space=1",
+                      "dcl_input_ps_siv linear noperspective v0.xy, position", "ret"});
+        long hr = 0;
+        const std::string text = disassemble(disassembler, shader.container, &hr);
+        CHECK(hr == 0 && text.find("ld r") != std::string::npos && text.find(", T0[23].xyzw") != std::string::npos);
     }
 
     // ---- 4b. a vertex program ----------------------------------------------------------------------------
