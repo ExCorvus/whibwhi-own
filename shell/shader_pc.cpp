@@ -98,6 +98,7 @@ const PcCovered kCovered[] = {
     {kSM, 11, "s_buffer_load_dwordx8"}, {kSM, 12, "s_buffer_load_dwordx16"},
     {kMU, 12, "buffer_load_dword"}, {kMU, 13, "buffer_load_dwordx2"}, {kMU, 14, "buffer_load_dwordx4"},
     {kMU, 15, "buffer_load_dwordx3"},
+    {kMI, 0, "image_load"}, {kMI, 1, "image_load_mip"},
     {kMI, 32, "image_sample"}, {kMI, 36, "image_sample_l"}, {kMI, 37, "image_sample_b"},
     {kMI, 39, "image_sample_lz"},
     {kEX, 0, "exp"},
@@ -129,6 +130,186 @@ bool covered(WalkFormat format, unsigned opcode) {
         }
     }
     return false;
+}
+
+// How an instruction takes a vector register it reads: as a float, as a whole number, either way (a move, a
+// select, an output), or in a way this table does not know. kNot: the instruction does not read the register.
+// The typing follows the public table's operand lists for the instructions the pass covers; anything else is
+// kUnknown. Later values are the stronger answer when one instruction reads the register in two places.
+enum class ReadAs { kNot = 0, kEither = 1, kFloat = 2, kInteger = 3, kUnknown = 4 };
+
+ReadAs two_operand_reads(unsigned base) {
+    switch (base) {
+        case 1:
+            return ReadAs::kEither;
+        case 3: case 4: case 5: case 7: case 8: case 15: case 16: case 31: case 43: case 44: case 45: case 47:
+            return ReadAs::kFloat;
+        case 17: case 18: case 19: case 20: case 22: case 24: case 26: case 27: case 28: case 29: case 30:
+        case 37: case 38: case 39:
+            return ReadAs::kInteger;
+        default:
+            return ReadAs::kUnknown;
+    }
+}
+
+ReadAs one_operand_reads(unsigned base) {
+    switch (base) {
+        case 1:
+            return ReadAs::kEither;
+        case 7: case 8: case 32: case 33: case 34: case 35: case 36: case 37: case 39: case 42: case 46: case 51:
+            return ReadAs::kFloat;
+        case 5: case 6: case 11: case 17: case 18: case 19: case 20: case 55:
+            return ReadAs::kInteger;
+        default:
+            return ReadAs::kUnknown;
+    }
+}
+
+ReadAs compare_reads(unsigned opcode) {
+    if (opcode < 32) {
+        return ReadAs::kFloat;
+    }
+    if ((opcode >= 128 && opcode <= 135) || (opcode >= 144 && opcode <= 151) || (opcode >= 192 && opcode <= 199) ||
+        (opcode >= 208 && opcode <= 215)) {
+        return ReadAs::kInteger;
+    }
+    return ReadAs::kUnknown;
+}
+
+ReadAs own_three_operand_reads(unsigned opcode) {
+    switch (opcode) {
+        case 321: case 331: case 337: case 340: case 343:
+            return ReadAs::kFloat;
+        case 328: case 330: case 361: case 362: case 364: case 376: case 838: case 839: case 877: case 879:
+        case 881: case 882:
+            return ReadAs::kInteger;
+        default:
+            return ReadAs::kUnknown;
+    }
+}
+
+ReadAs read_as(const Instruction& ins, unsigned reg) {
+    ReadAs answer = ReadAs::kNot;
+    const auto take = [&answer](ReadAs how) {
+        if (static_cast<int>(how) > static_cast<int>(answer)) {
+            answer = how;
+        }
+    };
+    switch (ins.format) {
+        case WalkFormat::kVop2:
+        case WalkFormat::kVop1:
+        case WalkFormat::kVopc:
+        case WalkFormat::kVop3:
+        case WalkFormat::kVop3p: {
+            const unsigned opcode = ins.opcode;
+            if ((ins.format == WalkFormat::kVop1 && opcode == 0) || (ins.format == WalkFormat::kVop3 && opcode == 0x180)) {
+                return ReadAs::kNot;  // the no-operation's fields are not operands
+            }
+            for (unsigned i = 0; i < ins.source_count && i < 3; ++i) {
+                if (ins.src[i].kind != OperandKind::kVgpr || ins.src[i].index != reg) {
+                    continue;
+                }
+                if (ins.format == WalkFormat::kVop2) {
+                    take(two_operand_reads(opcode));
+                } else if (ins.format == WalkFormat::kVop1) {
+                    take(one_operand_reads(opcode));
+                } else if (ins.format == WalkFormat::kVopc) {
+                    take(compare_reads(opcode));
+                } else if (ins.format == WalkFormat::kVop3p) {
+                    // A whole float, or one 16-bit half of the register (taken as a whole number here).
+                    const bool wide = i == 0 ? (ins.vop3.omod_or_opsel_hi & 1) != 0
+                                      : i == 1 ? (ins.vop3.omod_or_opsel_hi & 2) != 0 : (ins.vop3.op_sel & 8) != 0;
+                    take(opcode >= 32 && opcode <= 34 ? (wide ? ReadAs::kFloat : ReadAs::kInteger) : ReadAs::kUnknown);
+                } else if (opcode < 0x100) {
+                    take(compare_reads(opcode));
+                } else if (opcode < 0x180) {
+                    take(two_operand_reads(opcode - 0x100));
+                } else if (opcode < 0x200) {
+                    take(one_operand_reads(opcode - 0x180));
+                } else {
+                    take(own_three_operand_reads(opcode));
+                }
+            }
+            // The multiply-accumulates also read their destination, as a float.
+            const unsigned base = ins.format == WalkFormat::kVop2 ? opcode
+                                  : ins.format == WalkFormat::kVop3 && opcode >= 0x100 && opcode < 0x180
+                                        ? opcode - 0x100 : 0u;
+            if ((base == 31 || base == 43) && ins.has_destination && ins.dst.kind == OperandKind::kVgpr &&
+                ins.dst.index == reg) {
+                take(ReadAs::kFloat);
+            }
+            return answer;
+        }
+        case WalkFormat::kVintrp:
+            return !ins.vintrp.vsrc_is_selector && ins.vintrp.vsrc == reg ? ReadAs::kFloat : ReadAs::kNot;
+        case WalkFormat::kMimg:
+        case WalkFormat::kMubuf:
+        case WalkFormat::kMtbuf:
+        case WalkFormat::kExp: {
+            const AccessInfo access = access_of(ins);
+            if (!access.found) {
+                return ReadAs::kUnknown;
+            }
+            switch (access.kind) {
+                case AccessKind::kImageSample:
+                case AccessKind::kImageGather:
+                case AccessKind::kImageGetLod:
+                    for (const ImageAddressWord& word : access.address) {
+                        if (word.reg == reg) {
+                            take(word.role == ImageAddressRole::kOffset ? ReadAs::kInteger : ReadAs::kFloat);
+                        }
+                    }
+                    return answer;
+                case AccessKind::kImageLoad:
+                case AccessKind::kImageResInfo:
+                    for (const ImageAddressWord& word : access.address) {
+                        if (word.reg == reg) {
+                            take(ReadAs::kInteger);
+                        }
+                    }
+                    return answer;
+                case AccessKind::kBufferLoad:
+                case AccessKind::kTypedBufferLoad:
+                    if ((access.idxen && access.index_register == reg) ||
+                        (access.offen && access.voffset_register == reg)) {
+                        take(ReadAs::kInteger);
+                    }
+                    return answer;
+                case AccessKind::kExport:
+                    for (unsigned i = 0; i < 4; ++i) {
+                        if (access.export_source[i] == reg) {
+                            // A packed output carries two 16-bit values a register: bits, not a float.
+                            take(access.compressed ? ReadAs::kInteger : ReadAs::kEither);
+                        }
+                    }
+                    return answer;
+                default:
+                    return ReadAs::kUnknown;
+            }
+        }
+        default:
+            return ReadAs::kNot;
+    }
+}
+
+// Whether an instruction writes a vector register.
+bool writes_vector(const Instruction& ins, unsigned reg) {
+    if (ins.format == WalkFormat::kMimg || ins.format == WalkFormat::kMubuf || ins.format == WalkFormat::kMtbuf) {
+        const AccessInfo access = access_of(ins);
+        if (!access.found) {
+            return false;
+        }
+        if (access.kind == AccessKind::kBufferLoad || access.kind == AccessKind::kTypedBufferLoad) {
+            return reg >= access.first_data_register && reg < access.first_data_register + access.components;
+        }
+        if (access.kind == AccessKind::kImageLoad || access.kind == AccessKind::kImageSample ||
+            access.kind == AccessKind::kImageGather || access.kind == AccessKind::kImageResInfo ||
+            access.kind == AccessKind::kImageGetLod) {
+            return reg >= ins.mimg.vdata && reg < ins.mimg.vdata + access.result_words;
+        }
+        return false;
+    }
+    return ins.has_destination && ins.dst.kind == OperandKind::kVgpr && ins.dst.index == reg;
 }
 
 struct Refusal {
@@ -1738,6 +1919,130 @@ private:
         }
     }
 
+    struct TextureKind {
+        dxbc::ResourceDimension dimension = dxbc::ResourceDimension::kTexture2d;
+        unsigned coordinates = 2;
+        bool sliced = false;
+    };
+
+    TextureKind texture_kind(const Instruction& ins, const AccessInfo& access) {
+        TextureKind kind;
+        switch (access.dim) {
+            case 0: kind.dimension = dxbc::ResourceDimension::kTexture1d; kind.coordinates = 1; break;
+            case 1: kind.dimension = dxbc::ResourceDimension::kTexture2d; kind.coordinates = 2; break;
+            case 2: kind.dimension = dxbc::ResourceDimension::kTexture3d; kind.coordinates = 3; break;
+            case 4:
+                kind.dimension = dxbc::ResourceDimension::kTexture1dArray;
+                kind.coordinates = 1;
+                kind.sliced = true;
+                break;
+            case 5:
+                kind.dimension = dxbc::ResourceDimension::kTexture2dArray;
+                kind.coordinates = 2;
+                kind.sliced = true;
+                break;
+            default:
+                refuse(not_written(ins, "a cube or multisampled texture"));
+        }
+        return kind;
+    }
+
+    // The texture an image instruction reads: the table entry whose descriptor its eight registers hold.
+    DOp texture_of(const Instruction& ins, const AccessInfo& access, const TextureKind& kind) {
+        const Desc* image = desc_at(access.descriptor_register_image);
+        if (image == nullptr || image->kind != DescKind::kTable || image->resource.resource_class != 0 ||
+            image->words != 8) {
+            refuse(not_written(ins, "a texture the pass knows nothing about"));
+        }
+        PcBinding& texture = bind_entry(PcBindingKind::kTexture, image->layout, 0);
+        if (texture.dimension != 0 && texture.dimension != static_cast<std::uint32_t>(kind.dimension)) {
+            refuse(not_written(ins, "one texture read as two kinds of texture"));
+        }
+        texture.dimension = static_cast<std::uint32_t>(kind.dimension);
+        return dxbc::resource_source(texture.id, texture.shader_register);
+    }
+
+    // A texel read at whole-number coordinates. The PC declares a texture with the kind of number it holds, and
+    // nothing in the program's tables says which that is; the pass declares every texture as holding floats. So
+    // the read is written only when the program itself treats what it read as floats: every instruction that
+    // reads one of the filled registers, from the read to the next write of that register in stored order, must
+    // take it as a float, and at least one must. (A reading of the program, taken to be so; a branch back to an
+    // earlier instruction is not followed.)
+    void image_load(const Instruction& ins, const AccessInfo& access) {
+        if (!have_tables()) {
+            refuse("a texture read, and the module's tables were not read");
+        }
+        // The "address is not normalized" flag belongs to a texel read: the public compiler sets it on every one
+        // (Mesa aco_select_nir.cpp, the fetch case: `tex->unrm = true`), and with whole-number coordinates there
+        // is nothing to normalize. The other flags change what the registers hold and are not carried.
+        if (access.a16) {
+            refuse(not_written(ins, "16-bit address components"));
+        }
+        if (access.d16) {
+            refuse(not_written(ins, "16-bit data"));
+        }
+        if (access.tfe) {
+            refuse(not_written(ins, "the texture-fail flag"));
+        }
+        const TextureKind kind = texture_kind(ins, access);
+        unsigned filled = 0;
+        for (unsigned component = 0; component < 4; ++component) {
+            filled += access.dmask >> component & 1;
+        }
+        bool as_float = false;
+        for (unsigned i = 0; i < filled; ++i) {
+            const unsigned reg = ins.mimg.vdata + i;
+            for (std::size_t k = static_cast<std::size_t>(cur_ins_) + 1; k < prog_.instructions.size(); ++k) {
+                const Instruction& later = prog_.instructions[k];
+                switch (read_as(later, reg)) {
+                    case ReadAs::kFloat: as_float = true; break;
+                    case ReadAs::kInteger:
+                        refuse("not written: a texel read whose values the program takes as whole numbers");
+                    case ReadAs::kUnknown:
+                        refuse("not written: a texel read whose values go to an instruction the pass cannot type");
+                    default: break;
+                }
+                if (writes_vector(later, reg)) {
+                    break;
+                }
+            }
+        }
+        if (!as_float) {
+            refuse("not written: a texel read, and no use of its values tells the kind of number");
+        }
+        const DOp texture_operand = texture_of(ins, access, kind);
+        // The address: coordinates, then the array slice, from x on; the level in the fourth component.
+        op(Opcode::kMov, {dxbc::temp_dest(coord_), dxbc::immediate4u(0, 0, 0, 0)});
+        unsigned placed = 0;
+        for (const ImageAddressWord& word : access.address) {
+            if (word.half != 2) {
+                refuse(not_written(ins, "a 16-bit address component"));
+            }
+            if (word.role == ImageAddressRole::kCoordinate || word.role == ImageAddressRole::kArraySlice) {
+                if (placed >= 3) {
+                    refuse(not_written(ins, "too many address components"));
+                }
+                op(Opcode::kMov, {dxbc::temp_dest(coord_, static_cast<std::uint8_t>(1u << placed)), rv(word.reg)});
+                ++placed;
+            } else if (word.role == ImageAddressRole::kLod) {
+                op(Opcode::kMov, {dxbc::temp_dest(coord_, dxbc::kMaskW), rv(word.reg)});
+            } else {
+                refuse(not_written(ins, "an address component the pass does not carry"));
+            }
+        }
+        if (placed != kind.coordinates + (kind.sliced ? 1u : 0u)) {
+            refuse(not_written(ins, "an address that does not fit the kind of texture"));
+        }
+        op(Opcode::kLd, {dxbc::temp_dest(texel_), dxbc::temp_source(coord_), texture_operand});
+        unsigned taken = 0;
+        for (unsigned component = 0; component < 4; ++component) {
+            if ((access.dmask >> component & 1) != 0) {
+                set_v(ins.mimg.vdata + taken, dxbc::temp_scalar(texel_, static_cast<std::uint8_t>(component)));
+                ++taken;
+            }
+        }
+    }
+
     void image_sample(const Instruction& ins, const AccessInfo& access) {
         if (!have_tables()) {
             refuse("a texture read, and the module's tables were not read");
@@ -1745,30 +2050,10 @@ private:
         if (access.unrm || access.a16 || access.d16 || access.tfe) {
             refuse(not_written(ins, "a flag the pass does not carry"));
         }
-        dxbc::ResourceDimension dimension = dxbc::ResourceDimension::kTexture2d;
-        unsigned coordinates = 2;
-        bool sliced = false;
-        switch (access.dim) {
-            case 0: dimension = dxbc::ResourceDimension::kTexture1d; coordinates = 1; break;
-            case 1: dimension = dxbc::ResourceDimension::kTexture2d; coordinates = 2; break;
-            case 2: dimension = dxbc::ResourceDimension::kTexture3d; coordinates = 3; break;
-            case 4: dimension = dxbc::ResourceDimension::kTexture1dArray; coordinates = 1; sliced = true; break;
-            case 5: dimension = dxbc::ResourceDimension::kTexture2dArray; coordinates = 2; sliced = true; break;
-            default:
-                refuse(not_written(ins, "a cube or multisampled texture"));
-        }
-        // The texture.
-        const Desc* image = desc_at(access.descriptor_register_image);
-        if (image == nullptr || image->kind != DescKind::kTable || image->resource.resource_class != 0 ||
-            image->words != 8) {
-            refuse(not_written(ins, "a texture the pass knows nothing about"));
-        }
-        PcBinding& texture = bind_entry(PcBindingKind::kTexture, image->layout, 0);
-        if (texture.dimension != 0 && texture.dimension != static_cast<std::uint32_t>(dimension)) {
-            refuse(not_written(ins, "one texture read as two kinds of texture"));
-        }
-        texture.dimension = static_cast<std::uint32_t>(dimension);
-        const DOp texture_operand = dxbc::resource_source(texture.id, texture.shader_register);
+        const TextureKind kind = texture_kind(ins, access);
+        const unsigned coordinates = kind.coordinates;
+        const bool sliced = kind.sliced;
+        const DOp texture_operand = texture_of(ins, access, kind);
         // The sampler: one taken from the heap by a number computed earlier, or the one the shader declares.
         DOp sampler_operand;
         const Desc* sampler = desc_at(access.sampler_register);
@@ -2029,6 +2314,12 @@ private:
             case AccessKind::kScalarBufferLoad: scalar_buffer_load(ins, access); return;
             case AccessKind::kBufferLoad: buffer_load(ins, access); return;
             case AccessKind::kImageSample: image_sample(ins, access); return;
+            case AccessKind::kImageLoad:
+                if (ins.opcode > 1) {
+                    break;
+                }
+                image_load(ins, access);
+                return;
             case AccessKind::kInterp: interpolate(ins, access); return;
             case AccessKind::kExport: export_values(ins, access); return;
             default:
