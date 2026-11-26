@@ -16,6 +16,46 @@ plain `ReadFile` reads into the game's own memory. The reads land in the game's 
 memory our `xmem` library already owns — so the PC answer is a host read into that address, zero-copy, no GPU
 resource, no staging buffer.
 
+## 0a. What runs showed, and what the shell does today (added after boots b67-b80)
+
+The sections below were written before the game had made a single request in a run. The runs since then
+confirmed the design and corrected three details. Where this section and a later one disagree, this one holds.
+
+**The request, as the game fills it (measured in runs; eight 64-bit words).** `+0x00` options, `+0x08`
+destination address, `+0x10` zero, `+0x18` destination size (32 bits), `+0x20` the file object, `+0x28` the
+offset in the file, `+0x30` source size (32 bits), `+0x38` zero. Section 4's reading of `+0x18` and `+0x28` was
+wrong.
+
+**Options 1 = the file bytes are one zlib stream.** Every request seen so far has options 1: a compressed piece
+of a package (the first bytes are the standard zlib header) that decodes to exactly 65,536 bytes at the
+destination. Section 4's statement that the game never uses a decompression mode was wrong: it was read from one
+request builder only. In boot b68 the game read its whole shader package this way, 4,199 pieces, every one
+decoding to exactly the size asked with the whole source used. Options 0 (plain copy) is carried out as well;
+options `0x400000` (memory source) has not been seen in a run and is refused until its layout has been.
+
+**Completion.** After a batch of requests the game calls queue method `+0x20` with the status array and an
+entry number - so `+0x20` is the status call on the console queue (measured), not `Submit` - and then asks the
+status array (`+0x18`, is-complete) until it says yes. It also calls queue method `+0x30` with three values the
+shell does not recognise; that call is answered "not implemented" and the game carries on. What it is has not
+been read.
+
+**What the shell's library does** (`shell/xcrdapi.cpp`, decoder in `shell/inflate.*`, tests in
+`shell/tests/test_xcrdapi.cpp` and `shell/tests/test_inflate.cpp`):
+
+- Our own factory, file, status array and queue with the console layout, as proposed in section 8. Files are
+  opened read-only through the package drive (`G:\` answered from the game folder).
+- A request is carried out inside the enqueue call: a plain copy is read straight into the destination; a zlib
+  piece is read into a temporary buffer in memory and decoded into the destination by our own decoder, written
+  from the public format description. Nothing is written to disk.
+- A request that is not carried out is refused with a failure, logged in full, and leaves the destination
+  untouched: unknown option bits, a non-zero word where zero was always seen, a file that is not one of this
+  library's live file objects, an empty or oversized piece, a plain copy whose sizes differ, a destination that
+  is not committed writable memory, bytes that are not a valid zlib stream, a read past the end of the file.
+- A status entry starts as "pending". It is written only when the game's status call names it, with success or
+  with the first failure since the previous entry. The earlier version answered "complete, success" for every
+  entry whatever had happened; that was an answer without the work behind it and is gone.
+- `SetStagingBufferSize` still answers success without doing anything: there is no staging buffer.
+
 ## 1. The import and its one call site
 
 - **V** `XCRDAPI.dll!DStorageGetFactory` has exactly one call site in the image: `0x1d8e4f0`, inside function
