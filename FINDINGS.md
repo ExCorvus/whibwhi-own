@@ -1362,3 +1362,17 @@ the fifth one (29,996 bytes) during which the driver failed twice with the lane 
 expected: the 21st shader (8,188 bytes) uses MakeUniform, a lane function not taught yet, and the builder throws
 E_INVALIDARG. So the driver failure came with the lane count the translator asked for: with it, the driver
 failed; without it, the driver made the pipeline. Why, was not measured. The lane-count change stays held.
+Follow-up, lane functions (game test 00:40, run-20261127-004049; FAIL about 5 s in, the copy's folder unchanged):
+- Taught in the fork's dxil-spirv, all working from the lane number and lane count the driver chose (none assumes
+  32 or 64): GetLaneID, ReadLane, MakeUniform (i32, i64), LaneSwizzle, V_CNDMASK_B32, Ballot64, MBCNT64,
+  WaveMin_U32. How LaneSwizzle and V_CNDMASK_B32 are called was read from the shaders (in memory, to the screen
+  only): LaneSwizzle gets the patterns 30, 60, 120, 240, 480, which as AMD's ds_swizzle bit-mask encoding read
+  lane&~1, (lane&28)|1, (lane&24)|3, (lane&16)|7 and lane 15 within each 32 lanes; each is followed by
+  V_CNDMASK_B32 with the lane masks 0xAAAAAAAA, 0xCCCCCCCC, 0xF0F0F0F0, 0xFF00FF00 (both halves) and the values
+  {0, 1}. Together these are the steps of a running sum across lanes, so the reading holds for both (inferred
+  from use).
+- Checker: 51 of 52 accepted; the one left uses TypedLoad.
+- Game test: 31 builder pipelines made, none refused. Then the driver fails again at amdvlk64.dll+0xfdae8a (the
+  same place as at 00:22 and 00:24) while the 32nd is made. The translator set no lane count in this run. So that
+  place in the driver is not reached only through the lane count. Which shader the 32nd pipeline holds was not
+  recorded.
