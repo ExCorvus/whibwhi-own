@@ -29,55 +29,10 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
   `docs/console-libs/network.md`.
 - `hosting.hpp` / `hosting.cpp` — address model for showing the game's memory to the GPU: one range,
   `device_address = heap_base + (game_va - flat_base)`. Not yet connected to a GPU.
-- `shader_container.hpp` / `shader_container.cpp` - recognises the two headers the game's shader bytes arrive
+- `shader_container.hpp` / `shader_container.cpp` — recognises the two headers the game's shader bytes arrive
   with; it names no instruction stream it cannot prove.
-- `shader_dxbc.hpp` / `shader_dxbc.cpp` - writes a Direct3D container ('DXBC') holding a shader-model-5.1
-  program: the container header and checksum, the input/output signatures, and an instruction-level token
-  builder. The system disassembler checks what it writes; `docs/SHADER-CONTAINER-WRITER.md` describes the
-  format and what is not covered.
-- `shader_walk.hpp` / `shader_walk.cpp` — where each instruction of a console shader program starts and how
-  many words it has, for every instruction format. Checked against the game's own programs in a run: a walk
-  that reads every length correctly lands exactly on the program's end word.
-- `shader_names.hpp` / `shader_names.cpp` — the public name and group of the instructions identified so
-  far (66 pairs of format and opcode, the most used ones); every row is explained with its public source in
-  `docs/SHADER-OPCODES.md`. A pair that is not listed has no name here.
-- `shader_isa.hpp` / `shader_isa.cpp` — the instruction reader: format, opcode and length come from the
-  walk, and the fields of every format (registers, constants, offsets, flags) are read from the public
-  encoding of this GPU generation. Run in memory on the game's own programs: it decodes every program the
-  walk can read (1,302 of 1,302 precompiled programs and 581 of 581 container programs in one run).
-- `shader_program.hpp` / `shader_program.cpp` — finds the console's compiled program inside a shader
-  container and unpacks it in memory: the directory in the container's 'DXIL' part, the zlib-packed block,
-  and the module inside it whose header names where the code is. Also reads the module's two tables, which
-  say through which register and at which offset each resource reaches the program, and the container's
-  public signature parts (the inputs and outputs a shader declares). Refuses anything laid out differently.
-- `shader_shape.hpp` / `shader_shape.cpp` — what a decoded program expects and uses: registers read
-  before they are written, what it exports, and where each image, sampler and buffer descriptor comes from.
-- `shader_flow.hpp` / `shader_flow.cpp` — the control flow of a decoded program: its blocks, branches,
-  dominators and loops, and a tree of nested ifs and loops when the flow can be written that way. It says
-  so, with a reason, when it cannot. Run in memory on the game's programs: 701 of 927 analysed (the rest are
-  vertex programs that call through a register), 538 of those written as a tree.
-- `shader_emit_flow.hpp` / `shader_emit_flow.cpp` — the same control flow as a flat list of items a shader
-  language can run (if / else, loop, break, continue): nested where the tree reaches, and one loop around
-  a choice of the next block where it does not. Checked by running the items against the graph on hand-built
-  shapes and 2,000 random graphs. Run in memory on the game's programs: all 700 programs analysed in
-  one run are written, 537 nested and 163 with the choice loop.
-- `shader_meaning.hpp` / `shader_meaning.cpp` — what the most used arithmetic, move, compare and bit
-  instructions compute, written as a one-lane reference interpreter and checked on hand-built words. It
-  refuses memory, image, interpolation, export and branch instructions, and every case its public sources
-  do not state. `docs/SHADER-MEANINGS.md` lists each instruction with its source.
-- `shader_access.hpp` / `shader_access.cpp` - for an instruction that touches memory, an image, an interpolated
-  attribute or an output: which registers hold what, in which order, and how many (scalar loads, buffer loads
-  and stores, the order of an image instruction's address words, the interpolation steps, exports, whole-wave
-  instructions). A description, not an execution; it refuses what its public sources do not establish. Its
-  own test uses hand-built words only; `shader_pc` uses it on the game's programs. `docs/SHADER-ACCESS.md`
-  gives the source of each statement.
-- `shader_pc.hpp` / `shader_pc.cpp` - the pass that writes a PC shader for one console pixel or vertex
-  program: it walks the program's control-flow items, gives each machine register a PC temporary, looks the
-  program's descriptor loads up in the module's tables, takes inputs and outputs from the container's lists,
-  and writes the result with `shader_dxbc`. It refuses a whole program rather than leave an instruction out.
-  Checked against the reference interpreter of `shader_meaning` on thousands of random hand-built programs.
-  Run in memory on the game's programs: 496 of 505 pixel and all 227 vertex programs of a run are written.
-  Nothing it writes is given to the graphics device yet. `docs/SHADER-TRANSLATOR.md` sections 26 to 29.
+- `shader_isa.hpp` / `shader_isa.cpp` — reads the instruction words of a console shader. An instruction it cannot
+  classify is reported, not guessed.
 - `shader_translate.hpp` / `shader_translate.cpp` — translates a console shader to SPIR-V, kept in memory. Today
   it handles straight-line compute shaders of a handful of instructions and refuses everything else.
 - `spirv.hpp` / `spirv.cpp` — our own small SPIR-V writer.
@@ -99,12 +54,10 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
   `XCRDAPI.dll`.
 - `xgameruntime.h` / `xgameruntime.cpp` → `xgameruntime.dll`. The runtime library the game loads at start:
   initialise and uninitialise answer success, interface queries are logged and answered "no such interface".
-- `acp_hal.h` / `acp_hal.cpp` → `AcpHal.dll`. Console audio hardware library: the memory functions are real; the
-  audio device opens the PC's sound output; one start-up command is accepted under a stated exception, the others
-  are refused.
-- `xapu.h` / `xapu.cpp` → `xapu.dll`. The console's Opus decoding channel: packets are decoded by libopus
-  (`opus.dll`, built separately; NOTICE.md) and only results of work done are handed back.
-- `chad.h` / `chad.cpp` → `chad.dll`. Console audio command library: a skeleton that logs and answers failure.
+- `acp_hal.h` / `acp_hal.cpp` → `AcpHal.dll`. Console audio hardware library: the memory functions are real, the
+  audio device answers "not implemented".
+- `xapu.h` / `xapu.cpp` → `xapu.dll`, `chad.h` / `chad.cpp` → `chad.dll`. Console audio command libraries:
+  skeletons that log and answer failure.
 - `xg_xs.h` / `xg_xs.cpp` → `xg_xs.dll`. The texture layout library: answers with the shell's own untiled layout
   for formats in the public format list, copies rows in and out, refuses everything else.
 - `xbox_bvh_builder.h` / `xbox_bvh_builder.cpp` → `XboxBvhBuilder.dll`. Ray-tracing builder: a skeleton that
@@ -124,9 +77,8 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 
 ## Tests
 
-`tests/` holds 27 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
-shader_container, shader_dxbc, shader_program, shader_walk, shader_names, shader_shape, shader_flow,
-shader_emit_flow, shader_meaning, shader_access, shader_pc, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
+`tests/` holds 17 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
+shader_container, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
 game files, no GPU.
 
 ## Build and test
