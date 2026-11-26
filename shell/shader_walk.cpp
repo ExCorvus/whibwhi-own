@@ -11,8 +11,11 @@
 //   SOPC    101111110 | opcode 7 | source 1: 8 | source 0: 8
 //   SOPP    101111111 | opcode 7 | constant 16
 //   VINTRP  110010 | ...                                     one word
-//   VOP3P   110011 | ...   VOP3  110101 | opcode 10 | ...    two words; sources are three 9-bit fields of word 2
+//   VOP3P   110011 | .. | opcode 8 (23..16) | ...   VOP3  110101 | opcode 10 | ...
+//                                                            two words; sources are three 9-bit fields of word 2
 //   DS      110110   FLAT 110111   MUBUF 111000   MTBUF 111010   SMEM 111101   EXP 111110     two words
+//           (opcode: DS, MUBUF and SMEM eight bits at 25..18; FLAT seven bits at 24..18; MTBUF three bits at
+//            18..16 plus bit 21 of word 2)
 //   MIMG    111100 | ... | extra address words 2 (bits 2..1) | ...                two words plus the extra ones
 //
 // A source field holding 255 means "a 32-bit constant follows the instruction" (one extra word, shared when
@@ -125,7 +128,8 @@ bool read_instruction_length(const std::uint32_t* words, std::size_t available, 
                 break;
             case 0x33:
                 step->format = WalkFormat::kVop3p;
-                step->opcode = static_cast<std::uint16_t>((w >> 16) & 0x7F);
+                // Eight opcode bits at 23..16 (public definition of this generation: VOP3Pe_gfx10).
+                step->opcode = static_cast<std::uint16_t>((w >> 16) & 0xFF);
                 length = 2;
                 sources_in_second_word = true;
                 break;
@@ -147,12 +151,19 @@ bool read_instruction_length(const std::uint32_t* words, std::size_t available, 
                 break;
             case 0x38:
                 step->format = WalkFormat::kMubuf;
-                step->opcode = static_cast<std::uint16_t>((w >> 18) & 0x7F);
+                // Eight opcode bits at 25..18 (public definition: MUBUF_Real_gfx10).
+                step->opcode = static_cast<std::uint16_t>((w >> 18) & 0xFF);
                 length = 2;
                 break;
             case 0x3A:
                 step->format = WalkFormat::kMtbuf;
-                step->opcode = static_cast<std::uint16_t>((w >> 15) & 0xF);
+                // Three opcode bits at 18..16 and the fourth in bit 21 of the second word (public definition:
+                // MTBUF_Real_gfx10). Without a second word the number is only its low three bits; the function
+                // then answers "needs two words" anyway.
+                step->opcode = static_cast<std::uint16_t>((w >> 16) & 0x7);
+                if (available >= 2) {
+                    step->opcode = static_cast<std::uint16_t>(step->opcode | (((words[1] >> 21) & 1) << 3));
+                }
                 length = 2;
                 break;
             case 0x3C:
