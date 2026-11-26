@@ -52,6 +52,11 @@ add_library(xcrdapi SHARED xcrdapi.cpp)
 target_compile_definitions(xcrdapi PRIVATE WHIWHI_XCRDAPI_BUILD)
 target_link_libraries(xcrdapi PRIVATE onecore)
 
+# The Xbox Game Runtime: the game LoadLibrary's it and resolves Initialize/Query/Uninitialize ApiImpl.
+add_library(xgameruntime SHARED xgameruntime.cpp)
+target_compile_definitions(xgameruntime PRIVATE WHIWHI_XGAMERUNTIME_BUILD)
+target_link_libraries(xgameruntime PRIVATE onecore)
+
 # Shell core: image mapper, import table reader, image loader, host-library resolver, console imports, flat
 # hosting model.
 add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp loader.cpp
@@ -67,11 +72,11 @@ target_link_libraries(describe_image PRIVATE whiwhi_shell)
 
 add_executable(connect_imports tools/connect_imports.cpp)
 target_link_libraries(connect_imports PRIVATE whiwhi_shell)
-add_dependencies(connect_imports xmem d3d12_xs AcpHal xapu chad xcrdapi xg_xs XboxBvhBuilder)
+add_dependencies(connect_imports xmem d3d12_xs AcpHal xapu chad xcrdapi xg_xs XboxBvhBuilder xgameruntime)
 
 add_executable(boot_image tools/boot_image.cpp)
 target_link_libraries(boot_image PRIVATE whiwhi_shell)
-add_dependencies(boot_image xmem d3d12_xs AcpHal xapu chad xcrdapi xg_xs XboxBvhBuilder)
+add_dependencies(boot_image xmem d3d12_xs AcpHal xapu chad xcrdapi xg_xs XboxBvhBuilder xgameruntime)
 
 # Proves the GPU reads a plain host buffer zero-copy (VK_EXT_external_memory_host). Needs the Vulkan SDK.
 if(EXISTS "C:/VulkanSDK")
@@ -140,5 +145,5 @@ add_dependencies(test_xcrdapi xcrdapi)
 add_test(NAME xcrdapi COMMAND test_xcrdapi)
 
 add_executable(test_gfx_stubs tests/test_gfx_stubs.cpp)
-add_dependencies(test_gfx_stubs xg_xs XboxBvhBuilder xmem)
+add_dependencies(test_gfx_stubs xg_xs XboxBvhBuilder xmem xgameruntime)
 add_test(NAME gfx_stubs COMMAND test_gfx_stubs)
