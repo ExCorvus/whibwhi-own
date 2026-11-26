@@ -10,6 +10,10 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   taken out of the repository again; see the last dated entry. This block describes the b80 state, re-measured
   in boot b169.
 - **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 27 tests pass (the shader translator came back, see the newest entries).
+- **Testing (rule 11):** the shell is tested on the game itself: scripts/game_test.ps1 runs the real game from the
+  user's copy, counts every import call and compares with the last accepted run. The sample tests are a build
+  check only. Why this came so late is in the entry "what went wrong: the shell was not tested on the game's own
+  code".
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
@@ -901,3 +905,39 @@ frame and its start-up was still waiting for pipelines when the run ended (boot 
 Draws are held: a list that names one of these pipelines does not set it on the PC list, because its draws need
 the arguments buffer and the shell's heaps filled from the game's root arguments, which is not built yet. No list
 named a pipeline in these runs (the start-up had not finished).
+
+## 2026-11-26 - what went wrong: the shell was not tested on the game's own code, so the heaps went in and out
+
+What happened, written down at ExCorvus's request as research on AI agents (2026-11-25 to 2026-11-26):
+
+1. The shell was never tested on the game's own code. Its checks were sample tests on hand-made programs and
+   containers (17, later 27) and "how far a run gets". Neither took the game's native code as the reference.
+
+2. Without that reference, the AI agents doing the work (several models, one after another) judged their own
+   work by their own samples. Work that passed them was committed as progress. Later it was found wrong against
+   the game, removed, and then put back. The descriptor heaps went in and out most often:
+   - a PC root signature rebuilt for every pipeline from the game's console layout (shader_root): dropped;
+   - descriptor records written into the game's heap memory and translated again at every submission: built,
+     crashed after 6 s (boot b167), reverted;
+   - the shader translator bound to heap places of a layout of the shell's own: built again on 2026-11-26.
+   The same happened around the heaps:
+   - every pipeline request translated both of its shaders again (34,136 requests in boot b165), until a cache
+     came after ExCorvus said "they are getting retranslated";
+   - pipeline threading: a render-thread queue and a frame-wait pump, both stalled the game (boot b142), both
+     reverted;
+   - audio: a silent device that answered success was undone; real audio was built and then taken out again;
+   - the whole repository: 69 commits took out everything after boot b80 ("bugfix: undid an AI trap"), and an
+     hour later 35 commits brought the shader translator back.
+
+3. Why (ExCorvus's reading, which the record above supports): because the shell was not tested on the game's
+   native code, the agents translated the heaps (and the other shims) in and out. Each turn rebuilt what the turn
+   before had removed, because nothing fixed said what the game itself does. Large reads (heap dumps, address
+   lists) also filled the agents' working context and pushed the project's rules out of it.
+
+4. What ends it: rule 11 (every test of the shell runs on the game's own code, read fresh from the user's copy)
+   and scripts/game_test.ps1. The game test runs the real game read-only. It counts every call the game makes
+   through its import table and records every "not provided" answer, where the run ended, frames and pipelines.
+   Then it compares all of that with the last accepted run. The agents' commit tool refuses a change under shell/
+   or scripts/ unless the game test passed on that exact build. First baseline (2026-11-26, 60 s): the game was
+   alive at the end, it called 133 of its 587 imports (770,462 calls), none of them unprovided, 16,384 pipelines
+   were made, and the shell gave 19 distinct "not provided" answers.
