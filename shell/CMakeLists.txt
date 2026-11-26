@@ -18,7 +18,7 @@ target_link_libraries(xmem PRIVATE onecore)
 
 # The console's graphics library: the three imported entry points answered on a PC (a wrapped real D3D12
 # device behind D3D12XboxCreateDevice).
-add_library(d3d12_xs SHARED d3d12_xs.cpp)
+add_library(d3d12_xs SHARED d3d12_xs.cpp shader_container.cpp shader_isa.cpp)
 target_compile_definitions(d3d12_xs PRIVATE WHIWHI_D3D12_XS_BUILD)
 target_link_libraries(d3d12_xs PRIVATE onecore)
 
