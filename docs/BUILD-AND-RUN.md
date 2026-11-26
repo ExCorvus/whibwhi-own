@@ -37,7 +37,7 @@ the tools.
 ctest --test-dir shell\build --output-on-failure
 ```
 
-17 tests, no GPU and no game files needed (all inputs are made up).
+18 tests, no GPU and no game files needed (all inputs are made up).
 
 ## Run the shell against the game
 
