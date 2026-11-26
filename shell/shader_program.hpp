@@ -204,6 +204,37 @@ DeclaredResources read_declared_resources(const std::uint8_t* part, std::size_t 
 // The class the second table uses for a declared resource type; 0xFF for a type not listed above.
 std::uint8_t declared_resource_class(std::uint32_t type);
 
+// One element of a container's signature part: an input or output the shader declares. The layout is the
+// public one (it is the layout the PC's own tools write; the PC graphics library's reader in
+// libs/vkd3d-shader/dxbc.c was read for it): the part starts with the element count and the number 8, then
+// one record for each element - in the parts named 'ISG1', 'OSG1' and 'PSG1' eight 32-bit words { stream, name
+// offset, index, system value, component type, register, mask word, minimum precision }, in 'OSG5' seven (no
+// minimum precision), in 'ISGN', 'OSGN' and 'PCSG' six (no stream either). The name offset counts from the
+// start of the part and names a zero-terminated text.
+struct SignatureElement {
+    std::string name;                  // the semantic name the shader's source gave it
+    std::uint32_t index = 0;           // the semantic index
+    std::uint32_t system_value = 0;    // 0 for an ordinary element, 1 position, 64 a render target, ...
+    std::uint32_t component_type = 0;  // 1 unsigned, 2 signed, 3 float
+    std::uint32_t shader_register = 0;
+    std::uint8_t mask = 0;             // which of the register's four components the element takes
+    std::uint8_t use_mask = 0;         // second byte of the mask word: for an input, the components read
+    std::uint32_t stream = 0;
+    std::uint32_t minimum_precision = 0;
+};
+
+struct Signature {
+    bool found = false;
+    std::string reason;  // filled unless found
+    std::vector<SignatureElement> elements;
+};
+
+constexpr std::size_t kMostSignatureElements = 256;
+
+// Reads the payload of a signature part. `name` is the part's four-letter name (it decides the record size);
+// a name that is not one of the seven above is refused, as is a count, an offset or a text that does not fit.
+Signature read_signature(const char* name, const std::uint8_t* part, std::size_t size);
+
 } // namespace whiwhi::shell
 
 #endif // WHIWHI_SHELL_SHADER_PROGRAM_HPP
