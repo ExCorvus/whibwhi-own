@@ -138,7 +138,15 @@ int main() {
     ONE(std::vector<std::uint32_t>({top6(0x36, 0x0Du << 18), pad}), WalkFormat::kDs, 0x0D, 2);
     ONE(std::vector<std::uint32_t>({top6(0x37, 0x0Cu << 18), pad}), WalkFormat::kFlat, 0x0C, 2);
     ONE(std::vector<std::uint32_t>({top6(0x38, 0x14u << 18), pad}), WalkFormat::kMubuf, 0x14, 2);
-    ONE(std::vector<std::uint32_t>({top6(0x3A, 0x3u << 15), pad}), WalkFormat::kMtbuf, 0x3, 2);
+    // The opcode fields of three formats, as the public definitions of this generation give them: packed vector
+    // eight bits at 23..16, untyped buffer eight bits at 25..18, typed buffer three bits at 18..16 plus bit 21
+    // of the second word as the fourth.
+    ONE(std::vector<std::uint32_t>({top6(0x33, 0x8Eu << 16), vop3_sources(0x101, 0x102, 0x103)}),
+        WalkFormat::kVop3p, 0x8E, 2);
+    ONE(std::vector<std::uint32_t>({top6(0x38, 0x94u << 18), 0u}), WalkFormat::kMubuf, 0x94, 2);
+    ONE(std::vector<std::uint32_t>({top6(0x3A, 0x3u << 16), 0u}), WalkFormat::kMtbuf, 0x3, 2);
+    ONE(std::vector<std::uint32_t>({top6(0x3A, 0x3u << 16), 1u << 21}), WalkFormat::kMtbuf, 0xB, 2);
+    ONE(std::vector<std::uint32_t>({top6(0x3A, (0x3u << 16) | (1u << 15)), 0u}), WalkFormat::kMtbuf, 0x3, 2);
     ONE(std::vector<std::uint32_t>({top6(0x3D, 0x08u << 18), pad}), WalkFormat::kSmem, 0x08, 2);
     ONE(std::vector<std::uint32_t>({top6(0x3E, 0x0F), pad}), WalkFormat::kExp, 0, 2);
     // In the two-word formats without source fields, 255 anywhere is not a constant marker.
