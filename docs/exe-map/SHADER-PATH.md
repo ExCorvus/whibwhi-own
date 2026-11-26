@@ -326,3 +326,52 @@ takes in, puts out and binds.
 **A warning for the next reader.** A walk that lands on the end word does not prove where a program starts:
 zero words, and the module's first words, read as one-word instructions, so a walk started there lands too.
 Two such starts were taken for real before the header was read.
+
+## 11. The two tables after a module's code (boots b97-b99; measured over 581 modules)
+
+The record that names the code (section 10) also names two tables and a name. Offsets are counted from +0x10
+of the block, as in the rest of the module.
+
+| in the record | what |
+|---|---|
+| +0x28 | offset of the first table |
+| +0x30 | offset of the second table; the padding value 0xDEADBEEF when the shader declares no resources |
+| +0x38 | number of entries in the first table |
+| +0x3c | number of entries in the second table |
+| +0x60 | offset of the name record |
+| +0x6c | size of the name record: 20 bytes plus the name's length |
+
+Entries of both tables are five 32-bit words. The first table ends where the second starts; the second ends
+where the name record starts. The name record is the words 0, 0, 0xFFFFFFFF, 0, (length << 16), then the name.
+
+**First table: how the pipeline's root parameters reach the program.** Words: kind, offset, count, register
+number, last.
+
+| kind | what | the words |
+|---|---|---|
+| 3 | a resource descriptor in a table | `last` = the scalar register that holds the table's address; `offset` in 32-bit words from it (8 words to a 32-byte descriptor) |
+| 6 | a sampler descriptor in a table | the same |
+| 1 | a buffer whose address arrives in scalar registers | `last` = the first of them |
+| 0 | constants that arrive in scalar registers | low byte of `last` = the first of them; bit 0x100 is set (not understood) |
+| 4 | a sampler fixed by the pipeline | second byte of `last` = its index |
+| 5 | not understood | 10 pixel modules; `last` = a scalar register through which those programs load descriptors |
+
+The count word is the number of scalar registers the parameter takes. Registers are given out in order, from
+s8 for vertex and pixel programs and from s4 for compute programs.
+
+**Second table: the resources this shader declares.**
+
+| word | what |
+|---|---|
+| 0 | low byte: class (0 read-only resource, 1 sampler, 2 constant buffer, 3 writable resource); second byte: how it arrives (the first table's kind) |
+| 1 | offset in words inside the table |
+| 2 | the register number the shader's source gave it |
+| 3 | 4 for textures, 1 for a raw buffer, 0 otherwise (not understood) |
+| 4 | low byte: the descriptor's size in words (8 for an image, 4 for a buffer or sampler); second byte: the scalar register; third byte: the fixed sampler's index |
+
+The register space is in neither table; the container's 'PSV0' part has it.
+
+**How this was checked.** For every module of a run the shell compares the tables with each other, with the
+resources the container's 'PSV0' part declares, and with what the program does (which register it loads each
+descriptor through, and at which offset). The numbers are in FINDINGS.md under the same date. No byte of a
+table is logged.
