@@ -1,42 +1,30 @@
 # Contributing
 
-This is **our** project (whiwhi — the GTA pipeline reconstruction). **The only source here is our own files; no
-upstream code enters this project.** A few rules keep it safe to host and keep the credit correct. There is no
-upstream coordination issue or pull-request workflow — this is our own project, and **ExCorvus gates every push**.
+The rules for working on this project are in [AGENTS.md](AGENTS.md); they apply to people and agents alike. This
+file adds the conventions for code and credit.
 
-## Safety rules
+## Safety
 
-- **No game data, ever.** Archives, the executable, carved files, shaders (DXBC, FSSM, disassembly, SPIR-V),
-  textures, models, audio, videos, and reports or logs that quote them. `.gitignore` blocks the common types; check
-  `git status` before you commit and run our no-game-data gate before every push. The exe-map `funcs/*.txt`
-  disassembly listings are private — never push them.
-- **No keys, decryption or protection workarounds**, and no links to where to get them. The tools only read files
-  that are already plain on disk.
-- Short excerpts needed to explain a format (a few header bytes, one instruction sequence) are fine in docs and
-  comments.
-- **The game folder on disk is read-only.** Never write it.
-- **No upstream code.** Do not vendor, link or build upstream source here.
+- **No game data, ever**: no executable, archives, shaders in any form, textures, models, audio, video, or
+  disassembly listings, and no logs that quote them. `.gitignore` blocks the common file types; check `git status`
+  before you commit and run `python -I scripts/check_no_game_data.py <files>` (it must print `clean`).
+- **No keys, decryption or protection workarounds**, and no links to where to get them.
+- **The game folder is read-only.**
+- **No third-party code in the repository.**
 
-## Credit (required)
+## Credit
 
-The approach and findings originated with **ExCorvus** — see [NOTICE.md](NOTICE.md). Crediting the origin is
-required, not optional. Our runtime (`shell/`) is entirely our own code.
+The approach and findings originated with **ExCorvus**; see [NOTICE.md](NOTICE.md) for the credit that is
+required when the work is reused.
 
-## How work lands here
+## Code
 
-- The coordinator does the work (no subagents, except a maintenance-only repo-description keeper). ExCorvus approves
-  every push and every boot; one GPU run at a time.
-- Record what you measured and what you tested (and on which GPU/driver) in [FINDINGS.md](FINDINGS.md) and the
-  fix-ledger; there is no pull request. Source of truth:
-  `C:\Users\user\AppData\Local\Temp\opencode\leonida-submission\shared\FACTS.md` + the `fix-ledger.md` tail.
-- Read [AGENTS.md](AGENTS.md) for the binding footing (the shell, outward not from within, the traps, the watchdog).
+- The runtime is in `shell/` (C++17, MSVC). Build and test with `shell\build.cmd`.
+- A new module comes with a test in `shell/tests/`. Tests use made-up inputs built by hand, never game files.
+- `scripts/check_no_game_data.py` uses only the Python standard library.
 
-## Working on our code
+## Commits
 
-- Our runtime lives in `shell/` (C++17). Build and test with `shell\build.cmd` (MSVC + bundled CMake/Ninja; runs
-  `test_hosting` + `test_image` via CTest). A new module comes with our own test in `shell/tests/` (no game data —
-  build any fixture by hand).
-- Python tools run with `python -I` and use only the standard library unless a file says otherwise.
-- A text file a tool writes names its line ending — `open(path, "w", encoding="utf-8", newline="\n")` — so the same
-  input gives the same bytes on every platform.
-- Keep the build working on Windows first: paths through `os.path`, no bash in the build.
+- One file per commit. The message says what the file is, in plain words.
+- There is no pull-request workflow; commits go straight to the GitHub repository.
+- Record what you measured in [FINDINGS.md](FINDINGS.md).
