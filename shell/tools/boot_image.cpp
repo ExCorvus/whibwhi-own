@@ -15,9 +15,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
-#include <tlhelp32.h>
 
-#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -100,108 +98,6 @@ void dump_vtable(std::uintptr_t rcx) {
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
-}
-
-// Where every other thread is at the moment a run ends inside the image (for example when the image's own hang
-// watchdog stops it): each thread is suspended, its stack unwound a few frames, then resumed; the frames are
-// printed after all threads run again, so no suspended thread can hold a lock the printing needs. Observation
-// only: nothing in the image changes and the watchdog is not touched.
-// `when` names the moment; a report "at the end" is made once, snapshots during the run (WHIWHI_THREAD_REPORT_AT)
-// each time. Every thread's CPU time is printed too, so two snapshots show which threads are working.
-void report_other_threads(const char* when = "when the run ended") {
-    static std::atomic<bool> done{false};
-    static std::mutex one_at_a_time;
-    const bool at_end = std::strcmp(when, "when the run ended") == 0;
-    if ((at_end && done.exchange(true)) || !g_loaded || !g_loaded->base) {
-        return;
-    }
-    std::lock_guard<std::mutex> serial(one_at_a_time);
-    constexpr int kThreads = 128, kFrames = 40;
-    static DWORD ids[kThreads];
-    static DWORD64 frames[kThreads][kFrames];
-    static int depth[kThreads];
-    static unsigned long long cpu_ms[kThreads];
-    int count = 0;
-    const DWORD self = GetCurrentThreadId();
-    const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) {
-        return;
-    }
-    THREADENTRY32 entry{};
-    entry.dwSize = sizeof(entry);
-    for (BOOL more = Thread32First(snap, &entry); more && count < kThreads; more = Thread32Next(snap, &entry)) {
-        if (entry.th32OwnerProcessID != GetCurrentProcessId() || entry.th32ThreadID == self) {
-            continue;
-        }
-        const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
-                                         FALSE, entry.th32ThreadID);
-        if (!thread) {
-            continue;
-        }
-        if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
-            CONTEXT c{};
-            c.ContextFlags = CONTEXT_FULL;
-            int n = 0;
-            if (GetThreadContext(thread, &c)) {
-                frames[count][n++] = c.Rip;
-                while (n < kFrames) {
-                    DWORD64 imgbase = 0;
-                    auto* fn = RtlLookupFunctionEntry(c.Rip, &imgbase, nullptr);
-                    if (fn) {
-                        void* handler = nullptr;
-                        DWORD64 est = 0;
-                        RtlVirtualUnwind(0, imgbase, c.Rip, fn, &c, &handler, &est, nullptr);
-                    } else {
-                        c.Rip = *reinterpret_cast<const DWORD64*>(c.Rsp);  // a leaf function
-                        c.Rsp += 8;
-                    }
-                    if (!c.Rip) {
-                        break;
-                    }
-                    frames[count][n++] = c.Rip;
-                }
-            }
-            ResumeThread(thread);
-            FILETIME created, exited, kernel, user;
-            cpu_ms[count] = 0;
-            if (GetThreadTimes(thread, &created, &exited, &kernel, &user)) {
-                const auto ticks = [](const FILETIME& f) {
-                    return (static_cast<unsigned long long>(f.dwHighDateTime) << 32) | f.dwLowDateTime;
-                };
-                cpu_ms[count] = (ticks(kernel) + ticks(user)) / 10000;
-            }
-            ids[count] = entry.th32ThreadID;
-            depth[count++] = n;
-        }
-        CloseHandle(thread);
-    }
-    CloseHandle(snap);
-    const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(g_loaded->base);
-    std::fprintf(stderr, "[boot] where the other %d thread(s) were %s (innermost frame first):\n", count, when);
-    for (int t = 0; t < count; ++t) {
-        std::fprintf(stderr, "[boot]   thread %lu (cpu %llu ms):", ids[t], cpu_ms[t]);
-        for (int i = 0; i < depth[t]; ++i) {
-            const DWORD64 at = frames[t][i];
-            if (at >= base && at < base + g_loaded->size) {
-                std::fprintf(stderr, " +0x%llx", static_cast<unsigned long long>(at - base));
-                continue;
-            }
-            HMODULE module = nullptr;
-            char name[MAX_PATH] = "?";
-            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                   reinterpret_cast<const char*>(at), &module) &&
-                GetModuleFileNameA(module, name, sizeof name)) {
-                const char* slash = std::strrchr(name, '\\');
-                std::fprintf(stderr, " %s+0x%llx", slash ? slash + 1 : name,
-                             static_cast<unsigned long long>(at - reinterpret_cast<DWORD64>(module)));
-            } else {
-                std::fprintf(stderr, " [0x%llx]", static_cast<unsigned long long>(at));
-            }
-        }
-        std::fprintf(stderr, "\n");
-    }
-    std::fflush(stderr);
 }
 
 } // namespace
@@ -296,23 +192,7 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
         std::fprintf(stderr, "\n");
     }
     std::fflush(stderr);
-    if (g_loaded && g_loaded->base && (code == 0xC0000005 || code == 0x80000003)) {
-        const std::uintptr_t image = reinterpret_cast<std::uintptr_t>(g_loaded->base);
-        if (rip >= image && rip < image + g_loaded->size) {
-            report_other_threads();
-        }
-    }
     if (code == 0x80000003) {
-        // The image installs an unhandled-exception filter of its own, so a run that ends at one of its
-        // breakpoints may never come back through ours: the report is printed at the first breakpoint inside
-        // the image as well.
-        static std::atomic<bool> reported_at_breakpoint{false};
-        if (g_loaded && g_loaded->base) {
-            const std::uintptr_t image = reinterpret_cast<std::uintptr_t>(g_loaded->base);
-            if (rip >= image && rip < image + g_loaded->size && !reported_at_breakpoint.exchange(true)) {
-                end_of_run_report();
-            }
-        }
         // A breakpoint may be handled by the image's own SEH (debug probes); let the process decide. Only when
         // it comes back as unhandled (second chance, seen before at the same address) do we end the boot.
         static std::set<std::pair<unsigned long, std::uintptr_t>> seen_bp;
@@ -543,30 +423,6 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        // WHIWHI_THREAD_REPORT_AT=60,120,...: snapshots of every thread at those seconds into the run.
-        if (const char* at = std::getenv("WHIWHI_THREAD_REPORT_AT"); at && *at) {
-            static std::string list = at;
-            CreateThread(nullptr, 0, [](void*) -> DWORD {
-                const ULONGLONG start = GetTickCount64();
-                for (const char* p = list.c_str(); *p;) {
-                    char* next = nullptr;
-                    const unsigned long s = std::strtoul(p, &next, 10);
-                    if (next == p) {
-                        break;
-                    }
-                    const ULONGLONG due = start + static_cast<ULONGLONG>(s) * 1000;
-                    const ULONGLONG now = GetTickCount64();
-                    if (due > now) {
-                        Sleep(static_cast<DWORD>(due - now));
-                    }
-                    char when[48];
-                    std::snprintf(when, sizeof when, "at %lu s", s);
-                    report_other_threads(when);
-                    p = *next == ',' ? next + 1 : next;
-                }
-                return 0;
-            }, nullptr, 0, nullptr);
-        }
         ResumeThread(thread);
         std::fprintf(stderr, "[boot] entry thread resumed\n");
         std::fflush(stderr);
@@ -575,7 +431,6 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lock(g_log);
             std::fprintf(stderr, "[boot] still running after %us - the image is alive; ending the boot\n", seconds);
             std::fflush(stderr);
-            report_other_threads();
             end_of_run_report();
             TerminateProcess(GetCurrentProcess(), 0);
         }
