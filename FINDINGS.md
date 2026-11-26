@@ -1509,3 +1509,21 @@ Measured in boot b149 (40 s, no exception, game folder unchanged): the PC device
 tier 2; slot 126 asked once with (0, 0, 0) and set on the PC list; slot 70 asked with (0, 1) and set. Still not
 hosted from that function: slots 75 (one flag from bit 6 of byte `+0x55` of the pipeline-side object) and 142 (the
 64-bit value at context `+0x12360`, all ones when unset).
+
+### 2026-11-26 - list slot 142 noted (a GPU unit mask, no PC counterpart); device slot 81 read (boots b150, b151)
+
+- **List slot 142** (`+0x470`) takes the 64-bit value at context `+0x12360`. Its setter, fn 0x4e57ff0, takes it from
+  fn 0x4e58060, which picks an entry of the table at 0x6500dc0 - masks that switch on 16-bit groups one after another
+  - and may invert it; all ones means "none set" (the many resets store -1). Read as which parts of the console's GPU
+  may run the following work (inferred). The PC device has no such control, so the shell notes each mask and does not
+  carry it out; the image checks no result. A stated rule-4 exception granted by ExCorvus.
+- **Device slot 81** (`+0x288`, fn 0x24826a0) is asked once a frame with (a frame number from a ring of four, flags
+  0x11100, the address of a count that holds 6 on entry, an array of 0x38-byte records). On success the image reads
+  records of type 0x1000 or 0x10000 and passes their quadword `+0x18` to fn 0xa1c290, its frame-timing profiler
+  (which otherwise stamps times with QueryPerformanceCounter). So slot 81 hands back GPU times of frame events. It
+  stays refused: on a refusal the image only leaves those profiler entries out. Hosting it means measuring those
+  times on the PC GPU.
+- List slot 75 (one flag from bit 6 of byte `+0x55` of the object at `[ctx+0x12328]+0x10`) is still not identified.
+
+Boot b150 stopped at the image's own watchdog before graphics (image+0x2215c35, the known slow-start case, as in
+b146); the next boot, b151, ran 40 s with no exception, slot 142 asked with all ones.
