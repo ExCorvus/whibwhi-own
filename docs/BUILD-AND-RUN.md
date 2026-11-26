@@ -64,6 +64,24 @@ Environment variables:
 - `WHIWHI_WATCH=<rva>` — arm a 1-byte write watchpoint on `image+<rva>` on the entry thread (diagnostics).
 - `WHIWHI_XMEM_TRACE=1` — log every call to the memory library.
 
+## Using vkd3d (D3D12 on Vulkan) underneath
+
+The shell prefers a vkd3d-built `d3d12.dll` (renamed `d3d12_vk.dll`) placed beside `boot_image.exe`, with its
+`d3d12core.dll`; otherwise it uses the system's native `d3d12.dll`. Build vkd3d-proton yourself (LGPL-2.1, see
+`NOTICE.md`):
+
+```
+git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/HansKristian-Work/vkd3d-proton.git vkd3d-proton
+# install meson, ninja, and widl (e.g. the MSYS2 mingw-w64-x86_64-tools package) first
+meson setup build --buildtype release -Denable_tests=false   # inside an MSVC vcvars64 shell, LC_ALL=C
+meson compile -C build
+copy build\libs\d3d12\d3d12.dll  shell\build\d3d12_vk.dll
+copy build\libs\d3d12core\d3d12core.dll  shell\build\d3d12core.dll
+```
+
+With those two files beside the tools, `boot_image` logs "using the vkd3d-built d3d12.dll" and the game's D3D12
+calls run on Vulkan — which is what lets the shell import the game's own memory into the GPU zero-copy later.
+
 ## Status and limits
 
 See `FINDINGS.md` for the measured log. Short version: the shell loads the game, connects 578 of its 587 imports,
