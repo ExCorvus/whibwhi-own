@@ -13,6 +13,7 @@
 #include "shader_names.hpp"
 #include "shader_shape.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bitset>
 #include <cstdio>
@@ -59,7 +60,8 @@ const PcCovered kCovered[] = {
     {kV2, 31, "v_mac_f32"},
     {kV2, 37, "v_add_nc_u32"}, {kV2, 38, "v_sub_u32"}, {kV2, 39, "v_subrev_u32"}, {kV2, 43, "v_fmac_f32"},
     {kV2, 44, "v_fmamk_f32"}, {kV2, 45, "v_fmaak_f32"}, {kV2, 47, "v_cvt_pkrtz_f16_f32"},
-    {kV1, 0, "v_nop"}, {kV1, 1, "v_mov_b32"}, {kV1, 5, "v_cvt_f32_i32"}, {kV1, 6, "v_cvt_f32_u32"},
+    {kV1, 0, "v_nop"}, {kV1, 1, "v_mov_b32"}, {kV1, 2, "v_readfirstlane_b32"},
+    {kV1, 5, "v_cvt_f32_i32"}, {kV1, 6, "v_cvt_f32_u32"},
     {kV1, 7, "v_cvt_u32_f32"}, {kV1, 8, "v_cvt_i32_f32"}, {kV1, 11, "v_cvt_f32_f16"}, {kV1, 32, "v_fract_f32"},
     {kV1, 17, "v_cvt_f32_ubyte0"}, {kV1, 18, "v_cvt_f32_ubyte1"}, {kV1, 19, "v_cvt_f32_ubyte2"},
     {kV1, 20, "v_cvt_f32_ubyte3"},
@@ -77,7 +79,8 @@ const PcCovered kCovered[] = {
     {kV3, 0x12F, "v_cvt_pkrtz_f16_f32"}, {kV3, 0x11F, "v_mac_f32"}, {kV3, 0x12B, "v_fmac_f32"},
     {kV3, 0x191, "v_cvt_f32_ubyte0"}, {kV3, 0x192, "v_cvt_f32_ubyte1"}, {kV3, 0x193, "v_cvt_f32_ubyte2"},
     {kV3, 0x194, "v_cvt_f32_ubyte3"},
-    {kV3, 0x180, "v_nop"}, {kV3, 0x181, "v_mov_b32"}, {kV3, 0x185, "v_cvt_f32_i32"},
+    {kV3, 0x180, "v_nop"}, {kV3, 0x181, "v_mov_b32"}, {kV3, 0x182, "v_readfirstlane_b32"},
+    {kV3, 0x185, "v_cvt_f32_i32"},
     {kV3, 0x186, "v_cvt_f32_u32"}, {kV3, 0x187, "v_cvt_u32_f32"}, {kV3, 0x188, "v_cvt_i32_f32"},
     {kV3, 0x18B, "v_cvt_f32_f16"}, {kV3, 0x1A0, "v_fract_f32"}, {kV3, 0x1A1, "v_trunc_f32"},
     {kV3, 0x1A2, "v_ceil_f32"}, {kV3, 0x1A3, "v_rndne_f32"}, {kV3, 0x1A4, "v_floor_f32"},
@@ -91,7 +94,7 @@ const PcCovered kCovered[] = {
     {kV3, 877, "v_add3_u32"}, {kV3, 879, "v_lshl_or_b32"}, {kV3, 881, "v_and_or_b32"},
     {kV3, 882, "v_or3_b32"},
     {kVP, 32, "v_fma_mix_f32"}, {kVP, 33, "v_fma_mixlo_f16"}, {kVP, 34, "v_fma_mixhi_f16"},
-    {kVI, 0, "v_interp_p1_f32"}, {kVI, 1, "v_interp_p2_f32"},
+    {kVI, 0, "v_interp_p1_f32"}, {kVI, 1, "v_interp_p2_f32"}, {kVI, 2, "v_interp_mov_f32"},
     {kSM, 0, "s_load_dword"}, {kSM, 1, "s_load_dwordx2"}, {kSM, 2, "s_load_dwordx4"},
     {kSM, 3, "s_load_dwordx8"}, {kSM, 4, "s_load_dwordx16"}, {kSM, 8, "s_buffer_load_dword"},
     {kSM, 9, "s_buffer_load_dwordx2"}, {kSM, 10, "s_buffer_load_dwordx4"},
@@ -155,6 +158,7 @@ ReadAs two_operand_reads(unsigned base) {
 ReadAs one_operand_reads(unsigned base) {
     switch (base) {
         case 1:
+        case 2:  // v_readfirstlane_b32 copies lane 0's bits into a scalar register; it does not type them
             return ReadAs::kEither;
         case 7: case 8: case 32: case 33: case 34: case 35: case 36: case 37: case 39: case 42: case 46: case 51:
             return ReadAs::kFloat;
@@ -335,7 +339,7 @@ std::string not_written(const Instruction& ins, const char* detail = nullptr) {
     return text;
 }
 
-constexpr unsigned kVccLo = 106, kVccHi = 107, kM0 = 124, kExecLo = 126, kExecHi = 127;
+constexpr unsigned kVccLo = 106, kVccHi = 107, kM0 = 124, kNullReg = 125, kExecLo = 126, kExecHi = 127;
 
 DOp T(std::uint32_t temp) {
     return dxbc::temp_scalar(temp, 0);
@@ -403,8 +407,12 @@ private:
     std::vector<PcInstruction>* out_ = &body_;
     std::uint32_t next_temp_ = 0;
     std::uint32_t scc_ = 0, live_ = 0, next_ = 0, a_ = 0, b_ = 0, c_ = 0, d_ = 0, m_[3] = {}, coord_ = 0, texel_ = 0;
-    std::bitset<128> written_s_, opaque_s_;
+    std::bitset<128> written_s_;
+    std::bitset<128> token_s_;   // holds the interpolation value: readable only by a move toward M0
     std::bitset<256> written_v_;
+    unsigned interp_reg_ = 8;    // the register right after the last one the first table names (pixel)
+    // For each scalar-load instruction: the registers it fills with descriptor words (not numbers).
+    std::map<int, std::pair<unsigned, unsigned>> desc_load_;
     // Facts by (first register, the write that made them).
     std::map<std::pair<unsigned, int>, Origin> origin_;
     std::map<std::pair<unsigned, int>, Desc> desc_;
@@ -482,13 +490,52 @@ private:
             }
             return T(ts(reg));
         }
-        if (opaque_s_[reg]) {
+        if (token_s_[reg]) {
+            refuse_register("the interpolation value in s%u is read as a number", reg);
+        }
+        if (holds_descriptor(reg)) {
             refuse_register("s%u holds a word of a descriptor and is read as a number", reg);
         }
         if (!written_s_[reg]) {
             refuse_register("reads s%u before any write, and nothing is known to provide it", reg);
         }
         return T(ts(reg));
+    }
+
+    // Whether a register holds a word of a descriptor on the way the program is taking now: its last write
+    // (compute_writers) is a scalar load that fills it. Decided per path, not in emission order, so a register
+    // a different branch loaded over is still a number on the branch that did not load it.
+    bool holds_descriptor(unsigned reg) const {
+        if (reg >= kTracked) {
+            return false;
+        }
+        const int writer = cur_writer_[reg];
+        if (writer == kWriterSeveral) {
+            // Different writes on different ways: a descriptor on any way that fills this register is the safe
+            // answer. With no scalar load anywhere touching it, it is a number on every way.
+            for (const auto& load : desc_load_) {
+                if (reg >= load.second.first && reg < load.second.first + load.second.second) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        const auto found = desc_load_.find(writer);
+        return found != desc_load_.end() && reg >= found->second.first &&
+               reg < found->second.first + found->second.second;
+    }
+
+    void mark_descriptor_loads() {
+        for (std::size_t k = 0; k < prog_.instructions.size(); ++k) {
+            const Instruction& ins = prog_.instructions[k];
+            if (ins.format != WalkFormat::kSmem) {
+                continue;
+            }
+            const AccessInfo access = access_of(ins);
+            if (access.found && access.kind == AccessKind::kScalarLoad) {
+                desc_load_[static_cast<int>(k)] = {access.first_destination, access.words};
+            }
+        }
     }
 
     DOp rv(unsigned reg) {
@@ -501,7 +548,7 @@ private:
     void wrote_s(unsigned reg) {
         if (reg < 128) {
             written_s_.set(reg);
-            opaque_s_.reset(reg);
+            token_s_.reset(reg);
         }
         // The facts about a register follow its last write (compute_writers). That bookkeeping reads the
         // instruction's words on its own; a write it did not foresee would leave a fact standing wrongly.
@@ -828,6 +875,23 @@ private:
             start_vertex_inputs();
         } else {
             start_pixel_position();
+            // The register right after the last one the first table names holds the value interpolation reads
+            // through M0. It is not a number: the program only ever moves it (perhaps through another register)
+            // into M0, which the PC does not need. Marked as a token so a stray read of it as a number is refused.
+            if (have_tables()) {
+                unsigned end = 8;
+                for (const ModuleLayoutEntry& entry : in_.tables->layout) {
+                    if (entry.kind == 4) {
+                        continue;  // a static sampler takes no register
+                    }
+                    const unsigned taken = entry.kind == 0 ? entry.count : entry.kind == 1 ? 2u : 1u;
+                    end = std::max(end, entry.scalar_register + taken);
+                }
+                interp_reg_ = end;
+                if (interp_reg_ < 102 && !written_s_[interp_reg_]) {
+                    token_s_.set(interp_reg_);
+                }
+            }
         }
         out_ = &body_;
     }
@@ -1170,6 +1234,10 @@ private:
         if (opcode == 0x180) {
             return;  // the no-operation
         }
+        if (opcode == 0x182) {
+            set_s(sdst(ins), r32(ins, 0));  // v_readfirstlane_b32, the two-word form
+            return;
+        }
         const unsigned destination = vdst(ins);
         Value result{T(a_), false};
         if (opcode == 0x101) {
@@ -1369,10 +1437,22 @@ private:
             // The value the interpolation instructions read through M0: the PC interpolates by itself.
             return;
         }
+        if (opcode == 3 && ins.has_destination && ins.dst.kind == OperandKind::kSpecialRegister &&
+            ins.dst.index == kNullReg) {
+            // A move into the null register writes nothing (taken to be so from its public name, SGPR_NULL).
+            return;
+        }
         const unsigned low = sdst(ins);
         switch (opcode) {
             case 3: {
                 const Operand& source = ins.src[0];
+                if (source.kind == OperandKind::kSgpr && source.index < 128 && token_s_[source.index]) {
+                    // A copy of the interpolation value: not a number, only ever moved toward M0.
+                    if (low < 128) {
+                        token_s_.set(low);
+                    }
+                    return;
+                }
                 const Origin* origin = source.kind == OperandKind::kSgpr ? origin_of(source.index) : nullptr;
                 Origin copy;
                 if (origin != nullptr) {
@@ -1658,6 +1738,12 @@ private:
         if (ins.opcode == 0) {
             return;
         }
+        if (ins.opcode == 2) {
+            // v_readfirstlane_b32: lane 0's value into a scalar register. With every lane taken alike, that is
+            // the source register's value.
+            set_s(sdst(ins), r32(ins, 0));
+            return;
+        }
         const unsigned destination = vdst(ins);
         vector1(ins, ins.opcode, r32(ins, 0));
         set_v(destination, T(a_));
@@ -1715,7 +1801,6 @@ private:
             }
             for (unsigned i = 0; i < access.words; ++i) {
                 wrote_s(access.first_destination + i);
-                opaque_s_.set(access.first_destination + i);
             }
             Desc fact;
             fact.writer = cur_ins_;
@@ -1734,7 +1819,6 @@ private:
         }
         for (unsigned i = 0; i < access.words; ++i) {
             wrote_s(access.first_destination + i);
-            opaque_s_.set(access.first_destination + i);
         }
         for (unsigned position = 0; position < access.words;) {
             const ModuleLayoutEntry* entry = layout_at(3, root, access.immediate_offset + position * 4);
@@ -2075,7 +2159,7 @@ private:
             bool filled = true;
             for (unsigned i = 0; i < 4; ++i) {
                 const unsigned reg = access.sampler_register + i;
-                filled = filled && reg < 102 && written_s_[reg] && !opaque_s_[reg];
+                filled = filled && reg < 102 && written_s_[reg] && !holds_descriptor(reg);
             }
             if (sampler != nullptr || fixed_count != 1 || !filled) {
                 refuse(not_written(ins, "a sampler the pass cannot tell"));
@@ -2178,6 +2262,31 @@ private:
             waiting_[access.vdst] = Waiting{access.attr, access.chan};
             return;
         }
+        if (access.interp == InterpStep::kMove) {
+            // The interpolation move takes one of the attribute's three values without interpolating. The
+            // game's programs use selector 2 (P0, the first vertex's value); Mesa writes a flat input this way
+            // (aco_isel_helpers.cpp). The PC reads it as a constant (flat) input. Taken to be so: P0 is the
+            // vertex the PC's constant interpolation takes.
+            if (access.interp_param != 2) {
+                refuse(not_written(ins, "an interpolation move that does not take the first vertex's value"));
+            }
+            const std::vector<Slot> inputs = slots(in_.inputs, 0);
+            if (access.attr >= inputs.size()) {
+                refuse(not_written(ins, "an attribute the container's input list does not have"));
+            }
+            const Slot& slot = inputs[access.attr];
+            if (access.chan > 3 || (slot.mask >> access.chan & 1) == 0) {
+                refuse(not_written(ins, "a component the input elements at that register do not have"));
+            }
+            const auto already = input_float_.find(slot.shader_register);
+            if (already != input_float_.end() && already->second) {
+                refuse(not_written(ins, "an input register read both flat and interpolated"));
+            }
+            input_decl_[slot.shader_register] = slot.mask;
+            input_float_[slot.shader_register] = false;
+            set_v(access.vdst, dxbc::input_scalar(slot.shader_register, static_cast<std::uint8_t>(access.chan)));
+            return;
+        }
         if (access.interp != InterpStep::kSecond) {
             refuse(not_written(ins));
         }
@@ -2239,6 +2348,12 @@ private:
             const std::vector<Slot> outputs = slots(in_.outputs, 1);
             const unsigned number = access.target - 32;
             if (number >= outputs.size()) {
+                if (outputs.empty()) {
+                    // The output list has no ordinary slot at all (these programs declare only the position):
+                    // no declared output receives this parameter and no pixel input list can name it, so it is
+                    // left out. Why the compiler emits it is not established. Other mismatches stay refused.
+                    return;
+                }
                 refuse(not_written(ins, "a parameter the container's output list does not have"));
             }
             parameter = outputs[number];
@@ -2442,6 +2557,7 @@ private:
             refuse("control flow: " + flow.reason);
         }
         compute_writers();
+        mark_descriptor_loads();
         start();
         if (flow.needs_next) {
             prologue_.push_back(PcInstruction{Opcode::kMov, {}, {D(next_), U(flow.next_entry)}});
