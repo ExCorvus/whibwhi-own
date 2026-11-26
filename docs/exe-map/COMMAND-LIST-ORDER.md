@@ -60,32 +60,6 @@ so the image never writes records itself and every command arrives as a method c
 the same public call on the PC list. The fields the image writes without checking (`+0x140`, `+0x544`,
 `+0x554`) must exist in the object it is given.
 
-**What runs have shown since (boots b74-b80).** The shell's list is now built that way: the object it hands the
-image has 4 KiB that belong to the image, with position and end both zero, and at the end of a run it reports
-whether the image wrote anything into its objects (so far: nothing). The table above held wherever a run has
-reached it, with one addition: slot 32 is `SetDescriptorHeaps` (public 28). So console slots **32 to 52 are the
-public methods four places up**:
-
-| console slot | public method | seen in a run |
-|---|---|---|
-| 32 | `SetDescriptorHeaps` | yes: (2, array of two heaps) |
-| 33, 34 | `SetComputeRootSignature`, `SetGraphicsRootSignature` | 34 yes |
-| 35, 36 | the two root descriptor tables | 36 yes |
-| 37, 38 / 39, 40 | one root constant / root constants | no |
-| 41..46 | root constant-buffer, shader-resource and unordered-access views | 44 called with (0, an address in the image's memory): the shape of `SetGraphicsRootShaderResourceView` |
-| 47, 48 | `IASetIndexBuffer`, `IASetVertexBuffers` | 47 called with null, 48 with (0, 1, pointer): matching shapes |
-| 50 | `OMSetRenderTargets` | yes |
-| 51, 52 | `ClearDepthStencilView`, `ClearRenderTargetView` | 52 yes |
-
-So console slots **27 to 31** are five methods where the public list has one (`ExecuteBundle` at 27): four of
-them are console-only, and which of the five is `ExecuteBundle`, if any, is not known. The public methods 28 to
-48 are at 32 to 52, and two public methods are absent between console 53 and 60. Slots 41
-to 48 carry addresses in the image's memory and are answered since boot b88 (44, 47 and 48 seen and carried
-out; the root signature current at the slot 44 call has a shader-resource address at that parameter, read from
-its serialized form - a confirmation that does not rest on argument shape). Slot 20 is called with the number 0x11,
-which is not a public topology. Slot 139 (start recording on an allocator) is answered with the PC list's
-`Reset`. The console-only slots called in runs and not provided: 70, 71, 72, 74, 75, 126, 131, 132, 142, 146.
-
 ---
 
 ## 1. What the object is: a recorder with a title-writable command stream (V)
@@ -202,13 +176,13 @@ surrounding code makes the record mean (**I**), and it is the thing to confirm f
 | `+0x190` | 50 | 0x33311 (fn 0x32520) | `(r8 = &block, r9 = 0, stack = rbx)` | record with a block and one extra value | **U** |
 | `+0x1a0` | 52 | 0x50a62d8 (fn 0x50a5eb0) | `(r8 = rax + 96·index + 0x84, a computed address in a table; stack = 0; rdx is set further up and was not followed)` | two-address record | **U** |
 | `+0x1f0` | 62 | 0x979699 (fn 0x979650) | `(rdx = [desc+0x50], r8 = fn 0x4ecc8f0([desc+0x30]), r9 = [desc+0x24], stack = 0)` | record with count/index and a translated address | **U** |
-| `+0x230` | 70 | 0x33390 (fn 0x32520) | `(xmm1 = float, xmm2 = float)`; the pair is kept at `ctx+0x123f0`/`+0x123f4`, and is the constant (0.0, 1.0) at 0x6159bc0 when word `+0x44` of the depth-stencil state entry is zero | OMSetDepthBounds(min, max); hosted by the shell since boot b149 | **I** (arguments and default measured) |
+| `+0x230` | 70 | 0x33390 (fn 0x32520) | `(none)`; 8 bytes were just stored to `ctx+0x123f0` | emit of a pending 8-byte value | **U** |
 | `+0x238` | 71 | 0x2490030 (fn 0x248ffd0) and 5 more | `(rdx = handle from fn 0x4ed46d0, r8d = count, r9d = 0, stack = 0)` | batched record taking a driver handle | **U** |
 | `+0x240` | 72 | 0x6c6672 (fn 0x6c6630), 0x2482b31 (fn 0x2482ae0) | `(rdx = resource/pointer, r8d = global dword 0xa9437ac, r9d = 0x800, stack = 0)`; the other site `(rdx = &table+8·index, r8 = 0, r9 = 0, stack = 1)` | record carrying a pointer and a global constant | **U** |
 | `+0x250` | 74 | 0x2484b0c (fn 0x2484ad0) and 1 more | `(rdx = arg1 of the wrapper, r8d = 7 (constant), r9 = arg3, stack = 1)` | record with a constant 7 | **U** |
 | `+0x258` | 75 | 0x3281a (fn 0x32520) | `(edx = 0 or 1, from bit 6 of `[pipeline+0x55]`)` | one flag | **U** |
-| `+0x3f0` | 126 | 0x32638 (fn 0x32520) | `(edx = byte 0 of the dword at ctx+0x12380, r8 = &two dwords at rsp+0x110 = bytes 1 and 2 of it)`; skipped when those three bytes did not change (the shifts 8/16 and mask 0xff are the constants at 0x615a8b0 and 0x6159f10) | RSSetShadingRate(rate, combiners[2]); hosted by the shell since boot b149 (only (0, 0, 0) seen so far) | **I** (shape only) |
-| `+0x470` | 142 | 0x329e3 (fn 0x32520) | `(rdx = the 64-bit value at ctx+0x12360)`; set by fn 0x4e57ff0 from fn 0x4e58060, which picks a mask from the table at 0x6500dc0 (16-bit groups switched on one after another) and may invert it; all ones = none set | a mask of which parts of the console GPU may run the following work; noted and not carried out by the shell since boot b151 (rule-4 exception granted by ExCorvus) | **I** |
+| `+0x3f0` | 126 | 0x32638 (fn 0x32520) | `(edx = state byte, r8 = &16-byte block at rsp+0x110)` | a 16-byte block + state | **U** |
+| `+0x470` | 142 | 0x329e3 (fn 0x32520) | `(none)`; `ctx+0x123e0` was just set from `ctx+0x12360` | emit of a resource-reference record | **U** |
 
 The four `+0x458`, `+0x490`, `+0x418`, `+0x420` offsets in COMMAND-LIST.md §3 keep their measured shapes; they are
 consistent with the model above:
