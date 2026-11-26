@@ -656,9 +656,11 @@ whether the simple links between those lists and the program's own instructions 
 
 **Pixel programs (505).**
 - An interpolation instruction names its input by an attribute number and a channel. In all 500 programs
-  that interpolate, attribute number n is the n-th input element that is not a system value, taken in rising
-  order of their registers, and every channel used lies in that element's mask. (In 489 the attribute number
-  is also the element's register itself; the other 11 declare a system value before their ordinary inputs,
+  that interpolate, attribute number n is the n-th register among the registers of the input elements that are
+  not system values, taken in rising order, and every channel used lies in the mask of the elements at that
+  register. (Two elements may share a register, each with its own components; the number counts the register
+  once. An earlier wording here said "the n-th input element", which is not what was counted; section 26.) (In
+  489 the attribute number is also that register itself; the other 11 declare a system value before their ordinary inputs,
   which moves the registers but not the attribute numbers.) 5 programs neither interpolate nor declare an
   ordinary input. In 13 programs some declared input is never interpolated.
 - 146 programs declare the position input (system value 1). Vector registers read before they are written:
@@ -678,8 +680,8 @@ whether the simple links between those lists and the program's own instructions 
   one register for each component in the mask, holds in 167). No register below v4 is read, except v0 by the
   one program whose only input is the vertex number (system value 6) - the one vertex program that does not
   call through s4 either.
-- Outputs: a parameter export to target 32 + k is the k-th output element that is not the position, in rising
-  order of their registers (224 of 227). The other 3 declare the position as their only output and still
+- Outputs: a parameter export to target 32 + k is the k-th register among the registers of the output elements
+  that are not the position, in rising order (224 of 227). The other 3 declare the position as their only output and still
   export one parameter (target 32), which nothing declares. The position is exported to target 12 in all
   227; no vertex export is compressed, none has the valid-mask flag, and the done flag is not on the last
   export.
@@ -728,7 +730,7 @@ takes from it:
 | export | the target number and its class (colour, depth, position, parameter), the four source registers, the packed form (two 16-bit values in a register), the last-export and valid-mask flags |
 | whole-wave instructions | the quad-mask instruction, the wait counters, the hints a one-pixel translation can leave out |
 
-Tested on instruction words built by hand only. No pass uses it on the game's programs yet.
+Tested on instruction words built by hand only. The pass of section 26 uses it on the game's programs.
 
 **Review before folding.** The coordinator rebuilt the helper's branch, ran the game-data check and compared
 five of its statements with the public files it had read (the address-word order comment in LLVM's intrinsic
@@ -765,3 +767,104 @@ a register.
 reading). The arithmetic of the two steps: the operand roles are from public source, the polynomial is a
 reading of the public names. What the value in M0 means. Whether the game's programs ever use the image forms
 the pass refuses.
+
+## 26. The pass that writes a PC shader for a console program (boots b116-b118; measured)
+
+`shell/shader_pc.*` is the piece section 24 said was missing. It takes one decoded pixel or vertex program
+together with its module's two tables, the container's input and output lists and its declared resources, and
+writes a PC shader container with `shader_dxbc.*`. **Nothing it writes has been given to the graphics device
+yet**, and no picture comes of it yet. What it does:
+
+- **One lane.** Each machine register the program uses becomes one PC temporary. The pass takes every lane of
+  the wave to be this one pixel or vertex, so a lane mask (VCC, EXEC, a register pair) is all ones or zero.
+  EXEC starts as all ones. A vector register takes a new value only while EXEC's low bit is set; a compare
+  writes its result ANDed with EXEC into both halves of its mask; whole-quad mode leaves a mask as it is.
+- **Control flow** is taken from section 21's items, one PC instruction for each (if, else, loop, break,
+  continue, the "next block" variable). A vertex program's call through a register is skipped (taken to come
+  back with the inputs in place: not established).
+- **Loads of descriptors are not carried out.** A load through a register the module's first table names is
+  looked up in the tables and becomes a fact about the registers it fills: this is the texture at shader
+  register r, this is constant buffer r. The instruction that later uses those registers is written against
+  the PC resource. A fact made in one block is used in another only when the first block always runs before
+  the second and the registers are written nowhere else.
+- **Samplers by number.** The game's pixel programs choose their sampler at run time: they load four words from
+  the sampler heap at a place they compute (a root constant times 16 in the programs read). The pass keeps the
+  computed number and samples with element `number` of a sampler range without an upper end, declared in a
+  register space of the shell's own (0x5748). The PC root signature will have to put the whole sampler heap
+  there.
+- **Root constants** are read from a constant buffer at their declared register at the start of the program.
+- **Inputs and outputs** by the rules of section 23: a pixel program's second interpolation step becomes a
+  read of the input at the attribute's register and channel (the first step only says which); a vertex
+  program's input element r is copied into vector registers 4 + 4r onward at the start, the vertex number into
+  register 0; a colour export goes to the output at the target's register (the packed form is unpacked with
+  the PC's half-to-float conversion); position and parameter exports go to their output registers; an export
+  with the valid-mask flag is followed by a discard when the lane is not live.
+- **Instructions:** 186 (format, opcode) pairs and the three families of compares. Each number was compared
+  with the public opcode table when the list was written. The pass refuses the whole program when it holds one
+  instruction outside the list, and says which.
+
+**How it is tested** (`shell/tests/test_shader_pc.cpp`, hand-built programs only). The written program is run
+by a small evaluator of PC instructions in the test, the console program by the reference interpreter of
+`shader_meaning.*`, and both must leave the same registers, masks and condition behind: 3,275 random
+straight-line programs and 1,189 random programs with forward branches and a counted loop agree (as many again
+are left out because the interpreter refuses them or they produce a not-a-number or a signed zero whose
+handling is not established). More than seventy instructions the interpreter does not cover are checked one at a
+time against the value their public definition gives. A textured pixel program of the shape the game's
+simplest one has, and a vertex program, are written from made-up tables and lists, run, and their containers
+read back by the system's shader disassembler. The test proves that the two models agree, not that a PC
+graphics device or the console hardware computes what the models compute.
+
+**Three mistakes found by building it, all corrected:**
+
+1. `shader_meaning.*` left the scalar condition untouched after `s_and_b32`, `s_and_b64`, `s_andn2_b64` and
+   `s_lshl_b32`. The public definitions say they write it (docs/SHADER-MEANINGS.md, the correction at the end).
+2. Sections 23 here and 13 of docs/exe-map/SHADER-PATH.md said an attribute number is "the n-th input element".
+   What was counted in boots b111-b113 is the n-th **register**: two elements may share a register. The pass
+   first followed the wording and refused 227 pixel programs for it.
+3. The pass first read the fields of the two no-operations a program begins with as if they meant something
+   (an operand selection); they hold the program's identification words.
+
+**Measured on the game's programs** (boot b118; the pixel and vertex programs of the run's first 1,024 different
+containers; the written containers are thrown away after the count; game folder unchanged):
+
+| | pixel (505) | vertex (227) |
+|---|---|---|
+| written | 281 | 129 |
+| not written | 224 | 98 |
+
+What the written ones declare: 192 pixel programs constants, the sampler heap and a texture; 60 those and a
+constant buffer; 24 nothing; 5 a constant buffer. 120 vertex programs a constant buffer; 7 a constant buffer
+and a buffer read by offset; 1 such a buffer; 1 nothing.
+
+Why the others are not written (the first reason the pass meets in each program):
+
+| reason | programs |
+|---|---|
+| vertex: a buffer read with an element index (`buffer_load_dwordx4`) | 96 |
+| pixel: a load through an address the module's tables do not name | 88 |
+| pixel: reads v2 (64) or v3 (4) before writing it - the registers section 25 reads as the position's x and y, not established | 68 |
+| pixel: `v_mac_f32` (multiply-add, not fused), not covered | 32 |
+| pixel: `s_buffer_load_dwordx2` through a descriptor the pass knows nothing about | 14 |
+| pixel: reads s9 (10) or s11 (1) before writing it | 11 |
+| pixel: a scalar move into a special register the pass does not carry | 6 |
+| pixel: a word of a descriptor read as a number | 2 |
+| pixel: `v_cvt_f32_ubyte3`, not covered | 2 |
+| pixel: the interpolation move | 1 |
+| vertex: a parameter export the output list does not have (two of the three programs of section 23) | 2 |
+
+Every vertex program holds only covered instructions. Counted over all 505 pixel programs, the instructions
+the pass does not cover are: `image_load` (in 68 programs), `v_cmpx_eq_u32` (64; a compare that writes EXEC),
+`v_mac_f32` (48), the two-word form of `v_fmac_f32` (18), `v_readfirstlane_b32` (5), `v_cmpx_lt_f32` (4),
+`v_cvt_f32_ubyte0` to `ubyte3` (2 each), `v_cos_f32` (2), `v_interp_mov_f32` (1).
+
+**Taken to be so, not established** (also listed at the top of `shader_pc.hpp`): the vertex call comes back
+with the inputs in place; an input component an element does not have reads as 0, or 1 for the fourth; float
+pixel inputs are interpolated with perspective at the pixel centre; a sampled texture holds float data; the
+PC's multiply-add, minimum, maximum and clamp treat rounding, signed zeros and not-a-numbers as the console
+does. Read in the PC graphics library's reader: its float-to-half conversion rounds toward zero, as the
+console's packing instruction does; the two mixed half-float multiply-adds round to nearest on the console, so
+there the PC result can differ by one unit of a half.
+
+**Not built:** compute programs; the PC root signature that matches a written shader (section 20); giving a
+written shader to the device; everything in the two tables above. The older SPIR-V translator
+(`shader_translate.*`, `spirv.*`) is not on this path: the PC device takes only its own container kinds.
