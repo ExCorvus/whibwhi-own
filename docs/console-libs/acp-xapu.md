@@ -9,9 +9,11 @@ The image imports **9 functions from `AcpHal.dll`** and **5 from `xapu.dll`** (1
 They are the console's audio stack: `AcpHal` is the hardware/driver side (APU heap, the shape contexts the DSP
 reads, CPU ↔ APU address translation), `xapu` is the command/result channel to the DSP.
 
-Our answer today is a skeleton pair (`shell/acp_hal.*`, `shell/xapu.*`, built as `AcpHal.dll` / `xapu.dll`):
-every name exists, every one answers "not provided", and says so once on stderr. Nothing is faked, because the
-image acts on success — see §6 for what a fake success would cost.
+Our answer today (`shell/acp_hal.*`, `shell/xapu.*`, built as `AcpHal.dll` / `xapu.dll`): the memory side is real
+(a heap below 4 GiB, a shape-context array, an identity address map), and the device and the command channel are a
+**silent host** — a stated exception ExCorvus granted (2026-11-26): every call is hosted from the outside so the
+game runs on, with no sound; the real audio path comes later. See §6. With it the game runs past its audio start-up
+(boot b141).
 
 ## 0. Where the two libraries sit in the boot
 
@@ -252,14 +254,15 @@ or not.
 ## 6. What a PC answer should do, and what our skeleton does
 
 The console's APU is hardware: a heap the DSP owns, a shape-context array the DSP reads, a 32-bit APU address
-window, and a command/result queue the DSP drains. None of it exists here, and nothing in the image can be made
-to stand still for it. So the honest PC answer is "refuse, and say what was asked", which is what
-`shell/acp_hal.cpp` and `shell/xapu.cpp` do:
+window, and a command/result queue the DSP drains. None of it exists here. The memory side is answered honestly on
+a PC (unified memory); the device and the command channel are a **silent host** (the stated exception ExCorvus
+granted, 2026-11-26): they host the interface from the outside so the game runs on, with no sound. The real audio
+path comes later. This is what `shell/acp_hal.cpp` and `shell/xapu.cpp` do now:
 
 | function | answer | why that value |
 | --- | --- | --- |
 | `AcpHalAllocateShapeContexts` | `E_NOTIMPL` (negative), nothing written | the image tests `js`; a success would promise `350 × 64` bytes that do not exist |
-| `AcpHalCreate` | `E_NOTIMPL`, handle left alone | a success promises a vtable the image would call into null |
+| `AcpHalCreate` | `0`, a silent device object written | its vtable slots answer success and do nothing; the image's status-word spin leaves at once (no sound) |
 | `AcpHalReleaseShapeContexts` | `E_NOTIMPL` | ignored by the image; nothing was ever handed out |
 | `ApuCreateHeap` | `E_NOTIMPL` | a success would make the image carve 3.3 MiB out of a heap that is not there |
 | `ApuAlloc` | `E_NOTIMPL`, `*out` left alone | same, and the caller does not check: leaving `null` is what it already expects before the call |
@@ -267,11 +270,11 @@ to stand still for it. So the honest PC answer is "refuse, and say what was aske
 | `ApuIsVirtualAddressValid` | `0` | "a PC address has no APU address": the image then leaves its descriptor field unset instead of feeding the DSP a PC pointer |
 | `ApuMapApuAddress` | null | nothing to translate to |
 | `ApuMapVirtualAddress` | `0` | the image keeps 0 in the shape context, which means "no address" |
-| `XApuConnect` | `E_NOTIMPL`, handle left alone | the boot's third "cannot fail"; a success would leave every later call with a null client |
-| `XApuDisconnect` | `E_NOTIMPL` | ignored |
-| `XApuEnqueueCommand` | `E_NOTIMPL` | ignored by all four sites, so it costs nothing to be honest |
-| `XApuGetResultCount` | **`0`** | it is a count: 0 is "nothing waiting", any negative value is two billion loop turns |
-| `XApuDequeueResult` | `E_NOTIMPL`, result left alone | the drain loop skips a negative dequeue |
+| `XApuConnect` | `0`, a client handle written | opens the silent channel |
+| `XApuDisconnect` | `0` | closes it; ignored by the image |
+| `XApuEnqueueCommand` | `0`, command taken in | a result event is queued for the image's state machine (opcode 1->1, 2->2, 3->3 with the byte count, 5->5) |
+| `XApuGetResultCount` | the number of queued results | it is a count: 0 is "nothing waiting", any negative value is two billion loop turns |
+| `XApuDequeueResult` | `0`, a result written (negative when empty) | event at +0, stream id at +4, payload at +0x34; the drain loop skips a negative dequeue |
 
 Each export prints `[acp_hal] …` / `[xapu] …` with its arguments on the **first** call (`WHIWHI_ACP_TRACE=1` /
 `WHIWHI_XAPU_TRACE=1` logs every call). `shell/tests/test_acpxapu.cpp` loads both built DLLs, checks all 14
