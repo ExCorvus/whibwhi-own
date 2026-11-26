@@ -279,6 +279,24 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
   the queue. Not yet measured on the real image: which paths reach OpenFile and whether RPF member offsets
   arrive as file offsets - that needs a boot.
 
+## 2026-11-26 - boots b12-b18: how far the image gets in our shell, and the current boundary (measured)
+
+- Boot b16/b17/b18 (boot_image, game folder as library folder): 578/587 imports connected (only xg_xs 2 and
+  XboxBvhBuilder 7 remain); image at its preferred base; TLS callbacks ran; entry point ran; D3D12ConfigureVirtualMemoryX
+  answered; memory start-up completed (24 GiB CPU view + 24 GiB GPU view reserved, five fixed pools committed);
+  the game reached the storage layer - DStorageGetFactory answered with our console-layout factory, SetStagingBufferSize
+  (32 MiB) answered - i.e. the game's own file layer started. Game folder listing unchanged after every boot.
+- The stop: an unhandled int3 at image+0x22106e0, reached as pool-object vtable slot +0x30 (vtable at .rdata
+  0x62fc060 -> thunk 0x2219be0 -> 0x22106e0, which is 0xCC in the file) when the game allocates from the first
+  fixed pool (fn 0x4fac3c0 -> fn 0x2219620). The flag that routes there (object byte +0x18 = 1) is set
+  unconditionally by fn 0x515970 during pool init, so this path is deterministic - on the console that slot must be
+  filled by the console's own loader. The byte is 0xCC in the retail file and nothing in the image writes it.
+- Per the standing rules we do not patch game code and do not bypass protection, so this stub is the current
+  boundary: the game runs its own start-up up to the file layer and stops at a slot the console loader fills.
+  Runtime tooling added for this: boot_image's exception handler now logs rcx/vtable on faults, continues once
+  through handled breakpoints (a second occurrence at the same address ends the boot), and WHIWHI_WATCH=<rva> arms a
+  1-byte write watchpoint on the entry thread (used to find the flag writer above). 12/12 tests pass.
+
 ## 2026-11-26 - booting the image in the shell; what the runs showed (measured)
 
 - shell/tools/boot_image.cpp (run by Temp\opencode\run_boot.ps1) loads the image, connects imports, optionally
