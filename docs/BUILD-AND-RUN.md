@@ -37,7 +37,7 @@ the tools.
 ctest --test-dir shell\build --output-on-failure
 ```
 
-15 tests, no GPU and no game files needed (all inputs are made up).
+17 tests, no GPU and no game files needed (all inputs are made up).
 
 ## Run the shell against the game
 
@@ -103,11 +103,17 @@ copy build\libs\d3d12core\d3d12core.dll  shell\build\d3d12core.dll
 ```
 
 With those two files beside the tools, `boot_image` logs "using the vkd3d-built d3d12.dll" and the PC device the
-shell creates runs on Vulkan. The plan is to use that to show the game's own memory to the GPU without copying it;
-that part is not built yet.
+shell creates runs on Vulkan. Buffers the game places in its own memory are opened on that device where they
+lie, without a copy, and the game's frames are presented through that library's swap chain.
+
+## What you will see
+
+A window titled "Americas" opens (the game creates it; the shell shows it) and stays black: the game clears its
+display surface and presents it about thirty times a second, but none of its picture is drawn yet. After about
+13 seconds the run ends at the game's audio start-up. `boot_image` prints where it stopped.
 
 ## Status and limits
 
 The current state is the block at the top of `FINDINGS.md`. Short version: the shell loads the game, connects 586
-of its 587 imports and starts it; the game gets through part of its own start-up and stops. Nothing is drawn on
-screen yet.
+of its 587 imports and starts it; the game gets through its graphics start-up, reads its shaders, records and
+presents frames, and stops when it starts its audio. None of the game's picture is drawn yet.
