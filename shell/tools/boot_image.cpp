@@ -119,7 +119,6 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
     const unsigned long rw = info->ExceptionRecord->NumberParameters > 0
                                  ? static_cast<unsigned long>(info->ExceptionRecord->ExceptionInformation[0])
                                  : 0;
-    std::lock_guard<std::mutex> lock(g_log);
     std::fprintf(stderr, "[boot] exception 0x%08lx", code);
     if (code == 0xC0000005) {
         std::fprintf(stderr, " (%s at 0x%llx)", rw == 0 ? "read" : rw == 1 ? "write" : "exec", static_cast<unsigned long long>(data));
@@ -213,15 +212,23 @@ void set_main_module_path(const char* game_exe) {
 DWORD WINAPI run_entry(void* param) {
     auto* ctx = static_cast<EntryContext*>(param);
     {
-        std::lock_guard<std::mutex> lock(g_log);
-        std::fprintf(stderr, "[boot] entry point entered at 0x%llx\n",
-                     static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(ctx->entry)));
-        std::fflush(stderr);
+        const char msg[] = "[boot] entry point entered (raw)\n";
+        DWORD wr = 0;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), msg, sizeof(msg) - 1, &wr, nullptr);
+    }
+    {
+        char buf[96];
+        int n = std::snprintf(buf, sizeof(buf), "[boot] entry point entered at 0x%llx\n",
+                              static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(ctx->entry)));
+        DWORD wr = 0;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), buf, n, &wr, nullptr);
     }
     reinterpret_cast<void (*)()>(ctx->entry)();
-    std::lock_guard<std::mutex> lock(g_log);
-    std::fprintf(stderr, "[boot] entry point returned\n");
-    std::fflush(stderr);
+    {
+        const char msg[] = "[boot] entry point returned\n";
+        DWORD wr = 0;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), msg, sizeof(msg) - 1, &wr, nullptr);
+    }
     return 0;
 }
 
@@ -252,6 +259,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // a crash must not lose the report
+    std::atexit([] { std::fprintf(stderr, "[boot] process exiting (atexit)\n"); std::fflush(stderr); });
     std::fprintf(stderr, "[boot] tool starting\n");
     std::ifstream file(image_path, std::ios::binary);
     if (!file) {
@@ -362,6 +370,8 @@ int main(int argc, char** argv) {
             }
         }
         ResumeThread(thread);
+        std::fprintf(stderr, "[boot] entry thread resumed\n");
+        std::fflush(stderr);
         const DWORD wait = WaitForSingleObject(thread, static_cast<DWORD>(seconds) * 1000);
         if (wait == WAIT_TIMEOUT) {
             std::lock_guard<std::mutex> lock(g_log);
