@@ -113,7 +113,7 @@ address against the two view globals `0x9e1dac0` (CPU view base), `0x9e1dad0` (G
 ## 5. Where the read data lands
 
 **V** The destination of every request is a plain unified virtual address that the caller (the package/RPF
-streaming layer) supplies; the DStorage call itself only ever sees that address plus size. In our shell those
+streaming layer) supplies; the DStorage call itself only ever sees that address plus size. In our weave those
 addresses are:
 
 1. the 24 GiB CPU view (`0x9e1dac0`) — host memory the `xmem` library reserved and the game commits pages in;
@@ -123,7 +123,7 @@ addresses are:
 
 **Conclusion (I, from the above):** a PC answer does not need a GPU resource, a staging buffer or a copy
 engine. It is `read the file range into that host address`, and the GPU later reads the same memory through
-the shell's flat backing. That is exactly the "flat-out zero-copy" footing: no shadow copy, no disk mirror.
+the weave's flat backing. That is exactly the "flat-out zero-copy" footing: no shadow copy, no disk mirror.
 
 ## 6. Completion
 
@@ -158,7 +158,7 @@ Because our reads complete before the enqueue call returns, our status array ans
 Three stages, each useful on its own.
 
 **Stage 0 — the export and the forward (this change).**
-`shell/xcrdapi.cpp` exports `DStorageGetFactory`. It logs once to stderr (`[xcrdapi]`), `LoadLibrary`s
+`weave/xcrdapi.cpp` exports `DStorageGetFactory`. It logs once to stderr (`[xcrdapi]`), `LoadLibrary`s
 `dstorage.dll`, resolves `DStorageGetFactory` and forwards, translating the game's factory IID to the PC
 `IID_IDStorageFactory`. If `dstorage.dll` is absent (it is **not** part of Windows — verified on this machine,
 `C:\Windows\System32\dstorage.dll` does not exist and it is not in the game folder either) it returns
@@ -182,7 +182,7 @@ and makes the absence explicit instead of a missing-export crash.
 **Stage 2 — our queue.** `EnqueueRequest`: read the file range (`ReadFile` with an `OVERLAPPED` offset, or
 `SetFilePointerEx` + `ReadFile`) straight into the request's destination address; memory-sourced requests
 become a `memcpy`; honour `CancellationTag` best-effort; `Submit`/`Close` are no-ops because work is already
-done; `Query` reports the descriptor back. Destination is validated by the shell's memory registry so a
+done; `Query` reports the descriptor back. Destination is validated by the weave's memory registry so a
 request into an unmapped title address is logged, not silently written (the game asserts on its own mistakes,
 we do not paper over them).
 
