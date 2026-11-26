@@ -77,8 +77,9 @@ my own verdict. this was not written or committed by an agent. it is an impressi
 exactly by the way they work. giving them instructions to "clear until intro" will make them spin out of 
 control because they will inspect the code an try to fix it. 
 this only a hypothesis, but the game was written in a special OS and was folded it into
-the xbox os. trying to stitch fix the the inside of the game will basically make the game write the original os
-into the drive.
+the xbox os. trying to stitch fix the the inside of the game will basically make the agemts 
+write the original os into the drive. and i tested this hypothesis with fable. but for the moment this needs
+independent verification, as this might be a path to mative xbox games in windows
 
 ## Files
 
