@@ -224,3 +224,48 @@ It refuses, with a reason, on: a header shorter than its own declared fields, a 
 than the bytes it was given, a chunk count that does not fit, a chunk offset inside the header, a chunk offset
 outside the buffer, and a chunk whose declared size runs past the end. Tests build these headers by hand; no game
 bytes are used anywhere.
+
+## 9. Measured in runs (boots b81-b85): what the requests really carry
+
+The graphics library now reads every pipeline request in memory, counts it, and logs numbers about the first few
+(sizes, part names, thread, return address; no shader bytes are written anywhere). This closes section 7 and
+corrects two expectations above.
+
+- **Which methods fire, and from where.** Slots 57, 62, 67 and 86 are all called; the measured call sites are
+  slot 62 at 0x247fe66 (fn 0x247fd30), slot 67 at 0x24800d5 (fn 0x2480050), slot 57 at 0x2477578 (fn 0x24774c0,
+  run as a job) and slot 86 at 0x2479a87 (fn 0x2479760).
+- **Slot 62** has the public compute pipeline description: root signature, shader pointer, shader length, and
+  the number 1; two more arguments that are zero; then the identifier and the place for the result. It is tried
+  after slot 67 answered failure for the same shader.
+- **Slot 67** is a lookup of a precompiled compute pipeline: the game finds a node by hash in its own table,
+  stores the root signature in it and passes the node. Its words are: root signature, then four (pointer, size)
+  pairs with sizes 0x1c, 0x14, a multiple of 0x40 (384 bytes up to about 129,000 bytes seen), and one more.
+- **Slot 57** is the same for graphics: root signature, then (pointer, size) pairs of about 0x184 to 0x18c bytes,
+  0x78 to 0xe0 bytes, and two blocks whose sizes are multiples of 0x40.
+- **Slot 86** is the public pipeline state stream ({size, pointer}; each element a type number and its data): the
+  three requests made on the thread that created the device carry element 0 (root signature), 1 (vertex shader)
+  and 2 (pixel shader), with shaders stored inside the executable itself.
+- **Slot 101** is the public state-object description of a ray-tracing pipeline (kind 3; entry types 5, 0xB, 2, 7,
+  9, 0xA, 1 = library, hit group, local root signature, association, shader configuration, pipeline
+  configuration, global root signature). It is read and refused: ray tracing is not provided.
+- **The container.** Every container named by a request is the `DXBC` container with the same seven parts:
+  SFI0, ISG1, OSG1, PSV0, HASH, DXIL, PRIV. The PRIV part begins as the game requires. The DXIL part's program
+  header names the stage (vertex, pixel, compute) and shader model 6.6.
+- **The DXIL part holds no portable code.** Its header gives a code size of four bytes, and those four bytes are
+  the letters "NOBC". Between the header and those letters lie a few hundred bytes (about 450 to 800 in the
+  shaders looked at) whose meaning is not known; they contain no end-of-program word of the hardware instruction
+  set. So the PC device cannot build a pipeline from these containers, and the shell does not hand them over.
+- **Where the hardware code is.** In the slot 67 description the block of the third pair, and in the slot 57
+  description two blocks, each contain exactly one end-of-program word of the hardware instruction set
+  (0xBF810000), some way before the block's end. Those blocks are the precompiled programs. The other blocks of
+  a description have no such word; what they hold (per-stage data) is not understood.
+- **Not established:** whether a program starts at its block's first byte (the shell's instruction reader knows
+  too few instruction formats to walk a whole program); what follows the end-of-program word inside a block;
+  which block of a slot 57 description belongs to which stage.
+- **Threads.** Three requests come from the thread that created the device. Every other request comes from the
+  game's worker threads, tens of thousands within the first twenty seconds. The shell serves pipeline requests on
+  the device's own thread only (rule 7); what to do with requests from the game's own worker threads is ExCorvus's
+  decision.
+
+Section 6's expectation that the first pipeline's compute container "is a real shader container" the translator
+could read is therefore wrong in one respect: the container is real, but the instructions are not in it.
