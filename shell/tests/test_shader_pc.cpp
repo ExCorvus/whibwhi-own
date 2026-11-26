@@ -2207,6 +2207,232 @@ int main() {
         }
     }
 
+    // ---- 4d. the small pieces: readfirstlane, the null register, a flat input, a lone position, the
+    //          interpolation value, and a descriptor word on one path only ------------------------------------
+    {
+        // v_readfirstlane_b32 takes lane 0 of a vector register into a SCALAR register (the reader used to type
+        // it as a vector register). One-word and two-word forms.
+        for (unsigned form = 0; form < 2; ++form) {
+            P p;
+            leading_no_operations(p);
+            sop1(p, 33, 4, 4);                       // the vertex call through s4
+            vop1(p, 1, 0, kLit, fbits(7.0f));        // v0 = 7.0
+            if (form == 0) {
+                vop1(p, 2, 0, V(0));                 // s0 = first lane of v0
+            } else {
+                vop3(p, 0x182, 0, V(0), 0);          // the two-word form
+            }
+            vop1(p, 1, 1, 0);                        // v1 = s0
+            exp(p, 12, 0x1, false, true, false, 1, 0, 0, 0);
+            const DecodedShader program = decode(p, ShaderStage::kVertex);
+            CHECK(program.ok);
+            Signature outputs;
+            outputs.found = true;
+            outputs.elements = {element("SV_Position", 0, 1, 3, 0, 0xF)};
+            Signature inputs;
+            inputs.found = true;
+            PcShaderInput input;
+            input.stage = PcStage::kVertex;
+            input.program = &program;
+            input.inputs = &inputs;
+            input.outputs = &outputs;
+            const PcShader shader = write_pc_shader(input);
+            if (!shader.ok) {
+                std::printf("FAIL: readfirstlane (form %u) not written: %s\n", form, shader.reason.c_str());
+                ++failures;
+            } else {
+                PcMachine machine = machine_for(shader);
+                machine.run(shader.listing);
+                CHECK(machine.error.empty() && machine.finished);
+                CHECK(machine.outputs[0].c[0] == fbits(7.0f));
+            }
+        }
+
+        // A move into the null register writes nothing and is skipped.
+        {
+            P p;
+            leading_no_operations(p);
+            sop1(p, 33, 4, 4);
+            sop1(p, 3, 125, kLit, 0);                // s_mov_b32 null, 0
+            vop1(p, 1, 0, kLit, fbits(1.0f));
+            exp(p, 12, 0x1, false, true, false, 0, 0, 0, 0);
+            const DecodedShader program = decode(p, ShaderStage::kVertex);
+            Signature outputs;
+            outputs.found = true;
+            outputs.elements = {element("SV_Position", 0, 1, 3, 0, 0xF)};
+            Signature inputs;
+            inputs.found = true;
+            PcShaderInput input;
+            input.stage = PcStage::kVertex;
+            input.program = &program;
+            input.inputs = &inputs;
+            input.outputs = &outputs;
+            const PcShader shader = write_pc_shader(input);
+            CHECK(shader.ok);
+        }
+
+        // The interpolation move with selector 2 is a flat (constant) input.
+        {
+            P p;
+            leading_no_operations(p);
+            vintrp(p, 2, 0, 0, 0, 2);                // v0 = attribute 0, x, first vertex's value
+            vintrp(p, 2, 1, 0, 1, 2);
+            vintrp(p, 2, 2, 0, 2, 2);
+            vintrp(p, 2, 3, 0, 3, 2);
+            vop2(p, 47, 4, V(0), 1);                 // pack
+            vop2(p, 47, 5, V(2), 3);
+            exp(p, 0, 0xF, true, true, true, 4, 5, 0, 0);
+            const DecodedShader program = decode(p, ShaderStage::kPixel);
+            Signature inputs, outputs;
+            inputs.found = outputs.found = true;
+            inputs.elements = {element("TEXCOORD", 0, 0, 3, 0, 0xF)};
+            outputs.elements = {element("SV_Target", 0, 64, 3, 0, 0xF)};
+            PcShaderInput input;
+            input.stage = PcStage::kPixel;
+            input.program = &program;
+            input.inputs = &inputs;
+            input.outputs = &outputs;
+            const PcShader shader = write_pc_shader(input);
+            if (!shader.ok) {
+                std::printf("FAIL: the flat input not written: %s\n", shader.reason.c_str());
+                ++failures;
+            } else {
+                PcMachine machine = machine_for(shader);
+                machine.inputs[0].c[0] = fbits(1.0f);
+                machine.inputs[0].c[1] = fbits(2.0f);
+                machine.inputs[0].c[2] = fbits(3.0f);
+                machine.inputs[0].c[3] = fbits(4.0f);
+                machine.run(shader.listing);
+                CHECK(machine.error.empty() && machine.finished);
+                CHECK(machine.outputs[0].c[0] == fbits(1.0f) && machine.outputs[0].c[3] == fbits(4.0f));
+                expect_lines(disassembler, "flat input", shader.container,
+                             {"dcl_input_ps constant v0.xyzw", "dcl_output o0.xyzw", "ret"});
+            }
+            // A move that does not take the first vertex's value is refused.
+            p.clear();
+            leading_no_operations(p);
+            vintrp(p, 2, 0, 0, 0, 0);                // selector 0
+            const DecodedShader other = decode(p, ShaderStage::kPixel);
+            input.program = &other;
+            const PcShader refused = write_pc_shader(input);
+            CHECK(!refused.ok && refused.reason.find("first vertex's value") != std::string::npos);
+        }
+
+        // A vertex program that declares only the position and still exports a parameter: the parameter is left
+        // out (no declared output receives it).
+        {
+            P p;
+            leading_no_operations(p);
+            sop1(p, 33, 4, 4);
+            vop1(p, 1, 0, kLit, fbits(1.0f));
+            vop1(p, 1, 1, kLit, fbits(2.0f));
+            vop1(p, 1, 2, kLit, fbits(3.0f));
+            vop1(p, 1, 3, kLit, fbits(4.0f));
+            exp(p, 12, 0xF, false, false, false, 0, 1, 2, 3);
+            exp(p, 32, 0x3, false, true, false, 0, 1, 0, 0);
+            const DecodedShader program = decode(p, ShaderStage::kVertex);
+            Signature inputs, outputs;
+            inputs.found = outputs.found = true;
+            outputs.elements = {element("SV_Position", 0, 1, 3, 0, 0xF)};
+            PcShaderInput input;
+            input.stage = PcStage::kVertex;
+            input.program = &program;
+            input.inputs = &inputs;
+            input.outputs = &outputs;
+            const PcShader shader = write_pc_shader(input);
+            if (!shader.ok) {
+                std::printf("FAIL: the lone-position vertex program not written: %s\n", shader.reason.c_str());
+                ++failures;
+            } else {
+                expect_lines(disassembler, "lone position", shader.container,
+                             {"dcl_output_siv o0.xyzw, position", "ret"});
+                long hr = 0;
+                const std::string text = disassemble(disassembler, shader.container, &hr);
+                CHECK(hr == 0 && text.find("dcl_output o1") == std::string::npos);
+            }
+        }
+
+        // The interpolation value: the register after the last one the first table names is a token, moved
+        // (perhaps through another register) into M0; reading it as a number is refused.
+        {
+            ModuleTables tables;
+            tables.found = true;
+            tables.understood = true;
+            tables.layout = {layout_entry(0, 0, 1, 500, 8, 0)};   // one constant at register 500, in s8
+            tables.resources = {resource_entry(2, 0, 0, 500, 4, 8, 0)};
+            DeclaredResources declared;
+            declared.found = true;
+            declared.resources = {DeclaredResource{2, 0, 500, 500}};
+            Signature inputs, outputs;
+            inputs.found = outputs.found = true;
+            outputs.elements = {element("SV_Target", 0, 64, 3, 0, 0xF)};
+            P p;
+            leading_no_operations(p);
+            sop1(p, 3, 2, 9);                        // s2 = s9 (the interpolation value)
+            sop1(p, 3, 124, 2);                      // m0 = s2
+            vop1(p, 1, 0, kLit, fbits(0.5f));
+            vop2(p, 47, 4, V(0), 0);
+            exp(p, 0, 0x3, true, true, true, 4, 4, 0, 0);
+            const DecodedShader program = decode(p, ShaderStage::kPixel);
+            PcShaderInput input;
+            input.stage = PcStage::kPixel;
+            input.program = &program;
+            input.tables = &tables;
+            input.inputs = &inputs;
+            input.outputs = &outputs;
+            input.declared = &declared;
+            const PcShader shader = write_pc_shader(input);
+            if (!shader.ok) {
+                std::printf("FAIL: the interpolation-value program not written: %s\n", shader.reason.c_str());
+                ++failures;
+            }
+            // Reading the interpolation value as a number is refused.
+            p.clear();
+            leading_no_operations(p);
+            sop2(p, 14, 0, 9, 9);                    // s0 = s9 & s9
+            const DecodedShader other = decode(p, ShaderStage::kPixel);
+            input.program = &other;
+            const PcShader refused = write_pc_shader(input);
+            CHECK(!refused.ok && refused.reason.find("interpolation value") != std::string::npos);
+        }
+
+        // A register a different branch loads a descriptor over is still a number on the branch that did not
+        // load it: the read happens before the ways meet.
+        {
+            ModuleTables tables;
+            tables.found = true;
+            tables.understood = true;
+            tables.layout = {layout_entry(6, 0, 1, 0, 8, 0)};   // the sampler heap in s8
+            Signature inputs, outputs;
+            inputs.found = outputs.found = true;
+            P p;
+            sopk(p, 0, 2, 7);                        // word 0: s2 = 7
+            sopc(p, 6, 8, I(0));                     // word 1: scc = (s8 == 0), true (s8 reads as zero)
+            sopp(p, 5, 3);                           // word 2: if scc, go to word 6 (the read)
+            smem(p, 2, 0, 8, kNoRegister, 0);        // words 3,4: a sampler's four words over s0..s3
+            sopp(p, 2, 1);                           // word 5: go to word 7 (the end)
+            sop2(p, 14, 4, 2, 2);                    // word 6: s4 = s2 & s2, reached only from word 2
+            sopp(p, 1, 0);                           // word 7: end
+            const DecodedShader program = decode(p, ShaderStage::kPixel, false);
+            CHECK(program.ok);
+            PcShaderInput input;
+            input.stage = PcStage::kPixel;
+            input.program = &program;
+            input.tables = &tables;
+            input.inputs = &inputs;
+            input.outputs = &outputs;
+            const PcShader shader = write_pc_shader(input);
+            if (!shader.ok) {
+                std::printf("FAIL: the per-path descriptor program not written: %s\n", shader.reason.c_str());
+                ++failures;
+            } else {
+                PcMachine machine = machine_for(shader);
+                machine.run(shader.listing);
+                CHECK(machine.error.empty() && machine.finished);
+            }
+        }
+    }
+
     // ---- 5. refusals ---------------------------------------------------------------------------------------
     {
         PcShaderInput input;
