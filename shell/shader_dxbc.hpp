@@ -256,6 +256,12 @@ Operand constant_buffer_source(std::uint32_t id, std::uint32_t reg, std::uint32_
 // One component (0 = x .. 3 = w) of a constant buffer element.
 Operand constant_buffer_scalar(std::uint32_t id, std::uint32_t reg, std::uint32_t element,
                                std::uint8_t component);
+// A constant buffer element taken at run time: 16-byte element `element` plus the value of one component of
+// temporary register `temp` (written CB0[1][r5.x + 2]); `components` is the swizzle read from it. The buffer has
+// to be declared with `dynamic_indexed`.
+Operand constant_buffer_source_indexed(std::uint32_t id, std::uint32_t reg, std::uint32_t element,
+                                       std::uint32_t temp, std::uint8_t component,
+                                       std::uint8_t components = kSwizzleXYZW);
 // A sampler or a resource taken from its declared range at run time: element `array_index` plus the value of
 // one component of temporary register `temp`.
 Operand sampler_source_indexed(std::uint32_t id, std::uint32_t array_index, std::uint32_t temp,
