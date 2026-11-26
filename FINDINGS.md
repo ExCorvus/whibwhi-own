@@ -1013,3 +1013,30 @@ table: word 1 is a whole multiple of the descriptor's size in words (the low byt
 one table share a word 1; and the first table has a kind 3 entry with the same parameter, the same word 1 and the
 same register. So each such resource has a position of its own in its table, said twice and consistently by the
 shader's own tables (measured). That the console reads the table at that position is still inferred.
+
+## 2026-11-26 - render-target views kept in the program's own heap memory (game test 19:46)
+
+The program treats every descriptor as 32 bytes of its own memory at the address it chose for the heap, copies
+those bytes as raw memory and never reads what is inside (docs/exe-map/DESCRIPTORS.md C.2/C.3). Until now the
+shell kept descriptors only in the PC heap and left that memory empty. ExCorvus chose constant rehydration: the
+program's memory is the record, and the shell turns it into PC objects as they are used. This is the first heap
+done that way, the render-target heap (type 2), written by a helper agent and read through before the test.
+
+- Device slot 20 (CreateRenderTargetView) still makes the PC view, and also writes a 32-byte note at the
+  program's own address: a fixed mark, the kind and a view number. The note's layout is the shell's own (the
+  program never reads it). The view number names a record of the resource and a copy of the description.
+- The description the program passes is the public 24-byte one (measured at the exe's one call site,
+  fn 0xcc2960, call at 0xcc29e4: 24 bytes zeroed on the stack, then format, view kind and the kind's fields).
+- Copies (device slots 23 and 24) of type 2 also copy the notes in the program's memory; the sources are read
+  before anything is written.
+- Where a render-target handle is used (list slots 50 and 52), the note is read first; if the PC position does not
+  hold the view it names, the view is made again there from the record.
+
+Game test 2026-11-26 19:46: PASS, alive after 60 s, the copy's folder unchanged, no new missing answers, a
+render-target clear reached the PC list. The last frame token was 108 against 116 in the accepted run; one run
+does not tell whether that is variation.
+
+Open, to be fixed next (ExCorvus, 2026-11-26): (1) the records only grow - every slot-20 call adds one and none
+is removed; (2) a record keeps the resource without a reference, so a remake after the resource is gone would use
+a stale one; (3) a copy from a position without a note writes zeros instead of the source's bytes; (4) the remake
+almost never happens, because the PC copy already carries the view across.
