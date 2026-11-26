@@ -3,9 +3,11 @@
 // DStorageGetFactory answers with OUR factory object in the console vtable layout (the image asks for the
 // console IID and calls +0x20 OpenFile, +0x28 CreateStatusArray, +0x40 SetStagingBufferSize and +0x50
 // CreateQueue; the PC factory ends at +0x38 with CreateQueue at +0x18, so a forwarded PC pointer would be
-// undefined behaviour). Our queue reads each request synchronously straight into the request's destination
-// address - host memory the xmem library owns - so completion is real (status array: IsComplete = true,
-// GetHResult = S_OK), not faked. No staging buffer, no GPU resource, no copy of the file.
+// undefined behaviour). Our queue carries each request out when it arrives, straight into the request's
+// destination address in the image's own memory: a plain read, or a read whose bytes are one zlib stream and
+// are decoded on the way (inflate.cpp). A request it cannot carry out is logged in full and reported as a
+// failure through the next status entry; nothing is reported as done that was not done. No staging buffer, no
+// GPU resource, no copy of the file on disk.
 //
 // Every object logs its first calls to stderr with the "[xcrdapi]" prefix. Unknown vtable slots log their
 // offset once and answer E_NOTIMPL. Paths are logged and mapped onto the read-only game folder
@@ -16,12 +18,18 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <intrin.h>
+
+#include "inflate.hpp"
+
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <set>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -143,9 +151,17 @@ struct File {
     HANDLE handle = nullptr;
 };
 
+constexpr long kPending = static_cast<long>(0x8000000AL);  // E_PENDING: no result yet
+
+struct StatusEntry {
+    std::atomic<long> result{kPending};
+    std::atomic<bool> complete{false};
+};
+
 struct StatusArray {
     Com com;
     unsigned long capacity = 0;
+    StatusEntry* entries = nullptr;
 };
 
 struct Queue {
@@ -153,7 +169,31 @@ struct Queue {
     unsigned long long capacity = 0;
     unsigned long priority = 0;
     std::atomic<unsigned long long> enqueued{0};
+    std::atomic<unsigned long long> carried_out{0};
+    std::atomic<unsigned long long> not_carried_out{0};
+    // The first failure since the last status entry was written (0 = none). Read and cleared when the image
+    // asks for a status entry.
+    std::atomic<long> first_failure{0};
 };
+
+// The objects this library has handed out and not yet released, so that a pointer found in a request or an
+// argument is used as one of them only when it is one.
+std::mutex g_objects_lock;
+std::set<const void*> g_files;
+std::set<const void*> g_status_arrays;
+
+void remember_object(std::set<const void*>& set, const void* object) {
+    std::lock_guard<std::mutex> lock(g_objects_lock);
+    set.insert(object);
+}
+void forget_object(std::set<const void*>& set, const void* object) {
+    std::lock_guard<std::mutex> lock(g_objects_lock);
+    set.erase(object);
+}
+bool is_object(const std::set<const void*>& set, const void* object) {
+    std::lock_guard<std::mutex> lock(g_objects_lock);
+    return set.count(object) != 0;
+}
 
 File* make_file(HANDLE h);
 StatusArray* make_status_array(unsigned long capacity);
@@ -215,7 +255,7 @@ long __stdcall f_createstatusarray(Factory* self, unsigned long capacity, const 
     }
     *out = make_status_array(capacity);
     static std::once_flag once;
-    std::call_once(once, [capacity] { logf("CreateStatusArray: capacity %lu (all entries complete)\n", capacity); });
+    std::call_once(once, [capacity] { logf("CreateStatusArray: capacity %lu (an entry has no result until the queue writes it)\n", capacity); });
     (void)riid;
     return 0;
 }
@@ -271,6 +311,7 @@ unsigned long __stdcall file_addref(File* self) {
 unsigned long __stdcall file_release(File* self) {
     const long r = self->com.refs.fetch_sub(1) - 1;
     if (r == 0) {
+        forget_object(g_files, self);
         if (self->handle) {
             CloseHandle(self->handle);
         }
@@ -305,10 +346,26 @@ File* make_file(HANDLE h) {
     auto* f = new File{};
     f->com.vt = file_vtable();
     f->handle = h;
+    remember_object(g_files, f);
     return f;
 }
 
-// ---- status array (all entries complete, because our reads finish inside EnqueueRequest) -------------------
+// ---- status array -----------------------------------------------------------------------------------------
+//
+// An entry has no result until the image asks the queue to write one (see the queue). Then it holds success
+// when every request since the previous entry was carried out, or the first failure among them. Requests are
+// carried out inside EnqueueRequest, so an entry is complete as soon as it is written.
+//
+// The method order after Release is the public one of IDStorageStatusArray (IsComplete, GetHResult,
+// GetFirstFailure). The image asks for a console identifier, and no call of the image to these three methods
+// has been read in its code, so the order is an inference; the first calls of each are logged.
+
+void note_status_call(const char* name, unsigned long index, long long answer) {
+    static std::atomic<int> shown{0};
+    if (shown.fetch_add(1) < 12) {
+        logf("status array %s(%lu) -> 0x%llx\n", name, index, static_cast<unsigned long long>(answer));
+    }
+}
 
 long __stdcall sa_qi(StatusArray* self, const GUID* riid, void** pp) {
     return qi_impl(self, riid, pp, nullptr, nullptr);
@@ -319,30 +376,34 @@ unsigned long __stdcall sa_addref(StatusArray* self) {
 unsigned long __stdcall sa_release(StatusArray* self) {
     const long r = self->com.refs.fetch_sub(1) - 1;
     if (r == 0) {
+        forget_object(g_status_arrays, self);
+        delete[] self->entries;
         delete self;
     }
     return static_cast<unsigned long>(r);
 }
-long __stdcall sa_gethresult(StatusArray*, unsigned long, long* out) {
-    if (out) {
-        *out = 0;
-    }
-    return 0;
+int __stdcall sa_iscomplete(StatusArray* self, unsigned long index) {
+    const int answer = index < self->capacity && self->entries[index].complete.load() ? 1 : 0;
+    note_status_call("IsComplete", index, answer);
+    return answer;
 }
-int __stdcall sa_iscomplete(StatusArray*, unsigned long) {
-    return 1;
+long __stdcall sa_gethresult(StatusArray* self, unsigned long index) {
+    const long answer = index < self->capacity ? self->entries[index].result.load()
+                                               : static_cast<long>(0x80070057L);  // E_INVALIDARG
+    note_status_call("GetHResult", index, static_cast<unsigned long>(answer));
+    return answer;
 }
-void __stdcall sa_getrequest(StatusArray*, unsigned long, void* out) {
-    if (out) {
-        std::memset(out, 0, 0x40);
-    }
+// The public method fills a record describing the first failed request. Its console layout is not known, so
+// nothing is written.
+void __stdcall sa_getfirstfailure(StatusArray*, unsigned long index, void*) {
+    note_status_call("GetFirstFailure (nothing written: the record's layout is not known)", index, 0);
 }
 
 void** status_array_vtable() {
-    static void* vt[] = {reinterpret_cast<void*>(&sa_qi),  reinterpret_cast<void*>(&sa_addref),
-                         reinterpret_cast<void*>(&sa_release), reinterpret_cast<void*>(&sa_gethresult),  // +0x18
-                         reinterpret_cast<void*>(&sa_iscomplete),                                        // +0x20
-                         reinterpret_cast<void*>(&sa_getrequest)};                                       // +0x28
+    static void* vt[] = {reinterpret_cast<void*>(&sa_qi),         reinterpret_cast<void*>(&sa_addref),
+                         reinterpret_cast<void*>(&sa_release),     reinterpret_cast<void*>(&sa_iscomplete),   // +0x18
+                         reinterpret_cast<void*>(&sa_gethresult),                                            // +0x20
+                         reinterpret_cast<void*>(&sa_getfirstfailure)};                                      // +0x28
     return vt;
 }
 
@@ -350,10 +411,12 @@ StatusArray* make_status_array(unsigned long capacity) {
     auto* s = new StatusArray{};
     s->com.vt = status_array_vtable();
     s->capacity = capacity;
+    s->entries = new StatusEntry[capacity ? capacity : 1];
+    remember_object(g_status_arrays, s);
     return s;
 }
 
-// ---- queue ----------------------------------------------------------------------------------------------
+// ---- queue ------------------------------------------------------------------------------------------------
 
 unsigned long rd32(const void* p) {
     unsigned long v;
@@ -366,74 +429,177 @@ unsigned long long rd64(const void* p) {
     return v;
 }
 
-// The request is 0x40 bytes. Observed fields (docs/console-libs/xcrdapi-dstorage.md §4): +0x00 options
-// (0 = file, 0x400000 = memory source), +0x08 destination VA, +0x10 file object (file) or source pointer
-// (memory), +0x18 file offset, +0x20 destination size, +0x28 source size. The first few requests are logged in
-// full so the field map is confirmed against the real image.
-long do_request(Queue* q, const unsigned char* r) {
-    const unsigned long options = rd32(r + 0x00);
-    const unsigned long long dest = rd64(r + 0x08);
-    const unsigned long long source = rd64(r + 0x10);
-    const unsigned long long offset = rd64(r + 0x18);
-    const unsigned long dest_size = rd32(r + 0x20);
-    const unsigned long source_size = rd32(r + 0x28);
-    const unsigned long long n = (dest_size && source_size) ? (dest_size < source_size ? dest_size : source_size)
-                                                            : (source_size ? source_size : dest_size);
+constexpr long kNotImplemented = static_cast<long>(0x80004001L);
+constexpr long kFail = static_cast<long>(0x80004005L);
+constexpr long kInvalidArgument = static_cast<long>(0x80070057L);
+constexpr unsigned long long kOptionInflate = 1;        // the source bytes are one zlib stream
+constexpr unsigned long kLargestPiece = 0x10000000ul;   // 256 MiB: more than that in one request is refused
 
-    const unsigned long long count = q->enqueued.fetch_add(1);
-    if (count < 5) {
-        logf("EnqueueRequest #%llu: options 0x%lx dest 0x%llx source 0x%llx offset 0x%llx destsize %lu srcsize %lu "
-             "(full request: %016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx)\n",
-             count + 1, options, dest, source, offset, dest_size, source_size, rd64(r), rd64(r + 8), rd64(r + 0x10),
-             rd64(r + 0x18), rd64(r + 0x20), rd64(r + 0x28), rd64(r + 0x30), rd64(r + 0x38));
+// Whether every page of [address, address + bytes) is committed and may be written.
+bool can_write(unsigned long long address, unsigned long long bytes) {
+    unsigned long long at = address;
+    const unsigned long long end = address + bytes;
+    if (!address || end < address) {
+        return false;
     }
-    if (!dest || !n) {
-        logf("EnqueueRequest #%llu: empty destination or size - skipped\n", count + 1);
-        return 0;
-    }
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (VirtualQuery(reinterpret_cast<void*>(dest), &mbi, sizeof(mbi)) != sizeof(mbi) ||
-        mbi.State != MEM_COMMIT || (mbi.Protect & 0xFF) == 0x01 /*PAGE_NOACCESS*/) {
-        logf("EnqueueRequest #%llu: destination 0x%llx is not committed writable memory - skipped, not written "
-             "(logged, not hidden)\n",
-             count + 1, dest);
-        return 0;
-    }
-    if (options & 0x400000ul) {
-        // Memory-sourced: a plain copy into the destination.
-        std::memcpy(reinterpret_cast<void*>(dest), reinterpret_cast<const void*>(source),
-                    static_cast<size_t>(n));
-        return 0;
-    }
-    auto* file = reinterpret_cast<File*>(source);
-    if (!file || !file->handle) {
-        logf("EnqueueRequest #%llu: no file object - skipped\n", count + 1);
-        return 0;
-    }
-    OVERLAPPED ov{};
-    ov.Offset = static_cast<unsigned long>(offset & 0xFFFFFFFFull);
-    ov.OffsetHigh = static_cast<unsigned long>(offset >> 32);
-    ov.hEvent = nullptr;
-    DWORD read_bytes = 0;
-    const BOOL ok = ReadFile(file->handle, reinterpret_cast<void*>(dest), static_cast<DWORD>(n), &read_bytes, &ov);
-    if (!ok) {
-        const unsigned long err = GetLastError();
-        if (err != ERROR_IO_PENDING) {
-            logf("EnqueueRequest #%llu: ReadFile at offset 0x%llx into 0x%llx failed, error %lu\n", count + 1,
-                 offset, dest, err);
-            return static_cast<long>(0x80004005L);
+    while (at < end) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(reinterpret_cast<void*>(at), &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.State != MEM_COMMIT ||
+            (mbi.Protect & PAGE_GUARD)) {
+            return false;
         }
-        while (!HasOverlappedIoCompleted(&ov)) {
-            Sleep(0);
+        const unsigned long access = mbi.Protect & 0xFF;
+        if (access != PAGE_READWRITE && access != PAGE_WRITECOPY && access != PAGE_EXECUTE_READWRITE &&
+            access != PAGE_EXECUTE_WRITECOPY) {
+            return false;
         }
-        read_bytes = 0;
-        GetOverlappedResult(file->handle, &ov, &read_bytes, FALSE);
+        at = reinterpret_cast<unsigned long long>(mbi.BaseAddress) + mbi.RegionSize;
     }
-    if (count < 5) {
-        logf("EnqueueRequest #%llu: read %lu of %llu bytes at offset 0x%llx into 0x%llx\n", count + 1, read_bytes, n,
-             offset, dest);
+    return true;
+}
+
+// Reads exactly `bytes` at `offset`. The handle was opened for overlapped use.
+bool read_exactly(HANDLE file, unsigned long long offset, void* to, unsigned long bytes, unsigned long& error) {
+    unsigned long done = 0;
+    while (done < bytes) {
+        OVERLAPPED ov{};
+        const unsigned long long at = offset + done;
+        ov.Offset = static_cast<unsigned long>(at & 0xFFFFFFFFull);
+        ov.OffsetHigh = static_cast<unsigned long>(at >> 32);
+        DWORD got = 0;
+        if (!ReadFile(file, static_cast<unsigned char*>(to) + done, bytes - done, &got, &ov)) {
+            error = GetLastError();
+            if (error != ERROR_IO_PENDING || !GetOverlappedResult(file, &ov, &got, TRUE)) {
+                if (error == ERROR_IO_PENDING) {
+                    error = GetLastError();
+                }
+                return false;
+            }
+        }
+        if (got == 0) {
+            error = ERROR_HANDLE_EOF;
+            return false;
+        }
+        done += got;
+    }
+    error = 0;
+    return true;
+}
+
+// A request is eight 64-bit words. Layout as the image fills it, read off a run (every request the image made
+// for its shader package had this shape) - see docs/console-libs/xcrdapi-dstorage.md:
+//   +0x00 options      0 = copy the file bytes; 1 = the file bytes are one zlib stream to be decoded
+//   +0x08 destination  an address in the image's own memory
+//   +0x10 (zero in every request seen)
+//   +0x18 destination bytes (32 bits; the 32 bits above were zero)
+//   +0x20 the file object OpenFile returned
+//   +0x28 offset in the file
+//   +0x30 source bytes (32 bits; the 32 bits above were zero)
+//   +0x38 (zero in every request seen)
+// Anything else - other option bits, a non-zero word where zero was seen, a file object that is not one of
+// ours - is logged in full and not carried out. The read goes straight into the destination; for a zlib piece
+// the compressed bytes pass through a temporary buffer and are decoded into the destination.
+long carry_out(Queue* q, const unsigned char* r, unsigned long long number) {
+    const unsigned long long options = rd64(r + 0x00);
+    const unsigned long long destination = rd64(r + 0x08);
+    const unsigned long long word2 = rd64(r + 0x10);
+    const unsigned long destination_bytes = rd32(r + 0x18);
+    const unsigned long word3_high = rd32(r + 0x1c);
+    const unsigned long long file_word = rd64(r + 0x20);
+    const unsigned long long offset = rd64(r + 0x28);
+    const unsigned long source_bytes = rd32(r + 0x30);
+    const unsigned long word6_high = rd32(r + 0x34);
+    const unsigned long long word7 = rd64(r + 0x38);
+    (void)q;
+
+    const auto refuse = [&](const char* why, long code) {
+        static std::atomic<int> shown{0};
+        if (shown.fetch_add(1) < 24) {
+            logf("request #%llu NOT carried out (%s): %016llx %016llx %016llx %016llx %016llx %016llx %016llx "
+                 "%016llx\n",
+                 number, why, rd64(r), rd64(r + 8), rd64(r + 0x10), rd64(r + 0x18), rd64(r + 0x20), rd64(r + 0x28),
+                 rd64(r + 0x30), rd64(r + 0x38));
+        }
+        return code;
+    };
+
+    if (options != 0 && options != kOptionInflate) {
+        return refuse("option bits this library does not carry out", kNotImplemented);
+    }
+    if (word2 || word3_high || word6_high || word7) {
+        return refuse("a field that was zero in every request seen is not zero", kNotImplemented);
+    }
+    const auto* file = reinterpret_cast<const File*>(file_word);
+    if (!is_object(g_files, file) || !file->handle) {
+        return refuse("the file is not an open file of this library", kInvalidArgument);
+    }
+    if (!source_bytes || !destination_bytes || source_bytes > kLargestPiece || destination_bytes > kLargestPiece) {
+        return refuse("an empty or oversized piece", kInvalidArgument);
+    }
+    if (options == 0 && source_bytes != destination_bytes) {
+        return refuse("a plain copy whose two sizes differ", kNotImplemented);
+    }
+    if (!can_write(destination, destination_bytes)) {
+        return refuse("the destination is not memory that can be written", kInvalidArgument);
+    }
+
+    unsigned long error = 0;
+    if (options == 0) {
+        if (!read_exactly(file->handle, offset, reinterpret_cast<void*>(destination), source_bytes, error)) {
+            logf("request #%llu: reading %lu bytes at offset 0x%llx failed, error %lu\n", number, source_bytes,
+                 offset, error);
+            return kFail;
+        }
+        if (number <= 3) {
+            logf("request #%llu: %lu bytes at offset 0x%llx read into 0x%llx\n", number, source_bytes, offset,
+                 destination);
+        }
+        return 0;
+    }
+
+    std::vector<std::uint8_t> packed(source_bytes);
+    if (!read_exactly(file->handle, offset, packed.data(), source_bytes, error)) {
+        logf("request #%llu: reading %lu bytes at offset 0x%llx failed, error %lu\n", number, source_bytes, offset,
+             error);
+        return kFail;
+    }
+    const whiwhi::shell::InflateOutcome o = whiwhi::shell::inflate_zlib(
+        packed.data(), packed.size(), reinterpret_cast<std::uint8_t*>(destination), destination_bytes);
+    if (o.result != whiwhi::shell::InflateResult::ok) {
+        logf("request #%llu: the %lu bytes at offset 0x%llx did not decode (%s; %zu bytes used, %zu written of "
+             "%lu); the destination holds what was written before the failure\n",
+             number, source_bytes, offset, whiwhi::shell::inflate_result_name(o.result), o.consumed, o.produced,
+             destination_bytes);
+        return kFail;
+    }
+    static std::atomic<int> sizes_shown{0};
+    if (number <= 3 || (o.produced != destination_bytes && sizes_shown.fetch_add(1) < 8)) {
+        logf("request #%llu: %lu bytes at offset 0x%llx decoded to %zu bytes at 0x%llx (room %lu, %zu of the "
+             "source used)\n",
+             number, source_bytes, offset, o.produced, destination, destination_bytes, o.consumed);
     }
     return 0;
+}
+
+// The public EnqueueRequest returns nothing: a failure is reported through the next status entry. The result
+// is returned as well, in case the console's method does return one.
+long __stdcall q_enqueuerequest(Queue* self, const void* request) {
+    const unsigned long long number = self->enqueued.fetch_add(1) + 1;
+    long result = kInvalidArgument;
+    if (request) {
+        result = carry_out(self, static_cast<const unsigned char*>(request), number);
+    }
+    if (result == 0) {
+        const unsigned long long done = self->carried_out.fetch_add(1) + 1;
+        if ((done & (done - 1)) == 0 && done >= 64) {
+            logf("%llu requests carried out on this queue so far\n", done);
+        }
+    } else {
+        self->not_carried_out.fetch_add(1);
+        long none = 0;
+        self->first_failure.compare_exchange_strong(none, result);
+    }
+    return result;
 }
 
 long __stdcall q_qi(Queue* self, const GUID* riid, void** pp) {
@@ -449,28 +615,65 @@ unsigned long __stdcall q_release(Queue* self) {
     }
     return static_cast<unsigned long>(r);
 }
-long __stdcall q_enqueuerequest(Queue* self, const void* request) {
-    return do_request(self, static_cast<const unsigned char*>(request));
-}
-long __stdcall q_noop(Queue* self, void*, void*, void*) {
-    (void)self;
-    return 0;
-}
-long __stdcall q_close(Queue* self) {
-    (void)self;
-    static std::once_flag once;
-    std::call_once(once, [] { logf("queue Close\n"); });
-    return 0;
+
+// The queue's other methods. Which offset is which is not established (the public queue has EnqueueStatus,
+// EnqueueSignal, Submit, CancelRequestsWithTag, Close after EnqueueRequest; the console's order was only
+// inferred), so a call is recognised by what it is given:
+//  - a status array of this library and an index inside it: the entry is written - success when every request
+//    since the previous entry was carried out, otherwise the first failure. That is the public EnqueueStatus.
+//  - anything else is logged (the first calls per offset, with its arguments) and answered "not implemented".
+//    Submit has nothing to do here because requests are carried out when they arrive, and the public Submit
+//    returns nothing; a method that passes a fence or an event is NOT carried out and says so.
+template <int Offset>
+long __stdcall q_method(Queue* self, void* a1, void* a2, void* a3) {
+    if (is_object(g_status_arrays, a1)) {
+        auto* array = static_cast<StatusArray*>(a1);
+        const unsigned long index = static_cast<unsigned long>(reinterpret_cast<std::uintptr_t>(a2));
+        static std::atomic<int> shown{0};
+        if (index >= array->capacity) {
+            logf("queue method +0x%x: status array given with index %lu outside its %lu entries - refused\n",
+                 Offset, index, array->capacity);
+            return kInvalidArgument;
+        }
+        const long outcome = self->first_failure.exchange(0);
+        array->entries[index].result.store(outcome);
+        array->entries[index].complete.store(true);
+        if (shown.fetch_add(1) < 6 || outcome != 0) {
+            logf("queue method +0x%x: status entry %lu written: 0x%08lx (%llu requests carried out, %llu not, on "
+                 "this queue)\n",
+                 Offset, index, static_cast<unsigned long>(outcome), self->carried_out.load(),
+                 self->not_carried_out.load());
+        }
+        return 0;
+    }
+    static std::atomic<int> shown{0};
+    if (shown.fetch_add(1) < 6) {
+        logf("queue method +0x%x called with (0x%llx, 0x%llx, 0x%llx), returns to %p - not recognised, answered "
+             "not implemented\n",
+             Offset, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(a1)),
+             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(a2)),
+             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(a3)), _ReturnAddress());
+    }
+    return kNotImplemented;
 }
 
 void** queue_vtable() {
-    static void* vt[] = {reinterpret_cast<void*>(&q_qi),           reinterpret_cast<void*>(&q_addref),
-                         reinterpret_cast<void*>(&q_release),        reinterpret_cast<void*>(&q_enqueuerequest),  // +0x18
-                         reinterpret_cast<void*>(&q_noop),           // +0x20 Submit
-                         reinterpret_cast<void*>(&q_noop),           // +0x28 EnqueueStatus
-                         reinterpret_cast<void*>(&q_noop),           // +0x30 EnqueueSignal
-                         reinterpret_cast<void*>(&q_noop),           // +0x38 CancelRequestsWithTag
-                         reinterpret_cast<void*>(&q_close)};         // +0x40 Close
+    static void* vt[] = {reinterpret_cast<void*>(&q_qi),
+                         reinterpret_cast<void*>(&q_addref),
+                         reinterpret_cast<void*>(&q_release),
+                         reinterpret_cast<void*>(&q_enqueuerequest),   // +0x18
+                         reinterpret_cast<void*>(&q_method<0x20>),
+                         reinterpret_cast<void*>(&q_method<0x28>),
+                         reinterpret_cast<void*>(&q_method<0x30>),
+                         reinterpret_cast<void*>(&q_method<0x38>),
+                         reinterpret_cast<void*>(&q_method<0x40>),
+                         reinterpret_cast<void*>(&q_method<0x48>),
+                         reinterpret_cast<void*>(&q_method<0x50>),
+                         reinterpret_cast<void*>(&q_method<0x58>),
+                         reinterpret_cast<void*>(&q_method<0x60>),
+                         reinterpret_cast<void*>(&q_method<0x68>),
+                         reinterpret_cast<void*>(&q_method<0x70>),
+                         reinterpret_cast<void*>(&q_method<0x78>)};
     return vt;
 }
 
