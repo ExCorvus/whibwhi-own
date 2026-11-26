@@ -26,12 +26,13 @@ shell/                         the runtime (C++17, MSVC); shell/README.md descri
   offline                      refuses the game's network imports: no socket, no name lookup, no HTTP request
   hosting                      address model for showing the game's memory to the GPU
   shader_container, shader_program, shader_walk, shader_names, shader_isa, shader_shape,
-  shader_flow, shader_meaning, shader_translate, spirv
+  shader_flow, shader_emit_flow, shader_meaning, shader_dxbc, shader_translate, spirv
                                shader container reader, unpacking the program a container carries, program
                                walk (instruction lengths), public instruction names, instruction reader,
-                               what a program expects and uses, its blocks, branches and loops, what the
-                               most used instructions compute, translator to SPIR-V (test shaders only),
-                               SPIR-V writer
+                               what a program expects and uses, its blocks, branches and loops, the same
+                               flow as nested code a shader language can run, what the most used
+                               instructions compute, a writer for the PC's shader container, an older
+                               translator to SPIR-V (test shaders only), SPIR-V writer
   xmem                         xmem.dll - the console's memory library, answered on a PC
   d3d12_xs                     d3d12_xs.dll - the console's graphics entry points, over a PC D3D12 device
   xcrdapi, inflate             XCRDAPI.dll - the console's file-read library, with our own zlib decoder
@@ -40,7 +41,7 @@ shell/                         the runtime (C++17, MSVC); shell/README.md descri
   xg_xs                        xg_xs.dll - the texture layout library, answering with an untiled layout
   xbox_bvh_builder             XboxBvhBuilder.dll - ray-tracing builder (skeleton)
   tools/                       list_imports, describe_image, connect_imports, boot_image, vkhost_probe
-  tests/                       23 tests, made-up inputs only
+  tests/                       25 tests, made-up inputs only
   CMakeLists.txt, build.cmd    build definition and the build-and-test script
 docs/
   BUILD-AND-RUN.md             how to build, test and run the shell yourself
@@ -53,6 +54,7 @@ docs/
   SHADER-TRANSLATOR.md         the shader translation plan
   SHADER-OPCODES.md            public names of the shader instructions the game uses most
   SHADER-MEANINGS.md           what each of those instructions computes, with the public source for it
+  SHADER-CONTAINER-WRITER.md   the PC shader container the translator will write: layout and token forms
   EARLY-HISTORY.md             the earlier attempt and why the project restarted
   RENDERING-PIPELINE.md        not written yet
 scripts/
@@ -70,7 +72,7 @@ LICENSE                        GPLv3-or-later
 shell\build.cmd
 ```
 
-Builds the shell, the console libraries and the tools, and runs the 23 tests. No game files and no GPU are needed.
+Builds the shell, the console libraries and the tools, and runs the 25 tests. No game files and no GPU are needed.
 To run the shell against your own copy of the game, see [docs/BUILD-AND-RUN.md](docs/BUILD-AND-RUN.md).
 
 ## License
