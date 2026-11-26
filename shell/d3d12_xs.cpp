@@ -3245,6 +3245,139 @@ HRESULT __stdcall w_device_slot133(Wrap* self, void* address_arg, const D3D12_RE
     return 0;
 }
 
+// ---- device slot 70: a shader view of the image's own memory ------------------------------------------------
+//
+// Measured in the image (docs/exe-map/DESCRIPTORS.md B): slot 70 is (device, block A, block B, destination).
+// Block A describes the texture or buffer; type code 1 at +0x00 is a buffer, and then +0x10 is its size in bytes.
+// Block B's first 0x28 bytes are the public D3D12_SHADER_RESOURCE_VIEW_DESC, and +0x28 is the resource's GPU
+// address: on the console the view names its memory by address, not by a resource object.
+//
+// The PC answer for a buffer: the memory at that address is opened on the PC device as it is (as for slot 133,
+// nothing copied), a PC buffer is placed over it, and the view is made on that buffer with the image's own public
+// description. A PC buffer starts on a 64 KiB boundary, so the first element is counted from that boundary. The
+// PC buffers made here are kept until the process ends, one per address and size. Texture views are not answered
+// yet: the console lays texture memory out its own way.
+struct ViewBuffer {
+    unsigned long long address;
+    unsigned long long bytes;
+    ID3D12Resource* resource;
+    unsigned long long delta;
+};
+SRWLOCK g_view_buffers_lock = SRWLOCK_INIT;
+std::vector<ViewBuffer> g_view_buffers;
+
+// Bytes per element of a buffer view in the public DXGI numbering; 0 where it is not a plain element format.
+unsigned element_bytes(unsigned format) {
+    if (format >= 2 && format <= 4) return 16;
+    if (format >= 6 && format <= 8) return 12;
+    if (format >= 9 && format <= 22) return 8;
+    if (format >= 23 && format <= 47) return 4;
+    if (format >= 48 && format <= 59) return 2;
+    if (format >= 60 && format <= 65) return 1;
+    return 0;
+}
+
+ID3D12Resource* view_buffer(Wrap* device, unsigned long long address, unsigned long long bytes,
+                            unsigned long long& delta, HRESULT& hr) {
+    hr = 0;
+    AcquireSRWLockShared(&g_view_buffers_lock);
+    for (const ViewBuffer& b : g_view_buffers) {
+        if (b.address == address && b.bytes == bytes) {
+            delta = b.delta;
+            ReleaseSRWLockShared(&g_view_buffers_lock);
+            return b.resource;
+        }
+    }
+    ReleaseSRWLockShared(&g_view_buffers_lock);
+    unsigned long long offset = 0;
+    ID3D12Heap* heap = span_heap(device, address, bytes, offset, hr);
+    if (!heap) {
+        return nullptr;
+    }
+    delta = offset & 0xFFFFull;
+    offset -= delta;
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = bytes + delta;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;  // the PC library asks for it in an opened heap
+    ID3D12Resource* resource = nullptr;
+    hr = static_cast<ID3D12Device*>(device->pc)->CreatePlacedResource(heap, offset, &desc,
+                                                                      D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                                      __uuidof(ID3D12Resource),
+                                                                      reinterpret_cast<void**>(&resource));
+    if (hr != 0 || !resource) {
+        hr = hr ? hr : 0x80004005L;
+        return nullptr;
+    }
+    AcquireSRWLockExclusive(&g_view_buffers_lock);
+    g_view_buffers.push_back(ViewBuffer{address, bytes, resource, delta});
+    ReleaseSRWLockExclusive(&g_view_buffers_lock);
+    return resource;
+}
+
+void __stdcall w_device_slot70(Wrap* self, const unsigned char* block_a, const unsigned char* block_b,
+                               unsigned long long destination) {
+    static std::atomic<int> shown{0};
+    static std::atomic<int> textures{0};
+    if (!block_a || !block_b) {
+        return;
+    }
+    unsigned type = 0;
+    std::memcpy(&type, block_a, sizeof(type));
+    if (type != 1) {
+        if (few(textures)) {
+            logf("device slot 70: a texture view (block A type %u) - not answered yet (console texture layout)\n",
+                 type);
+        }
+        return;
+    }
+    unsigned long long bytes = 0;
+    unsigned long long address = 0;
+    std::memcpy(&bytes, block_a + 0x10, sizeof(bytes));
+    std::memcpy(&address, block_b + 0x28, sizeof(address));
+    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+    static_assert(sizeof(view) == 0x28, "the public view description is the first 0x28 bytes of block B");
+    std::memcpy(&view, block_b, sizeof(view));
+    unsigned long long delta = 0;
+    HRESULT hr = 0;
+    ID3D12Resource* resource = address && bytes ? view_buffer(self, address, bytes, delta, hr) : nullptr;
+    if (!resource) {
+        if (few(shown, 8)) {
+            logf("device slot 70: the buffer at 0x%llx (%llu bytes) could not be opened on the PC device (0x%lx) - "
+                 "no view made\n",
+                 address, bytes, static_cast<unsigned long>(hr));
+        }
+        return;
+    }
+    if (delta) {
+        const unsigned element = (view.Buffer.Flags & D3D12_BUFFER_SRV_FLAG_RAW) ? 4u
+                                 : view.Buffer.StructureByteStride   ? view.Buffer.StructureByteStride
+                                                                     : element_bytes(view.Format);
+        if (!element || delta % element) {
+            if (few(shown, 8)) {
+                logf("device slot 70: the buffer at 0x%llx lies 0x%llx bytes after a 64 KiB boundary, not a whole "
+                     "number of elements (%u bytes) - no view made\n",
+                     address, delta, element);
+            }
+            return;
+        }
+        view.Buffer.FirstElement += delta / element;
+    }
+    const D3D12_CPU_DESCRIPTOR_HANDLE at{static_cast<SIZE_T>(handle_to_pc(destination, false))};
+    static_cast<ID3D12Device*>(self->pc)->CreateShaderResourceView(resource, &view, at);
+    if (few(shown, 8)) {
+        logf("device slot 70: a buffer view of the image's memory at 0x%llx (%llu bytes, format %u, first element "
+             "%llu, %u elements) made on the PC device (no copy)\n",
+             address, bytes, static_cast<unsigned>(view.Format),
+             static_cast<unsigned long long>(view.Buffer.FirstElement), view.Buffer.NumElements);
+    }
+}
+
 // The image sets resource flag bits above the ones the public D3D12_RESOURCE_FLAGS has. What they ask of the
 // console is not known; they are taken off before the PC device sees the description, and each new set of such
 // bits is logged once.
@@ -4170,6 +4303,7 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {23, reinterpret_cast<void*>(&w_device_copy_descriptors)},
          {24, reinterpret_cast<void*>(&cpu_handle_thunk<24, 2, 3>)},  // copy (count, to, from, type)
          {25, reinterpret_cast<void*>(&w_device_allocation_info)},
+         {70, reinterpret_cast<void*>(&w_device_slot70)},  // a shader view of the image's own memory
          {108, reinterpret_cast<void*>(&w_device_allocation_info2)},
          {26, reinterpret_cast<void*>(&struct_return_thunk<26, 20>)},  // GetCustomHeapProperties
          {27, reinterpret_cast<void*>(&create_thunk<27, 6, 7, kResource>)},  // committed resource
