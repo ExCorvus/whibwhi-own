@@ -184,3 +184,26 @@ OpFunctionEnd
 - Are there shaders with multiple entry points (libraries)? Not measured yet; it needs reading the game's
   pipeline creation calls.
 - Which tiling modes actually appear in the game's textures — this bounds the texture work we have to do first.
+
+## 12. Correction after the first runs that reach pipeline creation (boots b81-b85)
+
+Section 2 says the description "carries a pointer to the shader blob" and that the translator reads that blob.
+Measured: the blob named by the public descriptions (device slots 62 and 86) is a container with the public
+parts, but its code part is empty (the letters "NOBC" where portable code would be). The hardware instructions
+arrive through the precompiled descriptions instead: device slot 67 for compute, slot 57 for graphics, in blocks
+that each end their program with the end-of-program word. Details are in `docs/exe-map/SHADER-PATH.md`
+section 9.
+
+What this changes for the plan:
+
+- The translator's input is a block of a slot 57 or slot 67 description, not a part of the container. The
+  container still matters: its ISG1, OSG1 and PSV0 parts describe inputs, outputs and resource use in the public
+  format, which the translator needs and does not have to guess.
+- Before any translation, the shell needs a complete reader of instruction lengths for the hardware instruction
+  set, so that it can walk a whole program from its first word to the end-of-program word. Landing exactly on
+  that word is the check that the walk is right. The next step is that reader and, with it, a count of which
+  instructions the game's programs use (numbers only, in memory), so the translator covers the common ones first.
+- Pipeline requests come from the game's worker threads in very large numbers. Translating on the thread that
+  asks is what the game does on the console; rule 7 bans building pipelines on another thread because that
+  crashed the driver in the earlier attempt. Which of the two the shell does is ExCorvus's decision; until then only
+  the device's own thread is served.
