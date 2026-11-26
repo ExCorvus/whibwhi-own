@@ -33,11 +33,11 @@ add_library(XboxBvhBuilder SHARED xbox_bvh_builder.cpp)
 target_compile_definitions(XboxBvhBuilder PRIVATE WHIWHI_XBOX_BVH_BUILDER_BUILD)
 target_link_libraries(XboxBvhBuilder PRIVATE onecore)
 
-# The console's audio libraries, provided as skeletons: every imported name exists, every one of them answers
-# "not provided" (a negative HRESULT, a 0 count, a null address) and says so once on stderr. No device is faked.
+# The console's audio libraries: AcpHal (APU memory, and an audio device that opens the PC's sound output) and
+# xapu (the Opus decoding channel, done by libopus loaded at run time as opus.dll; see NOTICE.md).
 add_library(AcpHal SHARED acp_hal.cpp)
 target_compile_definitions(AcpHal PRIVATE WHIWHI_ACP_HAL_BUILD)
-target_link_libraries(AcpHal PRIVATE onecore)
+target_link_libraries(AcpHal PRIVATE onecore ole32)
 
 add_library(xapu SHARED xapu.cpp)
 target_compile_definitions(xapu PRIVATE WHIWHI_XAPU_BUILD)
