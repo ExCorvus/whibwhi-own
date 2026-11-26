@@ -45,8 +45,7 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   of the instructions used is in docs/SHADER-TRANSLATOR.md section 13.
 - **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
   slots 57, 62, 67 and 86; each request is read and counted, and none can be made (the shader translator
-  handles only straight-line compute test shaders), so every draw is held. Command-list methods that name buffers by address (slots 41 to 48: root
-  buffers, index and vertex buffers), because a game address is not turned into a PC buffer address yet. The
+  handles only straight-line compute test shaders), so every draw is held. The
   command-list methods at slots 70, 71, 72, 74, 75, 126, 131, 132, 142 and 146 (what they are is not known).
   The primitive topology number 0x11 (not a PC topology). Views made from raw descriptor words (device slot 70)
   and samplers (slot 61). Reading or writing a texture the game keeps at its own address (its Map is refused).
@@ -891,3 +890,41 @@ ExCorvus's: a real audio path behind the audio device object, or a silent device
   (five separate checks in the document). Every row was compared by script with the gfx10 column of the public
   opcode table: no disagreement. Two-source vector opcode 0 (429 uses) has no public instruction at that number
   and stays unnamed; the 27 programs that stop at a word with top six bits 0x3F stay unexplained.
+
+## 2026-11-26 - buffers named by address reach the PC list; root signatures are read (boot b88; measured)
+
+- **Command-list slots 41 to 48 are answered.** These carry an address of the game's own memory where a PC
+  program gives the address of a GPU buffer: root buffer addresses (41-46), the index buffer (47), vertex buffers
+  (48). The address is turned into the address of a PC buffer over the same memory; nothing is copied. Seen in
+  the run and carried out on the PC list: slot 44 (graphics root shader-resource address, parameter 0) and slot
+  48 (one vertex buffer of 4,080 bytes with stride 24), each time resolved to the buffer the game itself placed
+  over its memory (device slot 133); slot 47 with no index buffer. Nothing was refused in this run (9 addresses
+  up to the audio stop).
+- **Root signatures are read.** The PC library looks a root parameter up by number without checking that the
+  current root signature has it or that it is of that kind. The shell now reads every root signature the game
+  creates (device slot 16; the serialized form, read with the PC's own deserializer) and passes a root argument
+  on only when the parameter exists and is of the kind the call sets. The first eight seen: one
+  shader-resource address; a shader-resource address and 2 constants; one table; a table and 1 constant; two
+  tables; one table; two tables; one table.
+- **This is also a check of which list slot is which method**, independent of argument shapes: slot 44 set a
+  shader-resource address on a root signature whose parameter 0 is a shader-resource address. No call in the run
+  set a kind its parameter is not. So for slots 34, 36, 44 the identification "public method four slots lower"
+  now rests on more than shape.
+- **Other memory than the game's placed buffers** is opened on the PC device in "windows" when first named: the
+  pool's memory, and committed read-write memory that belongs to the process alone, on a 64 MiB grid. A window
+  is used only after the PC device was seen to read the bytes that are in the memory (64 bytes copied through
+  the PC device and compared): the PC library quietly substitutes memory of its own when an import fails. An
+  address in the GPU-only view goes through the page-mapping record (queue slot 31) to its pool page, which is
+  the first thing that reads that record. No window was needed in this run, so this path is written and has not
+  run on the game.
+- **Not answered, each counted in the report at the end of a run:** uncommitted memory; mapped memory outside the
+  pool (the game remaps such pages and a PC buffer would go on showing the old one); a module's memory; memory
+  that is not plain read-write; a range of the GPU-only view whose pages are not neighbours in the pool; ranges
+  over 1 GiB; more than 512 windows or 16 GiB.
+- **The memory library says when memory changes** (a page unmapped or replaced, a range or region released, or
+  committed memory handed to VirtualFree), and windows over that memory are set aside. Not covered: memory that
+  goes away without passing through the memory library keeps its window.
+- **The report at the end of a run** is now also printed at the first breakpoint inside the game: the game has
+  its own unhandled-exception filter, so the shell's was never reached and the report was missing from earlier
+  logs.
+- Still held: every draw (no pipeline state), and the topology number 0x11.
