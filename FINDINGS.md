@@ -1386,3 +1386,14 @@ Follow-up, the typed load (game test 00:49, run-20261127-004956; FAIL about 5 s 
 - Checker (its root-constant limit raised from 16 to 64 words, a limit of the checker only): 52 of 52 accepted.
 - Game test: 31 builder pipelines made, none refused, then the driver fails in the same place as at 00:40, while
   the 32nd is made. So the driver failure does not depend on which builder shaders the translator understands.
+Follow-up, which shader (game test 00:54, run-20261127-005424; the weave now names each shader before its pipeline
+is handed to the PC device, by size and the first 8 bytes of the container's checksum):
+- The 32nd pipeline, during which the driver fails, holds the builder's largest shader (74,508 bytes, position 20
+  of 52 in the file). The failure lies in the driver's own program code while the pipeline is made, before
+  anything runs on the GPU (an access violation in amdvlk64.dll reading an address made of text bytes).
+- Its translated code asks for no Vulkan feature that the 31 pipelines made before it did not ask for (Shader,
+  Int64, GroupNonUniform, its arithmetic and ballot parts, the Vulkan memory model, physical storage buffers, float
+  atomic minimum/maximum; each is used by at least one of the 31, all of which the driver made). The driver reports
+  every one of them as supported.
+- What sets it apart: its translated code is 34,003 words long, more than twice the largest of the 31 (16,304).
+  Whether size or something in its content leads the driver's compiler into the fault was not measured.
