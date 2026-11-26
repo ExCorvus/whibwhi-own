@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include <cctype>
+#include <string>
 
 namespace whiwhi::shell {
 namespace {
@@ -47,7 +48,23 @@ void* HostLibraries::resolve(const std::string& library, const ImportedFunction&
     if (it == loaded_.end()) {
         // No error dialog for a library that is not on this PC.
         const UINT old_mode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
-        HMODULE module = LoadLibraryExA(library.c_str(), nullptr, has_directories_ ? LOAD_LIBRARY_SEARCH_DEFAULT_DIRS : 0);
+        // A console library of the shell's own (xmem.dll, d3d12_xs.dll, ...) beside this process wins over a
+        // same-named file in a folder that was added: load it by full path first so Windows caches it by name.
+        HMODULE module = nullptr;
+        {
+            char self[MAX_PATH * 4] = {};
+            if (GetModuleFileNameA(nullptr, self, sizeof(self)) > 0) {
+                std::string dir = self;
+                const std::size_t slash = dir.find_last_of("\\/");
+                if (slash != std::string::npos) {
+                    dir.resize(slash + 1);
+                }
+                module = LoadLibraryExA((dir + library).c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            }
+        }
+        if (!module) {
+            module = LoadLibraryExA(library.c_str(), nullptr, has_directories_ ? LOAD_LIBRARY_SEARCH_DEFAULT_DIRS : 0);
+        }
         const DWORD error = module ? 0 : GetLastError();
         SetErrorMode(old_mode);
         if (!module) {
