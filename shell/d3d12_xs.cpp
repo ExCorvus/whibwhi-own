@@ -1930,6 +1930,166 @@ void log_pipeline_refusals() {
     }
 }
 
+// ---- a record of the game's root signatures next to its shader modules (a measurement) ---------------------
+//
+// WHIWHI_ROOT_SIGNATURE_RECORD=<file> writes, on the user's PC: every root signature the game makes (device slot
+// 16), as the PC's own reader of root signatures reads the game's blob, and for each pipeline request, the
+// shader modules' first table (which starting registers the console system fills, from which root parameter)
+// and second table, next to the root signature the request names. Numbers and kinds only, nothing of the game's
+// code. It answers whether the game's own root signatures say where each shader finds its data.
+SRWLOCK g_rs_lock = SRWLOCK_INIT;
+std::FILE* g_rs_file = nullptr;
+std::map<const void*, unsigned> g_rs_ids;
+std::set<std::pair<unsigned, unsigned long long>> g_rs_pairs;
+
+std::FILE* rs_record() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        char path[MAX_PATH] = {};
+        if (GetEnvironmentVariableA("WHIWHI_ROOT_SIGNATURE_RECORD", path, sizeof(path)) > 0) {
+            g_rs_file = std::fopen(path, "w");
+            logf("root signature record: %s %s\n", path, g_rs_file ? "opened" : "could not be opened");
+        }
+    });
+    return g_rs_file;
+}
+
+const char* range_type_name(D3D12_DESCRIPTOR_RANGE_TYPE type) {
+    switch (type) {
+    case D3D12_DESCRIPTOR_RANGE_TYPE_SRV: return "t";
+    case D3D12_DESCRIPTOR_RANGE_TYPE_UAV: return "u";
+    case D3D12_DESCRIPTOR_RANGE_TYPE_CBV: return "b";
+    default: return "s";
+    }
+}
+
+std::string describe_root_signature(const void* blob, std::size_t size) {
+    using Create = HRESULT(WINAPI*)(const void*, SIZE_T, REFIID, void**);
+    static const auto create = reinterpret_cast<Create>(
+        GetProcAddress(LoadLibraryA("d3d12.dll"), "D3D12CreateVersionedRootSignatureDeserializer"));
+    ID3D12VersionedRootSignatureDeserializer* reader = nullptr;
+    if (!create || !blob || !can_read(blob, size) ||
+        create(blob, size, __uuidof(ID3D12VersionedRootSignatureDeserializer), reinterpret_cast<void**>(&reader)) != 0 ||
+        !reader) {
+        return "(the PC reader does not read this blob)";
+    }
+    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* d = nullptr;
+    std::string text;
+    if (reader->GetRootSignatureDescAtVersion(D3D_ROOT_SIGNATURE_VERSION_1_1, &d) != 0 || !d) {
+        reader->Release();
+        return "(the PC reader does not give a version 1.1 description)";
+    }
+    const D3D12_ROOT_SIGNATURE_DESC1& r = d->Desc_1_1;
+    char part[160];
+    std::snprintf(part, sizeof(part), "flags 0x%x, %u parameter(s), %u fixed sampler(s):", r.Flags, r.NumParameters,
+                  r.NumStaticSamplers);
+    text += part;
+    for (UINT p = 0; p < r.NumParameters; ++p) {
+        const D3D12_ROOT_PARAMETER1& q = r.pParameters[p];
+        switch (q.ParameterType) {
+        case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
+            std::snprintf(part, sizeof(part), " | p%u table vis %u:", p, q.ShaderVisibility);
+            text += part;
+            for (UINT i = 0; i < q.DescriptorTable.NumDescriptorRanges; ++i) {
+                const D3D12_DESCRIPTOR_RANGE1& g = q.DescriptorTable.pDescriptorRanges[i];
+                std::snprintf(part, sizeof(part), " %s%u space %u x%d at %d", range_type_name(g.RangeType),
+                              g.BaseShaderRegister, g.RegisterSpace,
+                              g.NumDescriptors == UINT_MAX ? -1 : static_cast<int>(g.NumDescriptors),
+                              g.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
+                                  ? -1
+                                  : static_cast<int>(g.OffsetInDescriptorsFromTableStart));
+                text += part;
+            }
+            break;
+        case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
+            std::snprintf(part, sizeof(part), " | p%u constants b%u space %u x%u vis %u", p, q.Constants.ShaderRegister,
+                          q.Constants.RegisterSpace, q.Constants.Num32BitValues, q.ShaderVisibility);
+            text += part;
+            break;
+        default:
+            std::snprintf(part, sizeof(part), " | p%u root %s%u space %u vis %u", p,
+                          q.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV   ? "b"
+                          : q.ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV ? "t"
+                                                                             : "u",
+                          q.Descriptor.ShaderRegister, q.Descriptor.RegisterSpace, q.ShaderVisibility);
+            text += part;
+            break;
+        }
+    }
+    for (UINT s = 0; s < r.NumStaticSamplers; ++s) {
+        std::snprintf(part, sizeof(part), " | fixed s%u space %u", r.pStaticSamplers[s].ShaderRegister,
+                      r.pStaticSamplers[s].RegisterSpace);
+        text += part;
+    }
+    reader->Release();
+    return text;
+}
+
+// Device slot 16, CreateRootSignature(node mask, blob, size, identifier, out): made as before; recorded.
+HRESULT __stdcall w_device_slot16(Wrap* self, void* a1, void* a2, void* a3, void* a4, void* a5, void* a6, void* a7,
+                                  void* a8) {
+    const HRESULT hr = create_thunk<16, 4, 5, kRootSignature>(self, a1, a2, a3, a4, a5, a6, a7, a8);
+    void** const out = static_cast<void**>(a5);
+    if (hr == 0 && out && *out && rs_record()) {
+        const std::string text = describe_root_signature(a2, reinterpret_cast<std::size_t>(a3));
+        AcquireSRWLockExclusive(&g_rs_lock);
+        const unsigned id = static_cast<unsigned>(g_rs_ids.size());
+        g_rs_ids[*out] = id;
+        std::fprintf(g_rs_file, "signature\t%u\t%zu bytes\t%s\n", id, reinterpret_cast<std::size_t>(a3), text.c_str());
+        std::fflush(g_rs_file);
+        ReleaseSRWLockExclusive(&g_rs_lock);
+    }
+    return hr;
+}
+
+void record_shader_against_signature(const void* signature, const std::uint8_t* container, std::uint32_t bytes,
+                                     bool vertex) {
+    using namespace whiwhi::shell;
+    if (!rs_record()) {
+        return;
+    }
+    unsigned long long key = 1469598103934665603ull;
+    for (std::uint32_t i = 0; i < bytes; ++i) {
+        key = (key ^ container[i]) * 1099511628211ull;
+    }
+    AcquireSRWLockExclusive(&g_rs_lock);
+    const auto found = g_rs_ids.find(signature);
+    const unsigned id = found == g_rs_ids.end() ? 0xFFFFFFFFu : found->second;
+    const bool fresh = g_rs_pairs.size() < 4000 && g_rs_pairs.insert({id, key}).second;
+    ReleaseSRWLockExclusive(&g_rs_lock);
+    if (!fresh) {
+        return;
+    }
+    std::string text;
+    char part[160];
+    const PackedProgram program = read_packed_program(container, bytes);
+    const ModuleProgram module = program.ok() ? find_module_program(program.bytes.data(), program.bytes.size())
+                                              : ModuleProgram{};
+    if (!module.found) {
+        text = " (the module was not found)";
+    } else {
+        const ModuleTables tables = read_module_tables(program.bytes.data(), program.bytes.size(), module);
+        text += " layout:";
+        for (const ModuleLayoutEntry& e : tables.layout) {
+            std::snprintf(part, sizeof(part), " [kind %u reg %u count %u s%u root %u offs %u]", e.kind,
+                          e.shader_register, e.count, e.scalar_register, e.fixed_index, e.offset_words);
+            text += part;
+        }
+        text += " resources:";
+        for (const ModuleResourceEntry& e : tables.resources) {
+            std::snprintf(part, sizeof(part), " [class %u arrival %u reg %u words %u s%u root %u offs %u]",
+                          e.resource_class, e.arrival, e.shader_register, e.descriptor_words, e.scalar_register,
+                          e.fixed_index, e.offset_words);
+            text += part;
+        }
+    }
+    AcquireSRWLockExclusive(&g_rs_lock);
+    std::fprintf(g_rs_file, "shader\t%016llx\t%s\tsignature %d\t%s\n", key, vertex ? "vertex" : "pixel",
+                 static_cast<int>(id), text.c_str());
+    std::fflush(g_rs_file);
+    ReleaseSRWLockExclusive(&g_rs_lock);
+}
+
 HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const GUID* riid, void** out, void*, void*,
                                            void*, void*, void*) {
     using whiwhi::shell::PcStage;
@@ -1949,6 +2109,7 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
     HRESULT hr = 0x80070057L;  // E_INVALIDARG
     std::vector<std::uint8_t> copy;
     std::vector<std::size_t> signature_at;
+    void* game_signature = nullptr;
     std::vector<std::shared_ptr<const whiwhi::shell::PcShader>> shaders;
     if (!out || !stream || size < 8 || size > 0x10000 || !can_read(stream, static_cast<std::size_t>(size))) {
         reason = "the stream or the result place cannot be read";
@@ -1967,6 +2128,7 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
             switch (type) {
             case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE:
                 signature_at.push_back(at + payload_at);
+                std::memcpy(&game_signature, payload, 8);
                 break;
             case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS:
             case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS: {
@@ -1981,6 +2143,8 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
                     reason = std::string(vertex ? "vertex" : "pixel") + " shader: its bytes cannot be read";
                     break;
                 }
+                record_shader_against_signature(game_signature, static_cast<const std::uint8_t*>(code.pShaderBytecode),
+                                                static_cast<std::uint32_t>(code.BytecodeLength), vertex);
                 auto shader = translated_shader(static_cast<const std::uint8_t*>(code.pShaderBytecode),
                                                 static_cast<std::uint32_t>(code.BytecodeLength),
                                                 vertex ? PcStage::kVertex : PcStage::kPixel);
@@ -3612,7 +3776,7 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {11, reinterpret_cast<void*>(&w_device_pipeline)},
          {12, reinterpret_cast<void*>(&create_thunk<12, 5, 6, kList>)},
          {14, reinterpret_cast<void*>(&w_device_slot14)},
-         {16, reinterpret_cast<void*>(&create_thunk<16, 4, 5, kRootSignature>)},
+         {16, reinterpret_cast<void*>(&w_device_slot16)},
          {17, reinterpret_cast<void*>(&cpu_handle_thunk<17, 2, 0>)},  // constant buffer view (description, handle)
          {18, reinterpret_cast<void*>(&cpu_handle_thunk<18, 3, 0>)},  // shader resource view (resource, description, handle)
          {19, reinterpret_cast<void*>(&cpu_handle_thunk<19, 4, 0>)},  // unordered access view (resource, counter, description, handle)
