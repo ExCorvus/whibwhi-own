@@ -10,7 +10,7 @@ namespace whiwhi::shell {
 namespace {
 
 // Bumped whenever the emitted module changes meaning, so a cached module never outlives its translator.
-constexpr char kTranslatorVersion[] = "rdna2-spirv/2";
+constexpr char kTranslatorVersion[] = "rdna2-spirv/1";
 
 // FNV-1a 64.
 void hash_bytes(std::uint64_t* h, const void* data, std::size_t size) {
@@ -48,8 +48,9 @@ public:
 
     // The hardware's special scalar registers (EXEC, VCC, M0, flat scratch, ...) are not ordinary storage; a
     // write to one changes what later instructions do. Until they are modelled, a shader that names one is
-    // refused instead of being translated as if it were a plain register. The reader separates them from the
-    // ordinary file (codes 0..101 on this generation), so the translator only has to refuse the kind.
+    // refused instead of being translated as if it were a plain register.
+    static bool ordinary_scalar_register(std::uint32_t index) { return index < 102; }
+
     // Validate every instruction and collect the registers the module needs. Produces the first refusal.
     bool validate(const DecodedShader& shader, Diagnostic* diag) {
         if (shader.instructions.empty()) {
@@ -64,7 +65,7 @@ public:
                 *diag = {DiagnosticStage::kTranslate, ins.pc, why};
                 return false;
             }
-            if (ins.format == WalkFormat::kSopp && ins.opcode == 1) {  // s_endpgm
+            if (ins.format == IsaFormat::kSopp && ins.opcode == 1) {  // s_endpgm
                 if (i + 1 != shader.instructions.size()) {
                     *diag = {DiagnosticStage::kTranslate, ins.pc,
                              "s_endpgm is not the last instruction; the translator has no path for code after it"};
@@ -73,34 +74,43 @@ public:
                 saw_endpgm = true;
             }
             // Every source the instruction actually uses must be something this build can read.
-            for (int s = 0; s < ins.source_count; ++s) {
+            for (int s = 0; s < source_count(ins); ++s) {
                 const Operand& op = ins.src[s];
                 if (op.kind == OperandKind::kInline && !op.value_known) {
                     *diag = {DiagnosticStage::kTranslate, ins.pc,
                              "inline constant " + std::to_string(op.index) + " has no known value"};
                     return false;
                 }
-                if (op.kind == OperandKind::kSpecialRegister) {
-                    *diag = {DiagnosticStage::kTranslate, ins.pc,
-                             "special scalar register " + std::to_string(op.index) + " is not modelled yet"};
-                    return false;
-                }
                 if (op.kind == OperandKind::kSgpr) {
+                    if (!ordinary_scalar_register(op.index)) {
+                        *diag = {DiagnosticStage::kTranslate, ins.pc,
+                                 "special scalar register " + std::to_string(op.index) + " is not modelled yet"};
+                        return false;
+                    }
                     scalar_regs_.insert(op.index);
                 }
                 if (op.kind == OperandKind::kVgpr) {
+                    if (op.index >= 256) {
+                        *diag = {DiagnosticStage::kTranslate, ins.pc, "vector register number out of range"};
+                        return false;
+                    }
                     vector_regs_.insert(op.index);
                 }
             }
             if (ins.has_destination) {
-                if (ins.dst.kind == OperandKind::kVgpr) {
-                    vector_regs_.insert(ins.dst.index);
-                } else if (ins.dst.kind == OperandKind::kSgpr) {
-                    scalar_regs_.insert(ins.dst.index);
+                if (ins.format == IsaFormat::kVop1 || ins.format == IsaFormat::kVop2) {
+                    if (ins.vdst >= 256) {
+                        *diag = {DiagnosticStage::kTranslate, ins.pc, "vector destination out of range"};
+                        return false;
+                    }
+                    vector_regs_.insert(ins.vdst);
                 } else {
-                    *diag = {DiagnosticStage::kTranslate, ins.pc,
-                             "special scalar register " + std::to_string(ins.dst.index) + " is not modelled yet"};
-                    return false;
+                    if (!ordinary_scalar_register(ins.sdst)) {
+                        *diag = {DiagnosticStage::kTranslate, ins.pc,
+                                 "special scalar register " + std::to_string(ins.sdst) + " is not modelled yet"};
+                        return false;
+                    }
+                    scalar_regs_.insert(ins.sdst);
                 }
             }
         }
@@ -120,16 +130,30 @@ public:
     }
 
 private:
+    static int source_count(const Instruction& ins) {
+        switch (ins.format) {
+            case IsaFormat::kSop1:
+            case IsaFormat::kSopk:
+            case IsaFormat::kSopp:
+            case IsaFormat::kVop1:
+                return 1;
+            case IsaFormat::kSop2:
+            case IsaFormat::kSopc:
+            case IsaFormat::kVop2:
+                return 2;
+            default:
+                return 0;
+        }
+    }
+
     static std::uint32_t sign_extended_16(std::uint32_t value) {
         return static_cast<std::uint32_t>(
             static_cast<std::int32_t>(static_cast<std::int16_t>(value & 0xFFFF)));
     }
 
-    // The instructions this build translates, by the opcode numbers of this GPU generation's public tables.
-    // Anything else is refused by format and opcode number, never approximated.
     static bool instruction_supported(const Instruction& ins, std::string* why) {
         switch (ins.format) {
-            case WalkFormat::kSopp:
+            case IsaFormat::kSopp:
                 switch (ins.opcode) {
                     case 0:  // s_nop
                     case 1:  // s_endpgm
@@ -147,28 +171,28 @@ private:
                         break;
                 }
                 break;
-            case WalkFormat::kSop1:
-                if (ins.opcode == 3) {  // s_mov_b32
+            case IsaFormat::kSop1:
+                if (ins.opcode == 0) {  // s_mov_b32
                     return true;
                 }
                 break;
-            case WalkFormat::kSopk:
+            case IsaFormat::kSopk:
                 if (ins.opcode == 0) {  // s_movk_i32
                     return true;
                 }
                 break;
-            case WalkFormat::kSop2:
+            case IsaFormat::kSop2:
                 if (ins.opcode == 0 || ins.opcode == 1) {  // s_add_u32 / s_sub_u32
                     return true;
                 }
                 break;
-            case WalkFormat::kVop1:
+            case IsaFormat::kVop1:
                 if (ins.opcode == 0 || ins.opcode == 1) {  // v_nop / v_mov_b32
                     return true;
                 }
                 break;
-            case WalkFormat::kVop2:
-                if (ins.opcode == 3) {  // v_add_f32
+            case IsaFormat::kVop2:
+                if (ins.opcode == 1) {  // v_add_f32
                     return true;
                 }
                 break;
@@ -205,7 +229,7 @@ private:
         // SPIR-V keeps all constants in the types/constants section, before the global variables and the
         // function. Every constant the body will name is declared here.
         for (const Instruction& ins : shader.instructions) {
-            for (int s = 0; s < ins.source_count; ++s) {
+            for (int s = 0; s < source_count(ins); ++s) {
                 const Operand& op = ins.src[s];
                 if (op.kind == OperandKind::kInline && op.value_known) {
                     if (op.index >= 240) {
@@ -213,12 +237,13 @@ private:
                     } else {
                         const_uint(op.value);
                     }
-                } else if (op.kind == OperandKind::kLiteral && op.value_known) {
-                    const_uint(op.value);
+                } else if (op.kind == OperandKind::kLiteral && ins.format != IsaFormat::kSopp) {
+                    if (ins.format == IsaFormat::kSopk) {
+                        const_uint(sign_extended_16(op.value));
+                    } else {
+                        const_uint(op.value);
+                    }
                 }
-            }
-            if (ins.format == WalkFormat::kSopk && ins.has_immediate) {
-                const_uint(sign_extended_16(ins.immediate));
             }
         }
 
@@ -296,7 +321,6 @@ private:
                 return const_uint(op.value);
             case OperandKind::kLiteral:
                 return const_uint(op.value);
-            case OperandKind::kSpecialRegister:
             case OperandKind::kNone:
                 break;
         }
@@ -315,45 +339,45 @@ private:
 
     void emit_instruction(const Instruction& ins) {
         switch (ins.format) {
-            case WalkFormat::kSopp:
+            case IsaFormat::kSopp:
                 if (ins.opcode == 0) {  // s_nop
                     return;
                 }
                 return;  // s_endpgm: the function's OpReturn closes the body
-            case WalkFormat::kSop1:
-                if (ins.opcode == 3) {  // s_mov_b32
-                    store_reg(ins.dst.index, false, operand_bits(ins.src[0]));
+            case IsaFormat::kSop1:
+                if (ins.opcode == 0) {  // s_mov_b32
+                    store_reg(ins.sdst, false, operand_bits(ins.src[0]));
                 }
                 return;
-            case WalkFormat::kSopk:
+            case IsaFormat::kSopk:
                 if (ins.opcode == 0) {  // s_movk_i32: the 16-bit immediate is sign-extended
-                    store_reg(ins.dst.index, false, const_uint(sign_extended_16(ins.immediate)));
+                    store_reg(ins.sdst, false, const_uint(sign_extended_16(ins.src[0].value)));
                 }
                 return;
-            case WalkFormat::kSop2:
+            case IsaFormat::kSop2:
                 if (ins.opcode == 0 || ins.opcode == 1) {  // s_add_u32 / s_sub_u32
                     const std::uint32_t a = operand_bits(ins.src[0]);
                     const std::uint32_t b = operand_bits(ins.src[1]);
                     const std::uint32_t id = writer_.next_id();
                     writer_.emit(ins.opcode == 0 ? SpvOp::kIAdd : SpvOp::kISub, {type_uint_, id, a, b});
-                    store_reg(ins.dst.index, false, id);
+                    store_reg(ins.sdst, false, id);
                 }
                 return;
-            case WalkFormat::kVop1:
+            case IsaFormat::kVop1:
                 if (ins.opcode == 0) {  // v_nop
                     return;
                 }
                 if (ins.opcode == 1) {  // v_mov_b32
-                    store_reg(ins.dst.index, true, operand_bits(ins.src[0]));
+                    store_reg(ins.vdst, true, operand_bits(ins.src[0]));
                 }
                 return;
-            case WalkFormat::kVop2:
-                if (ins.opcode == 3) {  // v_add_f32
+            case IsaFormat::kVop2:
+                if (ins.opcode == 1) {  // v_add_f32
                     const std::uint32_t a = as_float(operand_bits(ins.src[0]));
                     const std::uint32_t b = as_float(operand_bits(ins.src[1]));
                     const std::uint32_t sum = writer_.next_id();
                     writer_.emit(SpvOp::kFAdd, {type_float_, sum, a, b});
-                    store_reg(ins.dst.index, true, bitcast(type_uint_, sum));
+                    store_reg(ins.vdst, true, bitcast(type_uint_, sum));
                 }
                 return;
             default:
