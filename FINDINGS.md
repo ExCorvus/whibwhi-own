@@ -1137,3 +1137,18 @@ without one.
 So around the first minute the program reports progress once, its frame count stops rising, and it keeps making
 pipelines while it allows itself more than 30 s. That a watch scope is open then (the 300 s budget) is inferred
 from the map, not measured. Not chased further (written down for ExCorvus).
+
+## 2026-11-26 - device slot 70: buffer views of the program's own memory (game test 21:29)
+
+Slot 70 is (device, block A, block B, destination) (docs/exe-map/DESCRIPTORS.md B). Block B's first 0x28 bytes are
+the public D3D12_SHADER_RESOURCE_VIEW_DESC (measured with the compiler on the SDK header; the map was corrected),
+and +0x28 is the resource's GPU address. For a buffer (block A type 1, size at +0x10) the graphics library now
+opens the memory at that address on the PC device as it is (as for slot 133, nothing copied), places a PC buffer
+over it from the 64 KiB boundary below, and makes the view with the program's own public description, its first
+element counted from that boundary. Texture views (block A types 2-4) are logged and not answered yet.
+
+Game test 2026-11-26 21:29: PASS, alive after 60 s, the copy's folder unchanged, slot 70 no longer "not
+provided". Buffer views made, for example 182,452,224 bytes (format 39), 6,144 and 768 bytes (format 57, the
+second with first element 3,072 after the shift), 2,048 bytes of one 2,048-byte structure. Open: one buffer of
+2,048-byte structures lies 0x6200 bytes after a 64 KiB boundary, not a whole number of structures, so no view was
+made for it (the PC places buffers only on 64 KiB boundaries).
