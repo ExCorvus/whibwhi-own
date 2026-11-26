@@ -106,11 +106,27 @@ With those two files beside the tools, `boot_image` logs "using the vkd3d-built 
 shell creates runs on Vulkan. Buffers the game places in its own memory are opened on that device where they
 lie, without a copy, and the game's frames are presented through that library's swap chain.
 
+## libopus (sound decoding)
+
+The game's sound packets are Opus; `xapu.dll` decodes them with libopus (BSD-3-Clause, see `NOTICE.md`), loaded
+at run time as `opus.dll` from beside `boot_image.exe`. Without it the decoding channel answers "not provided"
+and the run stops at the audio start-up. Build it with the same compiler and CMake as the shell:
+
+```
+git clone --depth 1 --branch v1.5.2 https://github.com/xiph/opus.git opus
+# inside an MSVC vcvars64 shell:
+cmake -S opus -B opus\build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DOPUS_BUILD_TESTING=OFF -DOPUS_BUILD_PROGRAMS=OFF
+cmake --build opus\build
+copy opus\build\opus.dll shell\build\opus.dll
+```
+
 ## What you will see
 
 A window titled "Americas" opens (the game creates it; the shell shows it) and stays black: the game clears its
-display surface and presents it about thirty times a second, but none of its picture is drawn yet. After about
-13 seconds the run ends at the game's audio start-up. `boot_image` prints where it stopped.
+display surface and presents it about thirty times a second, but none of its picture is drawn yet. With
+`opus.dll` in place the game gets past its audio start-up and keeps running (boot b148: the whole 40 seconds,
+at least 256 frames); without it the run ends at the audio start-up after about 13 seconds. `boot_image` prints
+where it stopped.
 
 ## Status and limits
 
