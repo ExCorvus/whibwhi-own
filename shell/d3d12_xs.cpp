@@ -2161,6 +2161,7 @@ void show_stripped_program(const char* where, const std::uint8_t* part, std::uin
 }
 
 void census_packed_program(const std::uint8_t* container, std::uint32_t bytes);
+void log_census_cost(const char* when);
 
 // Shows the chunk table of the container at `pointer` (names and sizes). Returns false when it is not one.
 bool show_container(const char* where, std::size_t offset_in_description, const void* pointer) {
@@ -2849,6 +2850,7 @@ void log_packed_census(const char* when) {
     log_packed_counted("control flow", flow, 80);
     log_packed_counted("inputs and outputs", io, 160);
     log_packed_counted("PC shader", pc, 240);
+    log_census_cost(when);
     logf("packed programs (%s): %llu distinct pair(s) of a root signature and a container were named together by "
          "pipeline requests and compared\n",
          when, pairs_compared);
@@ -3613,6 +3615,50 @@ void interface_statements(const std::uint8_t* container, std::uint32_t bytes,
         say.push_back(std::string("vector registers read before written, ") +
                       (!in.found ? "inputs not read" : position ? "position declared" : "no position declared") + ": " +
                       register_set_text(shape.vector_inputs));
+        // Which components of the position the shader reads (the second byte of the element's mask word),
+        // beside the registers past v1 the program reads before writing them, and the instruction that first
+        // reads each. Asked to find out what those registers hold.
+        if (position) {
+            unsigned read_mask = 0;
+            for (const SignatureElement& e : in.elements) {
+                if (e.system_value == 1) {
+                    read_mask |= e.use_mask;
+                }
+            }
+            std::string components;
+            for (unsigned c = 0; c < 4; ++c) {
+                if (read_mask >> c & 1) {
+                    components += "xyzw"[c];
+                }
+            }
+            std::bitset<256> beyond = shape.vector_inputs;
+            beyond[0] = beyond[1] = false;
+            std::string line = "position: the shader reads " + (components.empty() ? std::string("none") : components) +
+                               " of it; registers past v1 read before written: " + register_set_text(beyond);
+            for (unsigned reg = 2; reg < 8; ++reg) {
+                if (!beyond[reg]) {
+                    continue;
+                }
+                const char* reader = "an instruction that names it in another field";
+                for (const Instruction& i : code) {
+                    bool reads = false;
+                    for (unsigned s = 0; s < i.source_count && s < 3; ++s) {
+                        reads = reads || (i.src[s].kind == OperandKind::kVgpr && i.src[s].index == reg);
+                    }
+                    if (reads) {
+                        const char* name = instruction_name(i.format, i.opcode);
+                        reader = name ? name : "an instruction without a name here";
+                        break;
+                    }
+                    if (i.has_destination && i.dst.kind == OperandKind::kVgpr && i.dst.index == reg) {
+                        break;
+                    }
+                }
+                std::snprintf(text, sizeof(text), "; v%u first read by %s", reg, reader);
+                line += text;
+            }
+            say.push_back(line);
+        }
     }
 }
 
@@ -3620,6 +3666,132 @@ void interface_statements(const std::uint8_t* container, std::uint32_t bytes,
 // program: written, or the reason it gives for not writing it. The written container is thrown away here; nothing
 // is given to the device yet. Beside the pass's own (first) reason, every instruction of the program that the
 // pass does not cover is counted once per program, so that the count says what is missing most.
+// Buffer loads that take an element number (the vector buffer-load instructions with their index bit set): for
+// each program, through which descriptor they read, what last wrote the register holding the element number, and
+// whether a byte offset register is added. Register numbers, offsets and public instruction names only. The PC
+// shader pass refuses such a load until it is known what the buffer and the number are.
+void indexed_load_statements(const whiwhi::shell::DecodedShader& decoded, const whiwhi::shell::ProgramShape& shape,
+                             std::vector<std::string>& say) {
+    using namespace whiwhi::shell;
+    const auto name_of = [](const Instruction& i) {
+        const char* name = instruction_name(i.format, i.opcode);
+        char text[64];
+        if (name) {
+            std::snprintf(text, sizeof(text), "%s", name);
+        } else {
+            std::snprintf(text, sizeof(text), "%s %u", walk_format_name(i.format), static_cast<unsigned>(i.opcode));
+        }
+        return std::string(text);
+    };
+    std::string vector_writer[256], scalar_writer[128];
+    std::set<std::string> statements;
+    unsigned indexed = 0, plain = 0;
+    for (const Instruction& i : decoded.instructions) {
+        if (i.format == WalkFormat::kMubuf && i.opcode >= 12 && i.opcode <= 15) {
+            const unsigned words = i.opcode == 12 ? 1u : i.opcode == 13 ? 2u : i.opcode == 14 ? 4u : 3u;
+            if (i.mubuf.idxen) {
+                ++indexed;
+                std::string origin = "not followed";
+                for (const ResourceReference& ref : shape.resources) {
+                    if (ref.pc == i.pc) {
+                        origin = origin_text(ref.origin);
+                    }
+                }
+                const unsigned descriptor = i.mubuf.srsrc * 4;
+                // With both bits set the index is in the address register and the offset in the next one.
+                const unsigned index_register = i.mubuf.vaddr & 0xFF;
+                const std::string& number_by = vector_writer[index_register];
+                char text[300];
+                std::snprintf(text, sizeof(text),
+                              "indexed buffer load of %u word(s): descriptor in s%u.. (origin %s; first register last "
+                              "written by %s); element number in v%u, last written by %s; %s; immediate offset %u",
+                              words, descriptor, origin.c_str(),
+                              descriptor < 128 && !scalar_writer[descriptor].empty() ? scalar_writer[descriptor].c_str()
+                                                                                     : "nothing (as it arrived)",
+                              index_register, number_by.empty() ? "nothing (as it arrived)" : number_by.c_str(),
+                              i.mubuf.offen ? "with an offset register" : "no offset register",
+                              static_cast<unsigned>(i.mubuf.offset));
+                statements.insert(text);
+            } else {
+                ++plain;
+            }
+            for (unsigned w = 0; w < words && i.mubuf.vdata + w < 256; ++w) {
+                vector_writer[i.mubuf.vdata + w] = name_of(i);
+            }
+            continue;
+        }
+        if (i.format == WalkFormat::kMimg) {
+            unsigned w = 0;
+            for (unsigned c = 0; c < 4; ++c) {
+                if ((i.mimg.dmask >> c & 1) && i.mimg.vdata + w < 256) {
+                    vector_writer[i.mimg.vdata + w++] = name_of(i);
+                }
+            }
+            continue;
+        }
+        if (i.format == WalkFormat::kSmem) {
+            const unsigned words = i.opcode <= 4 ? 1u << i.opcode : i.opcode >= 8 && i.opcode <= 12 ? 1u << (i.opcode - 8) : 0u;
+            for (unsigned w = 0; w < words && i.smem.sdst + w < 128; ++w) {
+                scalar_writer[i.smem.sdst + w] = name_of(i);
+            }
+            continue;
+        }
+        if (i.has_destination && i.dst.kind == OperandKind::kVgpr && i.dst.index < 256) {
+            vector_writer[i.dst.index] = name_of(i);
+        } else if (i.has_destination && i.dst.kind == OperandKind::kSgpr && i.dst.index < 128) {
+            scalar_writer[i.dst.index] = name_of(i);
+        }
+    }
+    if (indexed == 0) {
+        return;
+    }
+    char text[120];
+    std::snprintf(text, sizeof(text), "has indexed buffer loads (%s), %s plain ones",
+                  indexed == 1 ? "one" : indexed <= 4 ? "2 to 4" : indexed <= 16 ? "5 to 16" : "more than 16",
+                  plain ? "and" : "no");
+    say.push_back(text);
+    for (const std::string& statement : statements) {
+        say.push_back(statement);
+    }
+}
+
+// Private diagnostics only: the fields of an instruction that touches memory, an image, an attribute or an
+// output, to stand beside its line in a private listing.
+std::string private_fields(const whiwhi::shell::Instruction& i) {
+    using namespace whiwhi::shell;
+    char text[200] = "";
+    switch (i.format) {
+        case WalkFormat::kSmem:
+            std::snprintf(text, sizeof(text), "  { base s%u, to s%u, offset 0x%x, offset field %u }", i.smem.sbase * 2,
+                          i.smem.sdst, static_cast<unsigned>(i.smem.offset), static_cast<unsigned>(i.smem.soffset));
+            break;
+        case WalkFormat::kMubuf:
+            std::snprintf(text, sizeof(text),
+                          "  { data v%u, address v%u, descriptor s%u, offset 0x%x, offen %d, idxen %d, soffset field %u }",
+                          i.mubuf.vdata, i.mubuf.vaddr, i.mubuf.srsrc * 4, static_cast<unsigned>(i.mubuf.offset),
+                          i.mubuf.offen ? 1 : 0, i.mubuf.idxen ? 1 : 0, static_cast<unsigned>(i.mubuf.soffset));
+            break;
+        case WalkFormat::kMimg:
+            std::snprintf(text, sizeof(text),
+                          "  { data v%u, address v%u, image s%u, sampler s%u, dim %u, dmask 0x%x, extra words %u }",
+                          i.mimg.vdata, i.mimg.vaddr, i.mimg.srsrc * 4, i.mimg.ssamp * 4, i.mimg.dim, i.mimg.dmask,
+                          i.mimg.nsa);
+            break;
+        case WalkFormat::kExp:
+            std::snprintf(text, sizeof(text), "  { target %u, mask 0x%x, packed %d, last %d, valid %d, from v%u v%u v%u v%u }",
+                          i.exp.tgt, i.exp.en, i.exp.compr ? 1 : 0, i.exp.done ? 1 : 0, i.exp.vm ? 1 : 0, i.exp.src[0],
+                          i.exp.src[1], i.exp.src[2], i.exp.src[3]);
+            break;
+        case WalkFormat::kVintrp:
+            std::snprintf(text, sizeof(text), "  { attribute %u.%u, field %u, to v%u }", i.vintrp.attr, i.vintrp.attrchan,
+                          i.vintrp.vsrc, i.vintrp.vdst);
+            break;
+        default:
+            break;
+    }
+    return text;
+}
+
 void pc_statements(const std::uint8_t* container, std::uint32_t bytes, const whiwhi::shell::DecodedShader& decoded,
                    const whiwhi::shell::ModuleTables& tables, unsigned kind, std::vector<std::string>& say) {
     using namespace whiwhi::shell;
@@ -3692,6 +3864,10 @@ void pc_statements(const std::uint8_t* container, std::uint32_t bytes, const whi
         if ((i.format == WalkFormat::kVopc || (i.format == WalkFormat::kVop3 && opcode < 0x100)) &&
             (opcode <= 15 || (opcode >= 128 && opcode <= 135) || (opcode >= 192 && opcode <= 199))) {
             continue;  // the float, signed and unsigned compares
+        }
+        if (i.format == WalkFormat::kVopc &&
+            ((opcode >= 16 && opcode <= 31) || (opcode >= 144 && opcode <= 151) || (opcode >= 208 && opcode <= 215))) {
+            continue;  // the same compares into the execution mask (one-word form)
         }
         bool found = false;
         for (std::size_t k = 0; k < count && !found; ++k) {
@@ -4122,7 +4298,39 @@ void compare_binding(const void* signature, const void* container, std::size_t b
     ReleaseSRWLockExclusive(&g_packed.lock);
 }
 
+// How much of the image's own threads' time the count takes: every call, and the calls that look at a container
+// for the first time. Reported with the count, so that a slow start can be laid at the right door.
+std::atomic<unsigned long long> g_census_calls{0}, g_census_ticks{0}, g_census_fresh_calls{0}, g_census_fresh_ticks{0};
+
+struct CensusClock {
+    LARGE_INTEGER start;
+    bool fresh = false;
+    CensusClock() { QueryPerformanceCounter(&start); }
+    ~CensusClock() {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        const unsigned long long ticks = static_cast<unsigned long long>(now.QuadPart - start.QuadPart);
+        g_census_calls.fetch_add(1);
+        g_census_ticks.fetch_add(ticks);
+        if (fresh) {
+            g_census_fresh_calls.fetch_add(1);
+            g_census_fresh_ticks.fetch_add(ticks);
+        }
+    }
+};
+
+void log_census_cost(const char* when) {
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    const double to_ms = 1000.0 / static_cast<double>(frequency.QuadPart);
+    logf("packed programs (%s): the count itself took %.0f ms of the image's threads' time in %llu call(s), of which "
+         "%.0f ms in the %llu call(s) that looked at a container for the first time (summed over all threads)\n",
+         when, static_cast<double>(g_census_ticks.load()) * to_ms, g_census_calls.load(),
+         static_cast<double>(g_census_fresh_ticks.load()) * to_ms, g_census_fresh_calls.load());
+}
+
 void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
+    CensusClock clock;
     const std::uint64_t key = content_key(container, bytes);
     AcquireSRWLockExclusive(&g_packed.lock);
     ++g_packed.named;
@@ -4131,6 +4339,7 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
     if (!fresh) {
         return;
     }
+    clock.fresh = true;
     const whiwhi::shell::PackedProgram program = whiwhi::shell::read_packed_program(container, bytes);
     std::string entry_kinds;
     for (const whiwhi::shell::ProgramDirectoryEntry& entry : program.entries) {
@@ -4242,11 +4451,68 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
     std::vector<std::string> table_says, opening_says, flow_says, io_says, pc_says;
     whiwhi::shell::ModuleTables kept_tables;
     if (module && lands && decoded_ok) {
-        table_statements(container, bytes, block, found, shape, table_says);
+        // A step of this count that takes long holds up the thread of the image that asked for a pipeline, so
+        // each is timed: one that takes more than a quarter of a second is logged (numbers only), and so is a
+        // step that has begun on a program larger than any before it, in case it never ends.
+        static std::atomic<int> slow_shown{0};
+        static std::atomic<std::size_t> largest{0};
+        const std::size_t instructions = decoded.instructions.size();
+        std::size_t before = largest.load();
+        bool announce = false;
+        while (instructions > before && !(announce = largest.compare_exchange_weak(before, instructions))) {
+        }
+        // Steps under way, so that a thread that comes by can say when another has been in one for seconds.
+        struct UnderWay {
+            std::atomic<const char*> step{nullptr};
+            std::atomic<ULONGLONG> since{0};
+            std::atomic<std::size_t> instructions{0};
+            std::atomic<unsigned long> thread{0};
+            std::atomic<bool> told{false};
+        };
+        static UnderWay under_way[64];
+        const auto timed = [&](const char* step, const auto& work) {
+            if (announce) {
+                logf("packed program count: step '%s' begins on a %s program of %zu instruction(s), the largest so "
+                     "far (thread %lu)\n", step, kind_name, instructions, GetCurrentThreadId());
+            }
+            const ULONGLONG start = GetTickCount64();
+            UnderWay* mine = nullptr;
+            for (UnderWay& slot : under_way) {
+                const char* empty = nullptr;
+                if (!mine && slot.step.compare_exchange_strong(empty, step)) {
+                    mine = &slot;
+                    slot.since = start;
+                    slot.instructions = instructions;
+                    slot.thread = GetCurrentThreadId();
+                    slot.told = false;
+                } else if (const char* other = slot.step.load()) {
+                    const ULONGLONG since = slot.since.load();
+                    if (&slot != mine && since != 0 && start > since + 3000 && !slot.told.exchange(true)) {
+                        logf("packed program count: step '%s' has been under way for %llu ms on a program of %zu "
+                             "instruction(s) (thread %lu)\n", other, static_cast<unsigned long long>(start - since),
+                             slot.instructions.load(), slot.thread.load());
+                    }
+                }
+            }
+            work();
+            if (mine) {
+                mine->since = 0;
+                mine->step = nullptr;
+            }
+            const ULONGLONG took = GetTickCount64() - start;
+            if (took > 250 && few(slow_shown, 24)) {
+                logf("packed program count: step '%s' took %llu ms on a %s program of %zu instruction(s)\n", step,
+                     static_cast<unsigned long long>(took), kind_name, instructions);
+            }
+        };
+        timed("tables", [&] { table_statements(container, bytes, block, found, shape, table_says); });
         kept_tables = whiwhi::shell::read_module_tables(block.data(), size, found);
-        opening_statements(container, bytes, decoded, kept_tables, kind, shape, opening_says);
-        interface_statements(container, bytes, decoded, kind, shape, io_says);
-        pc_statements(container, bytes, decoded, kept_tables, kind, pc_says);
+        timed("opening", [&] { opening_statements(container, bytes, decoded, kept_tables, kind, shape, opening_says); });
+        timed("inputs and outputs", [&] { interface_statements(container, bytes, decoded, kind, shape, io_says); });
+        if (kind == 0 || kind == 1) {
+            timed("indexed loads", [&] { indexed_load_statements(decoded, shape, io_says); });
+        }
+        timed("PC shader", [&] { pc_statements(container, bytes, decoded, kept_tables, kind, pc_says); });
         // What the control-flow pass makes of the program: its blocks, its loops, and whether its flow can be
         // written as nested ifs and loops. Counts and the pass's own reasons only.
         // A reason may name a position or a block number; those are replaced by '#' so that equal reasons count
@@ -4421,11 +4687,62 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
                         listing_class = 0x400;
                     }
                 }
+                if (listing_class == 0) {
+                    // A program the PC shader pass refuses for one of the reasons being worked on, and its tables
+                    // beside it. (Earlier: 0x600 was a program with a buffer load by element number.)
+                    for (const std::string& statement : pc_says) {
+                        if (statement.find("tables do not name") != std::string::npos) {
+                            listing_class = 0x600;
+                        } else if (statement.find("refused: reads s") != std::string::npos ||
+                                   statement.find("SMEM 9") != std::string::npos) {
+                            listing_class = 0x700;
+                        } else if (statement.find("refused: reads v") != std::string::npos) {
+                            listing_class = 0x800;
+                        } else if (statement.find("a parameter the container") != std::string::npos ||
+                                   statement.find("a destination of a form") != std::string::npos ||
+                                   statement.find("holds a word of a descriptor") != std::string::npos) {
+                            listing_class = 0x900;
+                        }
+                    }
+                    if (listing_class != 0) {
+                        std::string line;
+                        char one[96];
+                        for (const whiwhi::shell::ModuleLayoutEntry& entry : tables.layout) {
+                            std::snprintf(one, sizeof(one), " {kind %u, offset %u, count %u, register %u, s%u, number %u}",
+                                          entry.kind, entry.offset_words, entry.count, entry.shader_register,
+                                          entry.scalar_register, entry.fixed_index);
+                            line += one;
+                        }
+                        logf("packed program #%llu (private): first table of a program listed for class 0x%x:%s\n",
+                             shown, listing_class, line.c_str());
+                        line.clear();
+                        for (const whiwhi::shell::ModuleResourceEntry& entry : tables.resources) {
+                            std::snprintf(one, sizeof(one), " {class %u, arrival %u, offset %u, register %u, word3 0x%x, last 0x%x}",
+                                          entry.resource_class, entry.arrival, entry.offset_words, entry.shader_register,
+                                          entry.word3, entry.last);
+                            line += one;
+                        }
+                        const whiwhi::shell::ShaderContainer parts = whiwhi::shell::read_shader_container(container, bytes);
+                        const whiwhi::shell::ShaderChunk* validation = parts.ok() ? chunk_named(parts, "PSV0") : nullptr;
+                        std::string declared_line;
+                        if (validation && static_cast<std::uint64_t>(validation->offset) + 8 + validation->size <= bytes) {
+                            const whiwhi::shell::DeclaredResources declared =
+                                whiwhi::shell::read_declared_resources(container + validation->offset + 8, validation->size);
+                            for (const whiwhi::shell::DeclaredResource& resource : declared.resources) {
+                                std::snprintf(one, sizeof(one), " {type %u, space %u, %u..%u}", resource.type, resource.space,
+                                              resource.lower, resource.upper);
+                                declared_line += one;
+                            }
+                        }
+                        logf("packed program #%llu (private): its second table:%s; the container declares:%s\n", shown,
+                             line.c_str(), declared_line.c_str());
+                    }
+                }
             }
         }
         AcquireSRWLockExclusive(&shown_lock);
         bool show = shown_kinds[(module ? 0x100u : 0u) | (kind & 0xff)]++ < 3;
-        const bool listing = shape.instructions <= (listing_class == 0x500 ? 6000u : 400u) &&
+        const bool listing = shape.instructions <= (listing_class == 0x500 ? 6000u : listing_class >= 0x600 ? 1500u : 400u) &&
                              shown_kinds[0x10000u | listing_class | (kind & 0xff)]++ < 2;
         show = show || listing;
         ReleaseSRWLockExclusive(&shown_lock);
@@ -4433,8 +4750,8 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
             logf("packed program #%llu (private): listing of %zu instruction(s), %s shader, table class 0x%x\n", shown,
                  decoded.instructions.size(), kind_name, listing_class);
             for (const whiwhi::shell::Instruction& instruction : decoded.instructions) {
-                logf("packed program #%llu (private):   +0x%03x %s\n", shown, instruction.pc,
-                     whiwhi::shell::describe_instruction(instruction).c_str());
+                logf("packed program #%llu (private):   +0x%03x %s%s\n", shown, instruction.pc,
+                     whiwhi::shell::describe_instruction(instruction).c_str(), private_fields(instruction).c_str());
             }
         }
         if (show) {
