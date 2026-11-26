@@ -6,12 +6,14 @@
 # read from the executable before anything is built for it (against-the-map.txt). Nothing of the game is written anywhere: the record holds names, counts and addresses only, and it
 # stays on your PC (under -Out), never in the repository.
 #
-#   scripts\game_test.ps1 -Game <your game folder> [-Seconds 60] [-NoBuild] [-Accept] [-Out <folder>]
+#   scripts\game_test.ps1 -Game <your game folder> [-Seconds 60] [-NoBuild] [-Accept] [-Show] [-Out <folder>]
 #
 #   -Game     the folder of your game copy (read-only; checked unchanged after the run). Or set WHIWHI_GAME.
 #   -Seconds  how long the game runs (default 60).
 #   -NoBuild  use the build in shell\build as it is (default: build and run the sample tests first).
 #   -Accept   if the verdict is PASS, this run becomes the baseline later runs are compared with.
+#   -Show     start the game where you can see it, and open a second window that shows its log as it is written
+#             (default: the game starts hidden).
 #   -Out      where the records go (default %LOCALAPPDATA%\whiwhi\game-tests).
 #
 # Verdict FAIL when: the game folder changed; the baseline run was alive at its end and this one is not; or an
@@ -23,6 +25,7 @@ param(
     [int]$Seconds = 60,
     [switch]$NoBuild,
     [switch]$Accept,
+    [switch]$Show,
     [string]$Out = (Join-Path $env:LOCALAPPDATA 'whiwhi\game-tests')
 )
 $ErrorActionPreference = 'Stop'
@@ -71,9 +74,14 @@ $env:WHIWHI_CALL_LEDGER = Join-Path $run 'calls.tsv'
 $env:DISABLE_RTSS_LAYER = '1'
 $env:DISABLE_VULKAN_OBS_CAPTURE = '1'
 $sw = [Diagnostics.Stopwatch]::StartNew()
-$p = Start-Process -FilePath (Join-Path $work 'boot_image.exe') -WorkingDirectory $work -PassThru -WindowStyle Hidden `
+$p = Start-Process -FilePath (Join-Path $work 'boot_image.exe') -WorkingDirectory $work -PassThru `
+    -WindowStyle $(if ($Show) { 'Normal' } else { 'Hidden' }) `
     -ArgumentList "`"$($exe.FullName)`"", "`"$Game`"", '--seconds', "$Seconds" `
     -RedirectStandardError $log -RedirectStandardOutput (Join-Path $run 'run.out')
+if ($Show) {
+    Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile', '-Command',
+        "`$host.UI.RawUI.WindowTitle = 'game test log'; Get-Content -LiteralPath '$log' -Wait -Tail 50"
+}
 try { $p.PriorityClass = 'Normal' } catch {}
 if (-not $p.WaitForExit(($Seconds + 60) * 1000)) { try { $p.Kill() } catch {}; $p.WaitForExit(15000) | Out-Null }
 $elapsed = [int]$sw.Elapsed.TotalSeconds
