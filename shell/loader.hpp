@@ -42,9 +42,11 @@ struct LoadedImage {
 // Decides what an import slot is connected to. Returns nullptr for an import the shell does not provide.
 using ImportResolver = std::function<void*(const std::string& library, const ImportedFunction& fn)>;
 
-// Called when the image calls an unprovided import. It must not return; without a handler (or if it returns)
-// the call is printed to stderr and the process ends with exit code 3.
-using UnprovidedHandler = void (*)(const UnprovidedImport&);
+// Called when the image calls an unprovided import. Its return value is given back to the image as the call's
+// result, so return 0 to answer "the call failed" — the honest answer while the shell does not provide that
+// console library yet, and the image's own error handling decides what happens next. Without a handler the
+// call is printed to stderr and the process ends with exit code 3.
+using UnprovidedHandler = std::uintptr_t (*)(const UnprovidedImport&);
 void set_unprovided_handler(UnprovidedHandler handler);
 
 // Loads the image at its preferred base when that address range is free, otherwise elsewhere with its
