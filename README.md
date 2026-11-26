@@ -25,9 +25,9 @@ shell/                         the runtime (C++17, MSVC); shell/README.md descri
   host_libraries, console      decide which library answers each import
   offline                      refuses the game's network imports: no socket, no name lookup, no HTTP request
   hosting                      address model for showing the game's memory to the GPU
-  shader_container, shader_walk, shader_isa, shader_translate, spirv
-                               shader container reader, program walk (instruction lengths), instruction
-                               reader, translator to SPIR-V, SPIR-V writer
+  shader_container, shader_walk, shader_names, shader_isa, shader_translate, spirv
+                               shader container reader, program walk (instruction lengths), public
+                               instruction names, instruction reader, translator to SPIR-V, SPIR-V writer
   xmem                         xmem.dll - the console's memory library, answered on a PC
   d3d12_xs                     d3d12_xs.dll - the console's graphics entry points, over a PC D3D12 device
   xcrdapi, inflate             XCRDAPI.dll - the console's file-read library, with our own zlib decoder
@@ -36,7 +36,7 @@ shell/                         the runtime (C++17, MSVC); shell/README.md descri
   xg_xs                        xg_xs.dll - the texture layout library, answering with an untiled layout
   xbox_bvh_builder             XboxBvhBuilder.dll - ray-tracing builder (skeleton)
   tools/                       list_imports, describe_image, connect_imports, boot_image, vkhost_probe
-  tests/                       18 tests, made-up inputs only
+  tests/                       19 tests, made-up inputs only
   CMakeLists.txt, build.cmd    build definition and the build-and-test script
 docs/
   BUILD-AND-RUN.md             how to build, test and run the shell yourself
@@ -47,6 +47,7 @@ docs/
   exe-map/SHADER-PATH.md       how the executable's shader bytes reach the graphics device
   console-libs/                what the executable asks of the audio, file-read and game runtime libraries
   SHADER-TRANSLATOR.md         the shader translation plan
+  SHADER-OPCODES.md            public names of the shader instructions the game uses most
   EARLY-HISTORY.md             the earlier attempt and why the project restarted
   RENDERING-PIPELINE.md        not written yet
 scripts/
@@ -64,7 +65,7 @@ LICENSE                        GPLv3-or-later
 shell\build.cmd
 ```
 
-Builds the shell, the console libraries and the tools, and runs the 18 tests. No game files and no GPU are needed.
+Builds the shell, the console libraries and the tools, and runs the 19 tests. No game files and no GPU are needed.
 To run the shell against your own copy of the game, see [docs/BUILD-AND-RUN.md](docs/BUILD-AND-RUN.md).
 
 ## License
