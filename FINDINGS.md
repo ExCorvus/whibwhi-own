@@ -970,3 +970,39 @@ So the game's own description is enough: a translated shader can take each resou
 the game's own root signature gives it, and the pipeline can use the game's own root signature. The shell's own
 layout (one root signature of the shell's, an arguments buffer, heap places) is not needed. That is the next
 change; nothing of it is built yet.
+
+## 2026-11-26 - the shader tables checked by a second reader against the root signatures (measured, test run 19:05)
+
+ExCorvus: the record of the entry above came from the translator's own reader, which was brought back from work
+that went wrong, so it is not proof ("it introduces flawed patterns into the shaderlog"). The exe map settles one
+half (docs/exe-map/SHADER-PATH.md section 4, verified): the program takes each pipeline's root signature from the
+`PRIV` part of the shader container itself (fn 0xfa09f0, converted by fn 0x55ac630, made through device slot 16).
+The other half - which register of a shader reads which root parameter - is never worked out in the exe file: on
+the console it is done by the graphics library the exe imports, whose place the shell takes. The data for it is in
+the two tables the console's shader compiler writes into each container.
+
+So a second, minimal reader of those tables was written (shell/shader_check.*). It shares no code with the
+translator, gives back the raw words of each table entry, and refuses with a reason whenever a step of the
+description in shell/shader_program.hpp does not hold. With `WHIWHI_SHADER_CHECK=<file>`, shell/d3d12_xs.cpp
+checks each claim of that description against the root signature the request names, as the PC's own reader of
+root signatures reads it (on the user's PC, numbers only).
+
+Test run 2026-11-26 19:05 (scripts/game_test.ps1, 60 s, PASS, the copy's folder unchanged; 714 pairs of a shader and its request's root
+signature, 15 root signatures):
+
+- Every one of the 714 containers was read by the second reader; no step of the description failed.
+- Every claim about how a table entry names a root parameter held, with no exception: the parameter number
+  (4,013 first-table and 1,994 second-table entries); constants (710 entries: same register, count = number of
+  32-bit values; 453 declared constants: same register); root descriptors (2 + 1: same register); fixed samplers
+  (14 + 5: number and register); descriptor tables (3,301 first-table entries name a table parameter).
+- Not held: for a resource that arrives through a descriptor table, the table of the named root signature holds a
+  range of that class with the shader's register for only **216 of 1,540**. For the other 1,324 the shader reads
+  a register the named table does not list. Where it does list it, the shader's word 1 is 8 words times the
+  register's position in the table for 190 of 216.
+- The containers carry 6 different `PRIV` keys; each key came with only one root signature.
+
+This corrects the conclusion of the entry above. The program's own root signatures are exactly right about the
+kind, order and registers of their parameters, but what a descriptor table holds is, for most shaders, not what
+the named root signature's table lists (measured). Why the console does not mind is inferred, not measured: its
+shaders read a table by position, and each shader's own table says which position. Using the program's root signatures unchanged on the PC would therefore not give most shaders
+their table resources. How the shell is to provide the table contents is not decided; nothing of it is built.
