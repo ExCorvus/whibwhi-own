@@ -1348,3 +1348,10 @@ Follow-up, game test 00:12 (visible, the copy's folder unchanged; FAIL about 5 s
   Then an access violation: execution at an address in ordinary memory (the bytes there look like a pointer, not
   code), called from 0x7ffd2920ae8a. That address lies in none of the libraries whose load the log names; which
   library it belongs to was not recorded. Not chased (it may be a binding symptom, rule of 2026-11-26).
+Follow-up, game test 00:24 (run-20261127-002450; boot_image now names the library each stack word near a fault
+points into): the same four builder pipelines are made, then an access violation inside AMD's Vulkan driver: a
+read at an address made of text bytes, at an instruction whose stack words point only into amdvlk64.dll
+(+0xfdae8a, +0xfdad80, +0xfce7cf). +0xfdae8a is the calling address of the run of 00:22, so both runs fail in the
+same place of the driver, while the fifth pipeline is being made. The driver's own process failed; the machine and
+the display stayed up. Which shader the fifth pipeline holds, and whether the translated code handed to the driver
+is valid, was not measured.
