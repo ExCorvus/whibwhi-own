@@ -188,14 +188,27 @@ ProgramShape shape_of(const DecodedShader& decoded) {
                     (ins.format == WalkFormat::kVop3 && ins.opcode == 384)) {
                     break;
                 }
-                const unsigned width = is_64_bit(name) ? 2 : 1;
+                unsigned width = is_64_bit(name) ? 2 : 1;
+                // A lane mask held in scalar registers takes a pair: the programs move and combine their
+                // masks with the 64-bit scalar instructions. That covers the result of a three-operand
+                // compare and the mask a select or a carry-in instruction reads from its third field.
+                const bool plain = ins.format == WalkFormat::kVop3;
+                const bool compare = plain && vop3_is_compare(ins.opcode);
+                const bool mask_in_third = plain && (ins.opcode == 0x101 || (ins.opcode >= 0x128 && ins.opcode <= 0x12A));
                 for (unsigned i = 0; i < ins.source_count; ++i) {
                     const Operand& src = ins.src[i];
                     if (src.kind == OperandKind::kSgpr) {
-                        t.read_scalar(src.index, width);
+                        t.read_scalar(src.index, (mask_in_third && i == 2) ? 2 : width);
                     } else if (src.kind == OperandKind::kVgpr) {
                         t.read_vector(src.index);
                     }
+                }
+                if (compare) {
+                    width = 2;
+                }
+                if (plain && ins.vop3.has_scalar_result && ins.vop3.scalar_result <= 101) {
+                    t.write_scalar(ins.vop3.scalar_result, other_origin());
+                    t.write_scalar(ins.vop3.scalar_result + 1, other_origin());
                 }
                 if (ins.has_destination) {
                     if (ins.dst.kind == OperandKind::kSgpr) {
