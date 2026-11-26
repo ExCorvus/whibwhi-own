@@ -1,4 +1,4 @@
-# Findings
+﻿# Findings
 
 What has been measured about the game and about the shell. The **Current state** block is always the latest;
 below it is the dated log, oldest entry first. A later entry overrides an earlier one. Addresses written as
@@ -1122,7 +1122,7 @@ made in the same time is not known (open). ExCorvus: the watchdog checks the loo
 one-second passes, 30 ticks re-armed by progress, so about 30 seconds without progress stops it), and a program
 that runs slower than it should skews boot results - earlier frame counts are not comparable with this one.
 
-## 2026-11-26 - the program's progress reports, read during a run (game tests 21:08 and 21:12)
+## 2026-11-26 - the program's progress reports, read during a run (game tests 21:08 and 21:09)
 
 The boot tool now reads, every half second and without writing anything, the time of the program's last progress
 report (image+0x71b6338; written by one function of the program; its watchdog thread compares it once a second,
@@ -1131,7 +1131,7 @@ docs/exe-map/MAP.md sections 2.2 and 4). The game test lists the number of new r
 without one.
 
 - 60-second run (21:08): PASS; 1 new report, about 6 s before the end; last frame token 1,581; 4,096 pipelines.
-- 150-second run (21:12): PASS, alive after 150 s; still 1 new report, then 96.6 s without another, and the
+- 150-second run (21:09): PASS, alive after 150 s; still 1 new report, then 96.6 s without another, and the
   program did not stop itself; last frame token 1,561 (about the same as after 60 s); 26,310 pipelines.
 
 So around the first minute the program reports progress once, its frame count stops rising, and it keeps making
