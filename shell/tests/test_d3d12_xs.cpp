@@ -53,6 +53,23 @@ int main() {
     const long hr = serialize(&desc, reinterpret_cast<void**>(&blob), reinterpret_cast<void**>(&error_blob));
     CHECK(hr == 0);
     CHECK(blob != nullptr && blob->GetBufferSize() > 0);
+
+    // The function the game's shipped upscaler library asks for: the serialized root signature above comes back
+    // as a deserializer object (no device needed).
+    const auto deserialize =
+        reinterpret_cast<long(__stdcall*)(const void*, unsigned long long, const GUID*, void**)>(
+            GetProcAddress(lib, "D3D12CreateRootSignatureDeserializer"));
+    CHECK(deserialize != nullptr);
+    if (deserialize && blob) {
+        ID3D12RootSignatureDeserializer* reader = nullptr;
+        CHECK(deserialize(blob->GetBufferPointer(), blob->GetBufferSize(), &__uuidof(ID3D12RootSignatureDeserializer),
+                          reinterpret_cast<void**>(&reader)) == 0);
+        CHECK(reader != nullptr);
+        if (reader) {
+            CHECK(reader->GetRootSignatureDesc() != nullptr && reader->GetRootSignatureDesc()->NumParameters == 0);
+            reader->Release();
+        }
+    }
     if (blob) {
         blob->Release();
     }
