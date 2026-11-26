@@ -48,7 +48,7 @@ target_compile_definitions(chad PRIVATE WHIWHI_CHAD_BUILD)
 
 # The console's storage library: the one imported entry point (DStorageGetFactory) answered on a PC, forwarded
 # to the PC's dstorage.dll when that library is installed.
-add_library(xcrdapi SHARED xcrdapi.cpp)
+add_library(xcrdapi SHARED xcrdapi.cpp inflate.cpp)
 target_compile_definitions(xcrdapi PRIVATE WHIWHI_XCRDAPI_BUILD)
 target_link_libraries(xcrdapi PRIVATE onecore)
 
@@ -153,6 +153,11 @@ add_test(NAME chad COMMAND test_chad $<TARGET_FILE:chad>)
 add_executable(test_xcrdapi tests/test_xcrdapi.cpp)
 add_dependencies(test_xcrdapi xcrdapi)
 add_test(NAME xcrdapi COMMAND test_xcrdapi)
+
+# The zlib decoder the storage library uses, tested on its own.
+add_executable(test_inflate tests/test_inflate.cpp inflate.cpp)
+target_include_directories(test_inflate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME inflate COMMAND test_inflate)
 
 add_executable(test_gfx_stubs tests/test_gfx_stubs.cpp)
 add_dependencies(test_gfx_stubs xg_xs XboxBvhBuilder xmem xgameruntime)
