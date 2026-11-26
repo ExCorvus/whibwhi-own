@@ -115,7 +115,7 @@ rdx = pool size in bytes.
 
 ### 1.5 Hosting
 
-The hosting model is the project's own (shell/), written from this map; the running log of what it does and
+The hosting model is the project's own (weave/), written from this map; the running log of what it does and
 measures is in `../../FINDINGS.md`. Everything in sections 1.1-1.4 is what the executable itself does.
 
 ### 1.6 Who else touches these tables (`refs-page-tables.txt`)
@@ -160,7 +160,7 @@ pool index (jump table 0x674c270). The pool {base,size} is recorded in the first
   sub-alloc+0x30 = 0xffffffff (free head sentinel).
 - The protect values are named in the public Windows SDK header winnt.h: 0x400 is PAGE_WRITECOMBINE and 0x2000 is
   PAGE_GRAPHICS_READWRITE; the earlier note calling 0x400 "NOCACHE" was wrong (PAGE_NOCACHE is 0x200).
-- Our library answers these calls (shell/xmem.*); how it maps the flag combinations onto Windows is written there.
+- Our library answers these calls (weave/xmem.*); how it maps the flag combinations onto Windows is written there.
 
 ## 2. How the game stops itself
 
@@ -190,7 +190,7 @@ pool index (jump table 0x674c270). The pool {base,size} is recorded in the first
 - fn 0x1e86440 — 6 reservations + 5 page maps (a second paged structure).
 - fn 0x22163d0 / 0x2216940 / 0x2473090 / 0x2474660 — the other physical-page users.
 - fn 0x4e9b660 and its 31 callers — every reason the game stops itself.
-- device slot 74 (+0x250) and slot 50 (+0x190): what the shell answers there.
+- device slot 74 (+0x250) and slot 50 (+0x190): what the weave answers there.
 
 ## 4. The watchdog as the frame loop's liveness relay (read from the image)
 
@@ -277,30 +277,30 @@ gap, and OUR layer's long blocks are what it sees. Everything below is from `fun
   vtable call sites. The watchdog is not on that path.
 - **I (the relay reading our runtime uses):** the relay is **liveness, not cadence**. The watchdog does not drive the
   pacer; it watches the loop that both paces (its Sleep, and our WaitFrameEventX model) and reports progress. One
-  block in shell code therefore stalls frames *and* drains the watchdog's 30 s budget at the same time — that is the
+  block in weave code therefore stalls frames *and* drains the watchdog's 30 s budget at the same time — that is the
   one-system coupling.
 - **U:** which of the vtable call sites of slots 78-81 belong to the real frame loop (the capability probes obscure
   it). Not needed for the relay; a dedicated chapter would need the call-graph up from each site.
 
-### 4.8 What the shell does with it
+### 4.8 What the weave does with it
 
-The shell does not touch the watchdog: it stays armed and the game's own loop reports progress. The shell only
+The weave does not touch the watchdog: it stays armed and the game's own loop reports progress. The weave only
 avoids holding the title thread inside its own calls for longer than the budget (30 s unscoped, 300 s scoped),
-because a long block in shell code is exactly the gap the watchdog measures. The frame-event path (device slots
-78-81, queue PresentX) is answered by the shell's graphics library unchanged in cadence.
+because a long block in weave code is exactly the gap the watchdog measures. The frame-event path (device slots
+78-81, queue PresentX) is answered by the weave's graphics library unchanged in cadence.
 
 ## 5. The graphics error path
 
 Device loss reaches the game only through fn 0x4e9b660 (section 2.1): a negative result from a graphics call
-with one of four codes calls the fatal stop. On a PC, the shell's graphics library answers those calls with the
+with one of four codes calls the fatal stop. On a PC, the weave's graphics library answers those calls with the
 PC's own results, so the game's own error handling decides what happens.
 
 ## 6. The shell is the entire game, flat out (ExCorvus 2026-11-25 — the hosting-model footing)
 
-ExCorvus: "i think the shell is actually just the entire game flat out." The shell is NOT a wrapper hosting the game piece
-by piece from outside; it IS the game's whole flat memory/code laid out as one singular program, the shell only wiring
+ExCorvus: "i think the shell is actually just the entire game flat out." The weave is NOT a wrapper hosting the game piece
+by piece from outside; it IS the game's whole flat memory/code laid out as one singular program, the weave only wiring
 the environment (GPU reads the game's memory directly, frame cadence, liveness). The game uses FLAT unified VAs (its
-shaders load V# with no added base); the faithful shell preserves that flat layout WHOLE and exposes it to the GPU
+shaders load V# with no added base); the faithful weave preserves that flat layout WHOLE and exposes it to the GPU
 zero-copy, so EVERY V# the game writes resolves directly to the game's own RAM — no piecemeal imports, no shadow
 copies, no "waiting for a copy", no holes, no 15 GB of fills.
 
