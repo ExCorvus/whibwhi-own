@@ -1355,3 +1355,10 @@ read at an address made of text bytes, at an instruction whose stack words point
 same place of the driver, while the fifth pipeline is being made. The driver's own process failed; the machine and
 the display stayed up. Which shader the fifth pipeline holds, and whether the translated code handed to the driver
 is valid, was not measured.
+Follow-up, game test 00:28 (run-20261127-002835): the same build, but the translator without the lane count taken
+from the console compiler's switch (that change was held and not committed, but it was in the translator of the
+runs of 00:04, 00:12, 00:22 and 00:24). Measured: no fault in the driver. 20 builder pipelines are made, among them
+the fifth one (29,996 bytes) during which the driver failed twice with the lane count set. The run then stops where
+expected: the 21st shader (8,188 bytes) uses MakeUniform, a lane function not taught yet, and the builder throws
+E_INVALIDARG. So the driver failure came with the lane count the translator asked for: with it, the driver
+failed; without it, the driver made the pipeline. Why, was not measured. The lane-count change stays held.
