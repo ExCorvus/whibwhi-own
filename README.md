@@ -73,6 +73,13 @@ unfinished. The shell reads 927 of the first 1,024 shaders of a run and can writ
 pixel and all 227 vertex shaders, but none has been given to the graphics card yet, so every draw is held.
 The exact state is the "Current state" block at the top of [FINDINGS.md](FINDINGS.md).
 
+my own verdict. this was not written or committed by an agent. it is an impressive system that traps ai agents
+exactly by the way they work. giving them instructions to "clear until intro" will make them spin out of 
+control because they will inspect the code an try to fix it. 
+this only a hypothesis, but the game was written in a special OS and was folded it into
+the xbox os. trying to stitch fix the the inside of the game will basically make the game write the original os
+into the drive.
+
 ## Files
 
 ```
