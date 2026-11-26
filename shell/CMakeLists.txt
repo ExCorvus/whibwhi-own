@@ -17,6 +17,12 @@ add_library(xmem SHARED xmem.cpp)
 target_compile_definitions(xmem PRIVATE WHIWHI_XMEM_BUILD)
 target_link_libraries(xmem PRIVATE onecore)
 
+# The console's graphics library: the three imported entry points answered on a PC (a wrapped real D3D12
+# device behind D3D12XboxCreateDevice).
+add_library(d3d12_xs SHARED d3d12_xs.cpp)
+target_compile_definitions(d3d12_xs PRIVATE WHIWHI_D3D12_XS_BUILD)
+target_link_libraries(d3d12_xs PRIVATE onecore)
+
 # Shell core: image mapper, import table reader, image loader, host-library resolver, console imports, flat
 # hosting model.
 add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp loader.cpp)
@@ -31,11 +37,11 @@ target_link_libraries(describe_image PRIVATE whiwhi_shell)
 
 add_executable(connect_imports tools/connect_imports.cpp)
 target_link_libraries(connect_imports PRIVATE whiwhi_shell)
-add_dependencies(connect_imports xmem)
+add_dependencies(connect_imports xmem d3d12_xs)
 
 add_executable(boot_image tools/boot_image.cpp)
 target_link_libraries(boot_image PRIVATE whiwhi_shell)
-add_dependencies(boot_image xmem)
+add_dependencies(boot_image xmem d3d12_xs)
 
 enable_testing()
 
@@ -68,3 +74,7 @@ add_executable(test_xmem tests/test_xmem.cpp)
 target_include_directories(test_xmem PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_xmem PRIVATE xmem)
 add_test(NAME xmem COMMAND test_xmem)
+
+add_executable(test_d3d12_xs tests/test_d3d12_xs.cpp)
+add_dependencies(test_d3d12_xs d3d12_xs)
+add_test(NAME d3d12_xs COMMAND test_d3d12_xs)
