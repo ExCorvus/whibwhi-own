@@ -400,4 +400,85 @@ std::uint8_t declared_resource_class(std::uint32_t type) {
     return 0xFF;
 }
 
+Signature read_signature(const char* name, const std::uint8_t* part, std::size_t size) {
+    Signature signature;
+    const auto refuse = [&signature](const std::string& reason) {
+        signature.found = false;
+        signature.reason = reason;
+        signature.elements.clear();
+        return signature;
+    };
+    if (!name) {
+        return refuse("no part name was given");
+    }
+    const std::string part_name(name);
+    bool has_stream = false;
+    bool has_precision = false;
+    if (part_name == "ISG1" || part_name == "OSG1" || part_name == "PSG1") {
+        has_stream = true;
+        has_precision = true;
+    } else if (part_name == "OSG5") {
+        has_stream = true;
+    } else if (part_name != "ISGN" && part_name != "OSGN" && part_name != "PCSG") {
+        return refuse("'" + part_name + "' is not a signature part");
+    }
+    const std::size_t record = 24 + (has_stream ? 4 : 0) + (has_precision ? 4 : 0);
+    if (!part || size < 8) {
+        return refuse("the part is too short to hold an element count");
+    }
+    const std::uint64_t count = dword(part);
+    if (dword(part + 4) != 8) {
+        return refuse("the word after the element count is not 8");
+    }
+    if (count > kMostSignatureElements) {
+        return refuse("the element count is not one the reader accepts");
+    }
+    if (count * record > size - 8) {
+        return refuse("the element records run past the end of the part");
+    }
+    signature.elements.reserve(static_cast<std::size_t>(count));
+    for (std::uint64_t i = 0; i < count; ++i) {
+        const std::uint8_t* at = part + 8 + i * record;
+        SignatureElement element;
+        if (has_stream) {
+            element.stream = dword(at);
+            at += 4;
+        }
+        const std::uint64_t name_at = dword(at);
+        if (name_at < 8 + count * record || name_at >= size) {
+            return refuse("an element's name is not inside the part after the records");
+        }
+        std::size_t end = static_cast<std::size_t>(name_at);
+        while (end < size && part[end] != 0) {
+            if (part[end] < 0x20 || part[end] > 0x7E) {
+                return refuse("an element's name is not text");
+            }
+            ++end;
+        }
+        if (end == size) {
+            return refuse("an element's name does not end inside the part");
+        }
+        if (end == name_at) {
+            return refuse("an element has an empty name");
+        }
+        element.name.assign(reinterpret_cast<const char*>(part + name_at), end - static_cast<std::size_t>(name_at));
+        element.index = dword(at + 4);
+        element.system_value = dword(at + 8);
+        element.component_type = dword(at + 12);
+        element.shader_register = dword(at + 16);
+        const std::uint32_t mask_word = dword(at + 20);
+        element.mask = static_cast<std::uint8_t>(mask_word & 0xFF);
+        element.use_mask = static_cast<std::uint8_t>((mask_word >> 8) & 0xFF);
+        if ((element.mask & 0xF0) != 0) {
+            return refuse("an element's mask names a component past the fourth");
+        }
+        if (has_precision) {
+            element.minimum_precision = dword(at + 24);
+        }
+        signature.elements.push_back(element);
+    }
+    signature.found = true;
+    return signature;
+}
+
 } // namespace whiwhi::shell
