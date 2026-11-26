@@ -80,6 +80,7 @@ struct PcBinding {
     std::uint32_t offset_words = 0;     // its place inside the descriptor table, in 32-bit words
     std::uint32_t values = 0;           // kConstants: how many 32-bit values
     std::uint32_t dimension = 0;        // kTexture: the dxbc::ResourceDimension number
+    bool indexed = false;               // kConstantBuffer: some read takes its 16-byte element at run time
 };
 
 // One instruction of the written program, as given to the container writer. Kept so that a test can run it.
