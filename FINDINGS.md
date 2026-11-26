@@ -52,10 +52,10 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   names in a request gives only the order and kind of the parameters: one root signature is named for many
   shaders (16 layouts for 926 pairs), so what a table holds has to be taken from each shader's own module.
   A translator from that hardware code is the way to a picture. Its first form exists: a pass
-  that writes a PC shader for a pixel or vertex program. It writes 479 of 505 pixel and 224 of 227 vertex
-  programs of a run (boot b133) and refuses the rest with a reason; compute programs are not handled. What
+  that writes a PC shader for a pixel or vertex program. It writes 496 of 505 pixel and all 227 vertex
+  programs of a run (boot b134) and refuses the rest with a reason; compute programs are not handled. What
   it writes has been checked against a reference interpreter on made-up programs only and has not been given
-  to the graphics device (docs/SHADER-TRANSLATOR.md sections 26 to 28). Nearly every request comes from the game's worker
+  to the graphics device (docs/SHADER-TRANSLATOR.md sections 26 to 29). Nearly every request comes from the game's worker
   threads (tens of thousands in the first seconds); three come from the thread that created the device.
   Details: docs/SHADER-TRANSLATOR.md sections 13, 15 and 16, docs/exe-map/SHADER-PATH.md sections 10 to 12.
 - **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
@@ -1346,5 +1346,19 @@ The game folder was unchanged after every run. 27 tests pass.
   result is scalar), 2 take a resource from the descriptor heap by number, 2 use a descriptor word as a number on
   one path, 1 uses the interpolation move (a flat input); 3 vertex export a parameter their output list does not
   declare. Details: docs/SHADER-TRANSLATOR.md section 28.
+- Nothing written has been given to the graphics device; no PC root signature exists; nothing of the game's
+  picture is drawn. 27 tests pass.
+
+## 2026-11-26 - the last small refusals: 496 of 505 pixel and all 227 vertex programs written (boot b134; measured)
+
+- Six small pieces built and tested (docs/SHADER-TRANSLATOR.md section 29): v_readfirstlane_b32 writes a scalar
+  register (a reader fault, corrected in shader_isa); a move into the null register writes nothing; the
+  interpolation move with selector 2 is a flat (constant) input; a vertex program declaring only the position
+  leaves its stray parameter export out; the interpolation value is a token only ever moved toward M0; and whether
+  a register holds a descriptor word is decided per path (the last write on the way taken), not in emission order.
+- Boot b134 (game folder unchanged): 496 of 505 pixel and all 227 vertex programs written. The 9 remaining pixel
+  refusals: 4 texel reads whose values go to an instruction the pass cannot type, 3 a resource from the descriptor
+  heap by number, 2 a sampler the pass cannot tell; two programs hold v_cos_f32. These tie into the root signature
+  and typing work rather than being quick fixes.
 - Nothing written has been given to the graphics device; no PC root signature exists; nothing of the game's
   picture is drawn. 27 tests pass.
