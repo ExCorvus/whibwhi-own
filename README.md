@@ -7,41 +7,40 @@ i now it is weird, but because of the ai traps it cannot be measure
 how far the game boots, but what i can say is that if my idea is correct, which was only verified by clankers so far, that as
 soon as the shell stands, there will not be any blocks for playing all of it.
 
-## Why a shell, and what it does
+## What the weave is
 
-The shell is meant for Xbox Series games in general. Its first test case (GTA, Xbox Series build
-1.0.2.1) is one 120 MB program file in the ordinary 64-bit Windows format, made
-for the same kind of processor a PC has. A PC can execute its code directly: nothing has to be emulated and
-nothing recompiled. What stops it from starting on a PC is everything the program expects to find *around*
-itself. This is what was measured, and what the shell does about each:
+whibwhi started as a shell: something wrapped around an unmodified program, answering what the program expects
+from the console it was made for. By its code it still is one. But measuring the program showed that it is not
+wrapped around the executable. It is woven all through it.
 
-1. **System libraries.** The program imports 587 functions from libraries that exist only on the console:
-   memory, graphics, texture layout, file reading, audio, game runtime. The shell provides its own libraries
-   under those names; 586 of the 587 are connected.
-2. **Memory.** At start-up the game reserves two 24 GiB ranges through the console's memory library, one for
-   the processor and one that only the graphics chip reads, plus nine fixed pools. On the console both chips
-   share that memory. A PC graphics card has its own. The shell keeps the game's memory as normal PC memory and
-   shows it to the graphics card whenever a graphics call names an address inside it.
-3. **Graphics calls.** Only three graphics functions are imported; everything else goes through the objects
-   they return. Those objects are the console's variant of Direct3D 12: the methods sit in a different order,
-   some exist only on the console, the game reads and writes fields inside the objects itself, and it names
-   buffers and textures by address in its own memory. The shell hands the game objects in the console's layout,
-   wrapped around a real PC Direct3D 12 device (on Vulkan), and translates each call.
-4. **Shaders.** A shader arrives in a container that looks like a PC one, but the part that should hold portable
-   shader code holds none. In its place is a packed block with the program already compiled into machine code
-   for the console's graphics chip. No PC driver accepts that. The shell unpacks the block in memory, reads
-   every instruction, and writes an equivalent PC shader. The block also says which register carries which
-   resource; the game's own binding description gives only the order and kind, so the shell has to build the
-   PC-side binding for each shader itself.
-5. **Files.** The game reads its packages through the console's storage library, whose objects are laid out
-   differently from the PC's. The shell answers with its own objects in the console layout and reads, read-only,
-   from your game folder.
-6. **Audio.** The game asks for the console's audio processor and has no path for "there is none". A run
-   currently ends there.
+**One fabric, not layers next to each other.** The program, the console libraries it imports, the libraries the
+installation ships beside it, its shaders, and the memory that the processor and the graphics chip both use do not
+sit side by side. They sit inside each other, like the loops of a crochet: every loop holds the loops beside it.
+The program's memory, its hang watchdog, its timing and its frame pacing are one system. Pull the wrong thread,
+answer one call in a way the rest does not expect, and the whole fabric comes apart. Usually that happens
+somewhere else, under a name that points away from the real cause.
 
-So the shell is neither an emulator (no console hardware is recreated) nor a port (the game's code is not
-changed or rebuilt). It is the console's surroundings, rewritten for a PC, with the unmodified game placed
-inside.
+**Where the weave reaches out.** Inside the fabric nothing is meant to be translated into something else. The
+program's x64 code runs as is, the libraries shipped with it load unchanged, and their shaders are handed on as
+they are. (The program's own shaders still go through an older translator; that is open work.) Only the
+weave reaches out of the fabric: to Windows, to the graphics card and to the sound device. That border is the only
+place where the console and the PC meet, and it is the only place this project writes code.
+
+**Be what the program expects.** Every answer the weave gives is measured in the program first: what it calls,
+with which values, and what it does with the answer. When something is missing, the weave provides that thing.
+It never changes the program's own checks so that a failure looks like success, and it never answers "done" for
+work that was not done. A failure stays recorded as a failure until its cause is found.
+
+**Why this matters on a PC.** The console is close to a PC: the same kind of processor, Windows underneath,
+Direct3D 12 for graphics. Most of what the program asks of its console libraries is ordinary Windows and
+Direct3D 12, with a few additions. Where the PC's own libraries refuse something the program gives them (a flag,
+a shader instruction, a memory kind), the fix belongs in the library at the border, so that it takes what the
+program gives. The program is never bent to fit the library. That is why the weave carries its own forks of
+vkd3d-proton and dxil-spirv.
+
+So the weave is neither an emulator (no console hardware is recreated) nor a port (the program's code is not
+changed or rebuilt). It is the console's side of one fabric, made for a PC, with the unmodified program woven into
+it.
 
 The measurements behind each point are in [FINDINGS.md](FINDINGS.md) and [docs/exe-map/](docs/exe-map/).
 
@@ -56,8 +55,9 @@ described are our own.
    frames got brighter. The game still never reached its world, because it was now running on answers that were
    not true.
 2. **It worked from inside the game instead of from outside.** The effort went into the game's own allocation
-   and error paths. But the game's logic is not what is broken on a PC. What is missing is its surroundings (the
-   six points above). Fixing the inside hides that.
+   and error paths. But the game's logic is not what is broken on a PC. What is missing is its surroundings.
+   Fixing the inside hides that. (Corrected later: working from outside was not the answer
+   either. The program and its surroundings are one fabric; see "What the weave is" above.)
 3. **It gave the game's memory to the graphics card piece by piece.** Single regions were imported, copies were
    kept, single addresses were corrected one at a time. The game has no table for that: it expects one memory
    that both chips see. Every piece that was missed became an address the graphics card could not reach, and the
