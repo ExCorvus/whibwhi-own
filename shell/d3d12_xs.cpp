@@ -73,8 +73,8 @@ constexpr int kAllocator = 5;
 constexpr int kVtableSlots = 160;
 
 struct Wrap {
+    void** vt;  // must be first: the COM vtable pointer is the object's first field
     void* pc;  // the PC COM object; the wrapper holds one reference on it
-    void** vt;
     std::atomic<long> refs{1};
     int kind_id;
     const char* kind;
@@ -144,7 +144,7 @@ Wrap* wrap_object(void* pc, int kind_id, const char* kind, int forward_last,
                   const std::map<int, void*>& overrides) {
     using Fn = ULONG(__stdcall*)(void*);
     reinterpret_cast<Fn>(reinterpret_cast<void***>(pc)[0][1])(pc);  // our own reference on the PC object
-    auto* w = new Wrap{pc, nullptr, {}, kind_id, kind};
+    auto* w = new Wrap{nullptr, pc, {}, kind_id, kind};
     w->vt = new void*[kVtableSlots];
     w->vt[0] = reinterpret_cast<void*>(&w_qi);
     w->vt[1] = reinterpret_cast<void*>(&w_addref);
