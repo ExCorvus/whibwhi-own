@@ -6,48 +6,47 @@ A shell that hosts the original GTA VI executable (Xbox Series 1.0.2.1) on a PC 
 The original game files are the source; the runtime here is our own code. You need your own copy of the game — this
 repository contains no game data, keys or executable, and nothing here decrypts or bypasses any protection.
 
+## Status
+
+The shell loads the unmodified game file, connects its imports and starts it. The game gets through part of its
+own start-up and then stops. **Nothing is drawn on screen yet**: graphics, shader translation and audio are not
+built. The exact state is the "Current state" block at the top of [FINDINGS.md](FINDINGS.md).
+
 ## Files
 
 ```
-shell/                       our runtime (C++17, MSVC)
-  image.hpp / image.cpp      PE64 image mapper — parses the original exe and maps it flat
-  imports.hpp / imports.cpp  import table reader — the libraries and functions the image imports
-  loader.hpp / loader.cpp    image loader — places the image in memory, connects its imports, gives it
-                             thread-local storage, sets page protections, registers its exception table;
-                             does not start it
-  thread_block.h / .cpp      whiwhi_tls.dll — the per-thread storage block the loader lends to the image
-  host_libraries.hpp / .cpp  connects an import to the same-named library on the PC, when there is one
-  xmem.h / xmem.cpp          xmem.dll — the console's memory library, answered on a PC: 64 KiB physical
-                             pages, ranges they are mapped into, committed memory
-  console.hpp / console.cpp  where an import of a console image is connected: the shell's own library, or
-                             the PC's
-  hosting.hpp / hosting.cpp  flat hosting model — one GPU backing over the game's flat VA space,
-                             uniform heap_base shift, real pages bound on demand
-  shader_isa.hpp / .cpp      reads a console (RDNA2-class) shader's instruction words
-  shader_translate.hpp/.cpp  on-demand console-shader -> SPIR-V translator, in-memory cache
-  spirv.hpp / spirv.cpp      our own small SPIR-V writer
-  tools/list_imports.cpp     prints an image's imported libraries and function counts
-  tools/describe_image.cpp   prints what an image asks of a loader (sections, relocations, thread-local storage)
-  tools/connect_imports.cpp  loads an image without starting it and reports which imports connect
-  tests/                     unit tests (hosting, image, imports, loader, thread storage, console imports,
-                             memory library, shader translator; no game data)
-  CMakeLists.txt             build definition (whiwhi_shell + whiwhi_tls.dll + xmem.dll + tools + tests, CTest)
-  build.cmd                  build + test helper
+shell/                         the runtime (C++17, MSVC); shell/README.md describes every file
+  image, imports, loader       read the game's executable, place it in memory, connect its imports
+  tls_seat, thread_block.h     thread-local storage for the loaded game
+  host_libraries, console      decide which library answers each import
+  hosting                      address model for showing the game's memory to the GPU
+  shader_isa, shader_translate, spirv
+                               console shader reader, translator to SPIR-V, SPIR-V writer
+  xmem                         xmem.dll - the console's memory library, answered on a PC
+  d3d12_xs                     d3d12_xs.dll - the console's graphics entry points, over a PC D3D12 device
+  xcrdapi                      XCRDAPI.dll - the console's file-read library
+  xgameruntime                 xgameruntime.dll - the game runtime library the game loads at start
+  acp_hal, xapu, chad          AcpHal.dll, xapu.dll, chad.dll - console audio libraries (skeletons)
+  xg_xs, xbox_bvh_builder      xg_xs.dll, XboxBvhBuilder.dll - texture layout and ray-tracing builder (skeletons)
+  tools/                       list_imports, describe_image, connect_imports, boot_image, vkhost_probe
+  tests/                       13 tests, made-up inputs only
+  CMakeLists.txt, build.cmd    build definition and the build-and-test script
 docs/
-  exe-map/MAP.md             outward map of the original exe: memory model, GPU-address channels
-  exe-map/CHANNELS.md        every channel that hands a heap address to the GPU
-  exe-map/GRAPHICS-CALLS.md  what the image asks the console graphics libraries (measured)
-  SHADER-TRANSLATOR.md       the shader translation plan and the first code
-  BUILD-AND-RUN.md           how to build and run the shell on your own machine, no agent needed
-  EARLY-HISTORY.md           note on the early git and the restart
-  RENDERING-PIPELINE.md      rendering-pipeline map (placeholder)
+  BUILD-AND-RUN.md             how to build, test and run the shell yourself
+  exe-map/MAP.md               what the executable does: memory model, page mapper, watchdog
+  exe-map/CHANNELS.md          every way the game hands a memory address to the GPU
+  exe-map/GRAPHICS-CALLS.md    what the executable asks of the console graphics libraries
+  console-libs/                what the executable asks of the audio and file-read libraries
+  SHADER-TRANSLATOR.md         the shader translation plan
+  EARLY-HISTORY.md             the earlier attempt and why the project restarted
+  RENDERING-PIPELINE.md        not written yet
 scripts/
-  check_no_game_data.py      no-game-data gate (run before every push)
-FINDINGS.md                  living findings log
-AGENTS.md                    guide for coding agents
-CONTRIBUTING.md              safety and code conventions
-ATTRIBUTION.md / NOTICE.md   authorship and credit
-LICENSE                      GPLv3-or-later (our own code)
+  check_no_game_data.py        check that refuses game data in files (run before every commit)
+FINDINGS.md                    current state and the dated log of measurements
+AGENTS.md                      rules for agents working on the project
+CONTRIBUTING.md                code and commit conventions
+ATTRIBUTION.md / NOTICE.md     who contributed what; the credit required on reuse
+LICENSE                        GPLv3-or-later
 ```
 
 ## Build
@@ -56,9 +55,8 @@ LICENSE                      GPLv3-or-later (our own code)
 shell\build.cmd
 ```
 
-Builds `whiwhi_shell`, `whiwhi_tls.dll`, `xmem.dll` and the tools, and runs the tests via CTest. No game data or
-GPU needed. To build and run the shell against your own copy of the game by hand, see
-[docs/BUILD-AND-RUN.md](docs/BUILD-AND-RUN.md).
+Builds the shell, the console libraries and the tools, and runs the 13 tests. No game files and no GPU are needed.
+To run the shell against your own copy of the game, see [docs/BUILD-AND-RUN.md](docs/BUILD-AND-RUN.md).
 
 ## License
 
