@@ -9,7 +9,8 @@ soon as the shell stands, there will not be any blocks for playing all of it.
 
 ## Why a shell, and what it does
 
-The Xbox Series build of GTA VI (1.0.2.1) is one 120 MB program file in the ordinary 64-bit Windows format, made
+The shell is meant for Xbox Series games in general. Its first test case (for example GTA VI, Xbox Series build
+1.0.2.1) is one 120 MB program file in the ordinary 64-bit Windows format, made
 for the same kind of processor a PC has. A PC can execute its code directly: nothing has to be emulated and
 nothing recompiled. What stops it from starting on a PC is everything the program expects to find *around*
 itself. This is what was measured, and what the shell does about each:
@@ -152,5 +153,5 @@ To run the shell against your own copy of the game, see [docs/BUILD-AND-RUN.md](
 ## License
 
 Copyright (C) 2026 ExCorvus. Licensed under the GNU General Public License, version 3 or later — see
-[LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). Grand Theft Auto and related names are trademarks of their owners;
+[LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). Game titles and related names are trademarks of their owners;
 this project is not affiliated with or endorsed by them.
