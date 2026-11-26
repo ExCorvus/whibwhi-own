@@ -5010,6 +5010,21 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
 void show_pipeline_request(int index, const char* where, const void* description, std::size_t bytes,
                            const void* caller) {
     const unsigned long long number = ++g_pipeline_requests[index];
+    // Looking through a description asks Windows about every 8-byte place in it; done on every request, from many
+    // worker threads at once, it slowed start-up until the image's watchdog stopped the run (boots b158, b159). So
+    // only the first requests of each kind are looked through, unless the whole census is asked for.
+    static const bool census = [] {
+        char value[4] = {};
+        return GetEnvironmentVariableA("WHIWHI_PIPELINE_CENSUS", value, sizeof value) == 1 && value[0] == '1';
+    }();
+    if (!census && number > 64) {
+        if ((number & (number - 1)) == 0) {
+            logf("%s: pipeline state request #%llu on thread %lu, returns to %p (descriptions are looked through "
+                 "for the first 64 requests only; WHIWHI_PIPELINE_CENSUS=1 looks through all)\n",
+                 where, number, GetCurrentThreadId(), caller);
+        }
+        return;
+    }
     const int found = description ? show_containers_in(where, description, bytes) : 0;
     if (number <= 3 && description) {
         probe_blocks_in(where, description, bytes);
@@ -5525,6 +5540,68 @@ void log_pipeline_prep(const char* when) {
     }
 }
 
+// ---- prepared pipelines built on the thread that asks ------------------------------------------------------
+//
+// The image asks for most pipelines from its worker threads and waits for the answer, as on the console. Each
+// asking thread builds its own prepared pipeline, side by side with the others (rule 7 as revised by ExCorvus on
+// 2026-11-26). Only the shared cache of root signatures is under a lock; the builds themselves are not.
+SRWLOCK g_root_signatures_lock = SRWLOCK_INIT;
+std::map<std::vector<std::uint8_t>, ID3D12RootSignature*> g_root_signatures;  // by serialized blob; keeps a ref
+std::atomic<unsigned long long> g_locked_built{0};
+std::atomic<unsigned long long> g_locked_failed{0};
+
+ID3D12RootSignature* cached_root_signature(ID3D12Device13* device, const std::vector<std::uint8_t>& blob,
+                                           HRESULT& hr) {
+    hr = 0;
+    AcquireSRWLockExclusive(&g_root_signatures_lock);
+    ID3D12RootSignature* signature = nullptr;
+    const auto found = g_root_signatures.find(blob);
+    if (found != g_root_signatures.end()) {
+        signature = found->second;
+    } else {
+        hr = device->CreateRootSignature(0, blob.data(), blob.size(), IID_PPV_ARGS(&signature));
+        if (hr == 0 && signature) {
+            g_root_signatures[blob] = signature;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_root_signatures_lock);
+    return signature;
+}
+
+HRESULT build_locked(const char* where, const PreparedPipeline& prep, void** out) {
+    ID3D12Device13* device = g_device ? pc_device13(g_device) : nullptr;
+    if (!device) {
+        return pipeline_not_taken(where, "the PC device does not have the interface needed");
+    }
+    std::vector<std::uint8_t> stream = prep.stream;
+    ID3D12PipelineState* state = nullptr;
+    HRESULT hr = 0;
+    ID3D12RootSignature* signature = cached_root_signature(device, prep.root_blob, hr);
+    if (hr == 0 && signature) {
+        void* pointer = signature;
+        std::memcpy(stream.data() + prep.root_pointer_at, &pointer, 8);
+        const D3D12_PIPELINE_STATE_STREAM_DESC desc = {stream.size(), stream.data()};
+        hr = device->CreatePipelineState(&desc, IID_PPV_ARGS(&state));
+    }
+    if (hr == 0 && state) {
+        ++g_locked_built;
+    } else {
+        ++g_locked_failed;
+        if (hr == 0) {
+            hr = 0x80004005L;
+        }
+    }
+    return pipeline_result(where, hr, state, out, prep.what);
+}
+
+void log_locked_builds(const char* when) {
+    if (g_locked_built.load() || g_locked_failed.load()) {
+        logf("pipeline builds on the asking threads, side by side (%s): %llu built, %llu failed, %zu root "
+             "signature(s)\n",
+             when, g_locked_built.load(), g_locked_failed.load(), g_root_signatures.size());
+    }
+}
+
 // Slot 86: ({stream size, stream}, identifier, out) - the public "pipeline state from a stream" argument list.
 HRESULT __stdcall w_device_slot86(Wrap* self, const void* desc, const GUID*, void** out, void*, void*, void*, void*,
                                   void*) {
@@ -5544,7 +5621,11 @@ HRESULT __stdcall w_device_slot86(Wrap* self, const void* desc, const GUID*, voi
                                          "multiple of eight below 64 KiB");
     }
     compare_stream_binding(stream, static_cast<std::size_t>(size));
-    note_pipeline_prep(prepare_stream_pipeline(stream, static_cast<std::size_t>(size)));
+    const PreparedPipeline prep = prepare_stream_pipeline(stream, static_cast<std::size_t>(size));
+    note_pipeline_prep(prep);
+    if (prep.ok && prep.root_pointer_present) {
+        return build_locked(where, prep, out);
+    }
     if (!on_device_thread()) {
         return pipeline_other_thread(where);
     }
@@ -9053,6 +9134,7 @@ unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
     log_address_outcomes();
     log_sampler_places();
     log_pipeline_prep("whole run");
+    log_locked_builds("whole run");
     log_slot70("whole run");
     log_memory_textures("whole run");
     log_mapped_textures("whole run");
