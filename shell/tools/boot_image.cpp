@@ -43,6 +43,18 @@ namespace {
 std::mutex g_log;
 LoadedImage* g_loaded = nullptr;
 
+// What a run leaves behind for the log: every network call that was refused, and which bytes of the graphics
+// objects the game wrote into.
+void end_of_run_report() {
+    offline_report();
+    if (const HMODULE graphics = GetModuleHandleA("d3d12_xs.dll")) {
+        if (const auto report = reinterpret_cast<unsigned long long(__stdcall*)(void)>(
+                GetProcAddress(graphics, "whiwhi_d3d12_report_image_writes"))) {
+            report();
+        }
+    }
+}
+
 std::uintptr_t on_unprovided(const UnprovidedImport& which) {
     std::lock_guard<std::mutex> lock(g_log);
     if (which.by_ordinal) {
@@ -187,7 +199,7 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
         const auto key = std::make_pair(code, rip);
         std::lock_guard<std::mutex> lock2(g_log);
         if (!seen_bp.insert(key).second) {
-            offline_report();
+            end_of_run_report();
             TerminateProcess(GetCurrentProcess(), 5);
         }
     }
@@ -319,7 +331,7 @@ int main(int argc, char** argv) {
     AddVectoredExceptionHandler(1, &on_exception);
     // When nothing handles an exception the process ends; say first what the network boundary refused.
     SetUnhandledExceptionFilter([](EXCEPTION_POINTERS*) -> LONG {
-        offline_report();
+        end_of_run_report();
         return EXCEPTION_CONTINUE_SEARCH;
     });
     set_unprovided_handler(&on_unprovided);
@@ -419,7 +431,7 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lock(g_log);
             std::fprintf(stderr, "[boot] still running after %us - the image is alive; ending the boot\n", seconds);
             std::fflush(stderr);
-            offline_report();
+            end_of_run_report();
             TerminateProcess(GetCurrentProcess(), 0);
         }
         DWORD code = 0;
@@ -427,7 +439,7 @@ int main(int argc, char** argv) {
         CloseHandle(thread);
         std::fprintf(stderr, "[boot] entry thread finished with code %lu\n", code);
         std::fflush(stderr);
-        offline_report();
+        end_of_run_report();
     }
 
     if (const HMODULE memory = GetModuleHandleA("xmem.dll")) {
