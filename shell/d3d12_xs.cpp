@@ -9,6 +9,8 @@
 //   device slot 9    CreateCommandAllocator  real PC allocator, itself wrapped (the console allocator has its
 //                                            own method on slot 9 of the allocator, answered as not provided)
 //   device slot 14   CreateDescriptorHeap  real PC descriptor heap, itself wrapped
+//   structure-returning methods (device 25, 26, 43; descriptor heap 8, 9, 10; queue 18): forwarded with the
+//                                          first two arguments swapped, see struct_return_thunk
 //   device slot 74   pool registration     success - on a PC the pool is host memory; the shell shows pages to
 //                                          the GPU when graphics calls name them
 //   queue  slot 31   CopyPageMappingsBatchX  success, logged - the GPU view is filled by the shell later
@@ -96,6 +98,16 @@ HRESULT __stdcall stub_thunk(Wrap* self, void*, void*, void*, void*, void*, void
     return 0x80004001L;  // E_NOTIMPL
 }
 
+// Methods that return a structure. The image passes the place for the structure first and the object second
+// (measured at its three calls of device slot 26: rcx = a local block, rdx = the device, then the arguments);
+// a PC object takes the object first and the place second. The other structure-returning slots below are
+// given the same order by inference from that one measurement.
+template <int I>
+void* __stdcall struct_return_thunk(void* result, Wrap* self, void* a2, void* a3, void* a4, void* a5) {
+    using Fn = void*(__stdcall*)(void*, void*, void*, void*, void*, void*);
+    return reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][I])(self->pc, result, a2, a3, a4, a5);
+}
+
 HRESULT __stdcall w_qi(Wrap* self, void* riid, void** pp) {
     if (!riid || !pp) {
         return 0x80004003L;  // E_POINTER
@@ -168,9 +180,11 @@ HRESULT __stdcall w_device_slot8(Wrap* self, void* desc, void* riid, void** pp, 
         hr = reinterpret_cast<Fn>(pc_vt[8])(self->pc, desc, static_cast<void*>(const_cast<GUID*>(&__uuidof(ID3D12CommandQueue))), pp);
     }
     if (hr == 0 && pp && *pp) {
-        *pp = wrap_object(*pp, kQueue, "queue", 16, {{30, reinterpret_cast<void*>(&w_presentx)},
-                                                      {31, reinterpret_cast<void*>(&w_queue_slot31)},
-                                                      {32, reinterpret_cast<void*>(&w_presentx)}});
+        *pp = wrap_object(*pp, kQueue, "queue", 18,
+                          {{18, reinterpret_cast<void*>(&struct_return_thunk<18>)},  // GetDesc
+                           {30, reinterpret_cast<void*>(&w_presentx)},
+                           {31, reinterpret_cast<void*>(&w_queue_slot31)},
+                           {32, reinterpret_cast<void*>(&w_presentx)}});
         logf("device slot 8 CreateCommandQueue: PC queue created and wrapped\n");
     } else {
         logf("device slot 8 CreateCommandQueue failed 0x%lx\n", static_cast<unsigned long>(hr));
@@ -200,7 +214,10 @@ HRESULT __stdcall w_device_slot14(Wrap* self, void* desc, void* riid, void** pp,
     void** pc_vt = reinterpret_cast<void***>(self->pc)[0];
     HRESULT hr = reinterpret_cast<Fn>(pc_vt[14])(self->pc, desc, riid, pp);
     if (hr == 0 && pp && *pp) {
-        *pp = wrap_object(*pp, kHeap, "descriptor heap", 9, {});
+        *pp = wrap_object(*pp, kHeap, "descriptor heap", 10,
+                          {{8, reinterpret_cast<void*>(&struct_return_thunk<8>)},     // GetDesc
+                           {9, reinterpret_cast<void*>(&struct_return_thunk<9>)},     // CPU handle of the start
+                           {10, reinterpret_cast<void*>(&struct_return_thunk<10>)}}); // GPU handle of the start
         logf("device slot 14 CreateDescriptorHeap: PC heap created and wrapped\n");
     } else if (hr != 0) {
         logf("device slot 14 CreateDescriptorHeap failed 0x%lx\n", static_cast<unsigned long>(hr));
@@ -266,6 +283,11 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
                 dir.resize(slash + 1);
             }
             const std::string vk = dir + "d3d12_vk.dll";
+            // Translated shaders stay in memory: vkd3d's on-disk shader cache is turned off unless the user
+            // has set the variable themselves.
+            if (GetEnvironmentVariableA("VKD3D_SHADER_CACHE_PATH", nullptr, 0) == 0) {
+                SetEnvironmentVariableA("VKD3D_SHADER_CACHE_PATH", "0");
+            }
             d3d12 = LoadLibraryExA(vk.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
             if (d3d12) {
                 logf("using the vkd3d-built d3d12.dll at %s (D3D12 on Vulkan)\n", vk.c_str());
@@ -298,6 +320,9 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
                           {{8, reinterpret_cast<void*>(&w_device_slot8)},
                            {9, reinterpret_cast<void*>(&w_device_slot9)},
                            {14, reinterpret_cast<void*>(&w_device_slot14)},
+                           {25, reinterpret_cast<void*>(&struct_return_thunk<25>)},  // GetResourceAllocationInfo
+                           {26, reinterpret_cast<void*>(&struct_return_thunk<26>)},  // GetCustomHeapProperties
+                           {43, reinterpret_cast<void*>(&struct_return_thunk<43>)},  // GetAdapterLuid
                            {74, reinterpret_cast<void*>(&w_device_slot74)}});
     logf("D3D12XboxCreateDevice: PC device created, wrapper returned\n");
     return 0;
