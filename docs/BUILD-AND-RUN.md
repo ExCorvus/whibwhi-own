@@ -87,6 +87,29 @@ Environment variables read by the tools and libraries:
 - `WHIWHI_WATCH=<address inside the image, hex>` — stop when one byte at that address is written (diagnostics).
 - `WHIWHI_XMEM_TRACE=1` — log every call to the memory library.
 
+## A local alpha folder (shell and your game copy together)
+
+`scripts\make_alpha.ps1` puts an optimized build of the shell and a full copy of your own game folder side by
+side in one folder on your machine, with a start script:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\make_alpha.ps1 -Game "C:\XboxGames\GTA6.Xbox.v1.0.2.1" -Target C:\whiwhi-alpha
+powershell -ExecutionPolicy Bypass -File C:\whiwhi-alpha\run.ps1 -Seconds 300
+```
+
+- `C:\whiwhi-alpha\shell` — the shell built with full optimization (no tests), plus `d3d12_vk.dll`,
+  `d3d12core.dll` and `opus.dll` if you built them (sections below).
+- `C:\whiwhi-alpha\game` — the copy of your game folder (about 209 GB for 1.0.2.1). Your original install is
+  only read; the copy is what the shell runs, and inside the shell it is read-only like any game folder.
+- `C:\whiwhi-alpha\logs` — one log per run, and beside it a short `proof-<time>.txt`: the SHA-256 of the game
+  executable before and after the run (compare it with your own copy to see it is the same, unmodified game),
+  the shell commit it was built from, how long the game ran and how the run ended, the pipelines built, the last
+  presented frame, and the calls the shell does not provide yet. The proof file contains nothing of the game.
+
+Put the folder on your fastest drive; the game reads its archives from the copy. The copy is yours and stays on
+your machine: never add it, or anything from it, to this repository. `-SkipGameCopy` rebuilds and refreshes the
+shell without copying the game again.
+
 ## Using vkd3d (D3D12 on Vulkan) underneath
 
 The shell prefers a vkd3d-built `d3d12.dll` (renamed `d3d12_vk.dll`) placed beside `boot_image.exe`, with its
