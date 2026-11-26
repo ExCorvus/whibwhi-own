@@ -138,9 +138,9 @@ console table is its own, and each slot has to be matched by its shape, not by i
 | 48 | 16-byte queue description, queue identifier, out | 48 OpenExistingHeapFromAddress | 8 CreateCommandQueue (**I**) |
 | 49 | (0x11f, 1), called only when a system version the game reads (fn 0x55dea0c) is at least 10.0.26100.9628 (the constant 0x000a000065f4259c at 0x2478667, compared at 0x2478677; it also sets byte image+0x765a6d9 = 1; where fn 0x55dea0c takes the version from is not read yet) | 49 OpenExistingHeapFromFileMapping | none found |
 | 55 | stored pipeline, count, list of 0x14c-byte records, pipeline identifier, out | 55 CreateReservedResource1 | none (console-only: a variant of a stored pipeline) |
-| 57 | record (first word a pointer), pipeline identifier, out | 57 CreateLifetimeTracker | not read yet |
+| 57 | (device, record, pipeline identifier, out) at 0x2477578 in fn 0x24774c0: the record is +0x40 of a request, its first word a pointer taken from +0x20 of the job; a loop over requests; its pipelines are the stored ones slot 55 makes variants of | 57 CreateLifetimeTracker | 10 CreateGraphicsPipelineState (**I**, three arguments and a pointer first, like its root-signature field; the rest of the record not read yet) |
 | 61 | one call in the shader system | 61 CreateMetaCommand | not read yet |
-| 62 | description {pointer at +0, count 1 at +0x18}, identifier, out | 62 CreateStateObject | not read yet |
+| 62 | (device, description, 0, 0, pipeline identifier, out) at 0x247fe66 in fn 0x247fd30: the description is 0x38 bytes, zeroed, with the request's pointer (+0x118 of the request) at +0 and 1 at +0x18; called only when the game's store (fn 0x2480050) has no pipeline | 62 CreateStateObject | 11 CreateComputePipelineState (**I**): its public description is also 0x38 bytes with the node mask at +0x18, but the console call has two more arguments (both 0) and leaves the shader field (+8, +0x10) empty |
 | 67 | stream description, called on a cache miss | 67 CreateProtectedResourceSession1 | 47 CreatePipelineState (**I**) |
 | 70 | view from raw descriptor words (6 callers) | 70 CreatePlacedResource1 | not read yet |
 | 71 | second view path | 71 CreateSamplerFeedbackUnorderedAccessView | not read yet |
