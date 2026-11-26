@@ -34,21 +34,27 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   from the game's memory into a PC texture yet, so no texture with starting data can be sampled.
 - **Network:** every imported function that could open a socket, resolve a name or make an HTTP request is
   connected to a refusal (docs/console-libs/network.md). No run so far has called one.
-- **Shaders (measured, boots b81-b99):** every pipeline request names shader containers with the public
+- **Shaders (measured, boots b81-b108):** every pipeline request names shader containers with the public
   container's parts. The part that would hold portable shader code holds none (its code field is the four
   letters "NOBC"), so the PC device cannot take the game's shaders as they are. What the part does hold is the
   console's compiled program, zlib-packed: the shell unpacks it in memory, finds the program inside and reads
-  every instruction of it - in all 581 distinct containers of a run (567 pixel, 8 compute, 6 vertex shaders).
+  every instruction of it - in 927 of the first 1,024 different containers of a run (all 505 pixel and all 227
+  vertex shaders, 195 of 292 compute shaders; the other 97 compute modules are laid out in a way the reader
+  refuses: more than one end of program, or words of no public instruction format). Earlier entries say "581
+  distinct containers": those were told apart by address, and the game's worker threads reuse addresses, so
+  far fewer containers were looked at than were named. The count now tells containers apart by their bytes.
   The same kind of program is also handed over ready-made in the descriptions of device slots 57 (graphics)
   and 67 (compute); of 1,329 distinct ones in a run the shell reads 1,302 from the first word exactly to the
   end word and decodes every one of those (27 contain words of no public instruction format).
-  The packed block also says how each resource reaches the program (which register carries which table, and
-  where in the table each descriptor lies); the shell reads that for all 581 and it agrees with what the
-  programs do and with what the containers declare.
+  The packed block also says how each resource reaches the program (which register carries which root
+  parameter, and where in a table each descriptor lies); the shell reads that for all 926 modules whose
+  program and tables it reads, and it agrees with what the containers declare. The root signature the game
+  names in a request gives only the order and kind of the parameters: one root signature is named for many
+  shaders (16 layouts for 926 pairs), so what a table holds has to be taken from each shader's own module.
   A translator from that hardware code is the way to a picture. None is built: the shell can read the
   programs and say what each expects and uses, nothing more. Nearly every request comes from the game's worker
   threads (tens of thousands in the first seconds); three come from the thread that created the device.
-  Details: docs/SHADER-TRANSLATOR.md sections 13, 15 and 16, docs/exe-map/SHADER-PATH.md sections 10 and 11.
+  Details: docs/SHADER-TRANSLATOR.md sections 13, 15 and 16, docs/exe-map/SHADER-PATH.md sections 10 to 12.
 - **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
   slots 57, 62, 67 and 86; each request is read and counted, and none can be made (the shader translator
   handles only straight-line compute test shaders), so every draw is held. The
@@ -1058,3 +1064,63 @@ tables of the module, control flow and the back end are all open.
 - Nothing of this is used to draw yet. It is what a translator needs to turn a program's loads from registers
   into the PC shader's declared resources.
 - The game folder was unchanged after every run. 21 tests pass.
+
+## 2026-11-26 - what a program's registers hold when it starts; the root signature gives the order, the module the contents (boots b100-b108; measured)
+
+A correction first. The counts of boots b89-b99 told shader containers apart by their address. The game's worker
+threads keep each container at an address that is used again for the next shader (the addresses lie 1 MiB apart,
+one per thread), so "581 distinct containers" were 581 addresses and most containers named in a run were never
+looked at. From boot b105 on a container is told apart by its bytes. The statements of the earlier entries hold
+for the containers that were looked at; the numbers below replace their totals.
+
+Everything below is counted over the first 1,024 different containers of a run (boot b108: 505 pixel, 292
+compute, 227 vertex shaders) and the 1,023 different pairs of a root signature and a container that the game's
+pipeline requests named together. Numbers only; no byte of a shader is in the log.
+
+- **Reading the programs.** All 1,024 containers unpack to a module. The reader finds the program in 927: all
+  505 pixel, all 227 vertex, 195 of 292 compute modules, and decodes every instruction of all 927. The other 97
+  compute modules are refused: in 73 the code holds something other than filler after the first end-of-program
+  word (83 compute blocks hold two to five such words), in 24 the walk meets a word of no public instruction
+  format. What those modules hold has not been read.
+- **A program begins with an identification.** All 927 begin with exactly two no-operation instructions that
+  each carry a constant word, and nowhere else is that instruction used. The two words are the third and fifth
+  words of the container's 'HASH' part in all 927. (This explains the many no-operations in the instruction
+  count of boots b86-b87, and the scattered vector registers the shape pass used to report as inputs: they were
+  the no-operations' operand fields. The shape pass now treats a no-operation as reading nothing.)
+- **Which registers carry the root parameters** (926 pairs compared: 505 pixel, 227 vertex, 194 compute).
+  In every pair, every root parameter of the root signature has entries in the module's first table, and no
+  entry sits at a register that starts no parameter, when the parameters are given scalar registers in their
+  order from s8 (s4 in a compute program): one register for a descriptor table, one for each constant of a run
+  of constants, two for a buffer address. The second byte of an entry's last word is the parameter's number.
+- **The heaps.** When the root signature says that shaders index the sampler heap directly, the first table has
+  one sampler entry at the register right after the last parameter's (704 pixel and vertex pairs, 7 compute
+  pairs). When it says the same of the resource heap, the first table has one entry of the kind earlier written
+  down as "kind 5" there (61 compute, 3 pixel, 3 vertex pairs); with both, the resource heap comes first. No
+  pair has the one without the other. So kind 5 is the resource descriptor heap, indexed by the program itself.
+- **The root signature does not say what is in a table.** The 926 pairs name 16 different root signature
+  layouts; 10 of them were named with more than one first table, one with 98 different ones. In most pairs the
+  module's first table names shader registers the root signature's table ranges do not have (only 17 pixel, 8
+  vertex and 11 compute pairs agree entry for entry), the static samplers often differ in number, and in 30
+  compute pairs the constants have another shader register. Read side by side, the game names one root signature
+  for every shader of the same shape (for example: one table, two constants, sampler heap indexed directly).
+  What a shader's table holds - which shader register at which place - is in that shader's own first table.
+  Consequence for binding on the PC (not built): a PC pipeline needs a root signature whose table ranges cover
+  what its shaders read, so the shell has to build one for each pipeline from the modules' tables, keeping the
+  game's parameter order, and cannot pass the game's root signature object through.
+- **Registers after the parameters.** Of the 500 pixel programs that interpolate, 489 move the register right
+  after the last one the first table names into the register the interpolation instructions read (11 move
+  another register; 5 programs do not interpolate). 226 of 227 vertex programs call through the address in s4
+  within two instructions of their start (s4 is named by no entry; what is at that address has not been read -
+  after the call the vertex inputs are in vector registers). Compute programs read one, two or three of the
+  registers right after the last one named (84, 74 and 24 programs; 12 read none): what those hold is not
+  established (the first modules read suggested the work group's numbers).
+- **Static samplers.** A module with fixed-sampler entries does not load those samplers: in all 12 such pixel
+  programs and in 44 of 79 such compute programs every sampling instruction's four sampler registers were last
+  written by moves of constants (the sampler's state as four hardware words in the program itself). In 20
+  compute programs only some are, in 15 none: how those reach their samplers has not been read.
+- Not established: the class of a first-table entry that no shader of the pipeline declares (the first table
+  has no class; the second table and the container's declarations have one, for declared resources only).
+
+Code: shell/d3d12_xs.cpp (the counts, and a root signature's ranges, static samplers and flags are now read),
+shell/shader_shape.* (a no-operation reads nothing), shell/shader_program.* (kind 5 is understood; the header
+states the rule). Write-up: docs/exe-map/SHADER-PATH.md section 12.
