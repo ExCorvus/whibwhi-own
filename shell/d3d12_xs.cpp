@@ -34,8 +34,12 @@
 // d3d12.h declares D3D12SerializeVersionedRootSignature with C++ linkage; rename it out of the way so this
 // library can export the plain name for the image's import.
 #define D3D12SerializeVersionedRootSignature d3d12_pc_declared_serialize
+#define D3D12CreateRootSignatureDeserializer d3d12_pc_declared_deserializer
 #include <d3d12.h>
 #undef D3D12SerializeVersionedRootSignature
+#undef D3D12CreateRootSignatureDeserializer
+
+#include <intrin.h>
 
 #include <atomic>
 #include <string>
@@ -43,6 +47,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <unordered_set>
@@ -66,15 +71,18 @@ void logf(const char* format, ...) {
     std::fflush(stderr);
 }
 
-void log_slot(const char* kind, int kind_id, int slot) {
+// The first call of a method that is not provided yet says where it was called from (the address the call
+// returns to) and what it was given, so the call can be read in the image.
+void log_slot(const char* kind, int kind_id, int slot, const void* caller, void* const* arguments) {
     std::lock_guard<std::mutex> lock(g_log);
     const unsigned long long key = (static_cast<unsigned long long>(kind_id) << 32) |
                                     static_cast<unsigned>(slot);
     if (g_seen.insert(key).second) {
         std::fprintf(stderr,
                      "[d3d12_xs] %s: method slot %d (offset 0x%x) called - not provided yet, answered not "
-                     "implemented\n",
-                     kind, slot, slot * 8);
+                     "implemented (returns to %p; arguments %p %p %p %p %p %p)\n",
+                     kind, slot, slot * 8, caller, arguments[0], arguments[1], arguments[2], arguments[3],
+                     arguments[4], arguments[5]);
         std::fflush(stderr);
     }
 }
@@ -100,7 +108,15 @@ struct Wrap {
     std::atomic<long> refs{1};
     int kind_id;
     const char* kind;
-    unsigned long long title_address = 0;  // for a resource the image placed at an address of its own: that address
+    // For a resource the image placed at an address of its own: that address. For a descriptor heap: the address
+    // the image sees as the heap's start (see "descriptor heaps" below), and the bytes that belong to it.
+    unsigned long long title_address = 0;
+    unsigned long long title_bytes = 0;
+    // For a surface that can be displayed: the block asked of XMemAlloc on its behalf (see device slot 127), given
+    // back with XMemFree and the same attributes when the surface goes.
+    unsigned long long requested_block = 0;
+    unsigned long long requested_bytes = 0;
+    unsigned long long requested_attributes = 0;
 };
 
 // Every live wrapper, so that a wrapper the image passes back as an argument can be recognised. The PC library
@@ -158,8 +174,9 @@ HRESULT __stdcall forward_thunk(Wrap* self, void* a1, void* a2, void* a3, void* 
 }
 
 template <int I>
-HRESULT __stdcall stub_thunk(Wrap* self, void*, void*, void*, void*, void*, void*, void*, void*) {
-    log_slot(self->kind, self->kind_id, I);
+HRESULT __stdcall stub_thunk(Wrap* self, void* a1, void* a2, void* a3, void* a4, void* a5, void* a6, void*, void*) {
+    void* const arguments[6] = {a1, a2, a3, a4, a5, a6};
+    log_slot(self->kind, self->kind_id, I, _ReturnAddress(), arguments);
     return 0x80004001L;  // E_NOTIMPL
 }
 
@@ -217,7 +234,9 @@ HRESULT __stdcall w_qi(Wrap* self, const GUID* riid, void** pp) {
     *pp = nullptr;
     void* pc_interface = nullptr;
     using Fn = HRESULT(__stdcall*)(void*, const GUID*, void**);
-    const HRESULT hr = reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][0])(self->pc, riid, &pc_interface);
+    const HRESULT hr = self->pc ? reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][0])(self->pc, riid,
+                                                                                                 &pc_interface)
+                                : static_cast<HRESULT>(0x80004002L);
     if (hr != 0 || !pc_interface) {
         logf("%s: asked for interface {%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}, which the PC object "
              "does not have; refused\n",
@@ -236,12 +255,26 @@ ULONG __stdcall w_addref(Wrap* self) {
     return static_cast<ULONG>(self->refs.fetch_add(1) + 1);
 }
 
+void forget_descriptor_heap(Wrap* heap);
+void give_back_requested_block(Wrap* surface);
+void forget_console_signature(const Wrap* signature);
+
 ULONG __stdcall w_release(Wrap* self) {
     const long r = self->refs.fetch_sub(1) - 1;
     if (r == 0) {
         unregister_wrap(self);
-        using Fn = ULONG(__stdcall*)(void*);
-        reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][2])(self->pc);
+        if (self->kind_id == kHeap) {
+            forget_descriptor_heap(self);
+        }
+        if (self->requested_block) {
+            give_back_requested_block(self);
+        }
+        if (self->pc) {
+            using Fn = ULONG(__stdcall*)(void*);
+            reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][2])(self->pc);
+        } else {
+            forget_console_signature(self);  // the one kind of object with no PC object behind it
+        }
         delete[] self->vt;
         delete self;
     }
@@ -264,6 +297,7 @@ void fill_vtable(void** vt, int forward_last, const std::map<int, void*>& overri
 Wrap* wrap_object(void* pc, int kind_id, const char* kind, int forward_last,
                   const std::map<int, void*>& overrides) {
     auto* w = new Wrap{nullptr, pc, {}, kind_id, kind};
+    w->refs.store(1);  // the reference handed to whoever asked for the object
     w->vt = new void*[kVtableSlots];
     w->vt[0] = reinterpret_cast<void*>(&w_qi);
     w->vt[1] = reinterpret_cast<void*>(&w_addref);
@@ -370,6 +404,311 @@ HRESULT __stdcall w_get_device(Wrap*, const GUID*, void** out, void*, void*, voi
     return 0;
 }
 
+// ---- descriptor heaps ---------------------------------------------------------------------------------------
+//
+// Measured in the image (function at +0x1cf3280): when it creates a descriptor heap it may first choose an
+// address in its own memory, and after the creating call it compares the heap's start with that address and
+// stops if they differ. The image hands that address over through its own allocation routines: for the length
+// of the creating call it registers a routine that answers one request - the heap's size, with 4 in the low 14
+// bits of the attributes, in allocator class 0x80 (bits 16 to 23) - with the chosen address. So on the console
+// the graphics library gets a descriptor heap's memory from the memory library, and the image's routines decide
+// where it is. That the console library asks exactly this way is inferred from the image's side of it; the
+// attributes below are the smallest value the image's routine accepts.
+//
+// So: the PC heap is created as usual, and the address the image sees as the heap's start comes from
+// xmem.dll's XMemAlloc (the image's choice, or plain memory when it made none). Descriptor handles the image
+// then passes are addresses in that range; they are moved to the same position in the PC heap before the PC
+// library sees them. A handle outside every such range is passed on unchanged.
+//
+// Not established: whether the image also writes descriptor records into that memory itself. Nothing reads
+// that memory here.
+constexpr unsigned long long kDescriptorHeapAttributes = 0x00800004ull;
+
+struct HeapRange {
+    Wrap* wrap;
+    unsigned long long title;   // start as the image sees it
+    unsigned long long bytes;
+    unsigned long long pc_cpu;  // the PC heap's own start handles
+    unsigned long long pc_gpu;  // 0 when the heap is not visible to shaders
+};
+SRWLOCK g_heaps_lock = SRWLOCK_INIT;
+std::vector<HeapRange> g_heaps;
+
+void* xmem_function(const char* name) {
+    const HMODULE xmem = GetModuleHandleA("xmem.dll");
+    return xmem ? reinterpret_cast<void*>(GetProcAddress(xmem, name)) : nullptr;
+}
+
+void forget_descriptor_heap(Wrap* heap) {
+    AcquireSRWLockExclusive(&g_heaps_lock);
+    for (std::size_t i = 0; i < g_heaps.size(); ++i) {
+        if (g_heaps[i].wrap == heap) {
+            g_heaps.erase(g_heaps.begin() + static_cast<std::ptrdiff_t>(i));
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_heaps_lock);
+    if (heap->title_address) {
+        if (const auto release = reinterpret_cast<void (*)(void*, unsigned long long)>(xmem_function("XMemFree"))) {
+            release(reinterpret_cast<void*>(heap->title_address), kDescriptorHeapAttributes);
+        }
+        heap->title_address = 0;
+    }
+}
+
+void give_back_requested_block(Wrap* surface) {
+    if (const auto release = reinterpret_cast<void (*)(void*, unsigned long long)>(xmem_function("XMemFree"))) {
+        release(reinterpret_cast<void*>(surface->requested_block), surface->requested_attributes);
+    }
+    surface->requested_block = 0;
+    surface->requested_bytes = 0;
+}
+
+// A handle as the image has it -> the PC heap's handle at the same position.
+unsigned long long handle_to_pc(unsigned long long handle, bool gpu) {
+    unsigned long long result = handle;
+    AcquireSRWLockShared(&g_heaps_lock);
+    for (const HeapRange& r : g_heaps) {
+        if (r.title && handle >= r.title && handle < r.title + r.bytes) {
+            result = (gpu ? r.pc_gpu : r.pc_cpu) + (handle - r.title);
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_heaps_lock);
+    return result;
+}
+
+bool heap_range_of(const Wrap* heap, HeapRange& out) {
+    bool found = false;
+    AcquireSRWLockShared(&g_heaps_lock);
+    for (const HeapRange& r : g_heaps) {
+        if (r.wrap == heap) {
+            out = r;
+            found = true;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_heaps_lock);
+    return found;
+}
+
+// Descriptor heap slots 9 and 10: the start handles. The CPU start is the address the image sees; the GPU start
+// is the PC heap's own. Both argument orders are answered (see struct_return_thunk); the image was measured
+// calling slot 9 with the object first.
+template <int Gpu>
+unsigned long long* __stdcall w_heap_start(void* a1, void* a2) {
+    Wrap* self = nullptr;
+    unsigned long long* place = nullptr;
+    if (is_wrap(a1)) {
+        self = static_cast<Wrap*>(a1);
+    } else if (is_wrap(a2)) {
+        self = static_cast<Wrap*>(a2);
+        place = static_cast<unsigned long long*>(a1);
+    } else {
+        return nullptr;
+    }
+    HeapRange r{};
+    unsigned long long value = 0;
+    if (heap_range_of(self, r)) {
+        value = Gpu ? r.pc_gpu : (r.title ? r.title : r.pc_cpu);
+    }
+    if (place) {
+        *place = value;
+        return place;
+    }
+    return reinterpret_cast<unsigned long long*>(value);  // a structure of 8 bytes comes back in the register
+}
+
+// Device methods that take descriptor handles by value (one 8-byte value each). First and Second are the
+// positions of the handle arguments after the object (Second 0 = none).
+template <int Slot, int First, int Second>
+void __stdcall cpu_handle_thunk(Wrap* self, void* a1, void* a2, void* a3, void* a4, void* a5, void* a6) {
+    void* a[7] = {nullptr, to_pc(a1), to_pc(a2), to_pc(a3), to_pc(a4), to_pc(a5), to_pc(a6)};
+    a[First] = reinterpret_cast<void*>(handle_to_pc(reinterpret_cast<unsigned long long>(a[First]), false));
+    if (Second) {
+        a[Second] = reinterpret_cast<void*>(handle_to_pc(reinterpret_cast<unsigned long long>(a[Second]), false));
+    }
+    using Fn = void(__stdcall*)(void*, void*, void*, void*, void*, void*, void*);
+    reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][Slot])(self->pc, a[1], a[2], a[3], a[4], a[5], a[6]);
+}
+
+// Device slot 23, CopyDescriptors: the handles arrive in two arrays.
+void __stdcall w_device_copy_descriptors(Wrap* self, unsigned int dest_count, const unsigned long long* dest_starts,
+                                         const unsigned int* dest_sizes, unsigned int source_count,
+                                         const unsigned long long* source_starts, const unsigned int* source_sizes,
+                                         unsigned int type) {
+    std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> dest(dest_starts ? dest_count : 0), source(source_starts ? source_count : 0);
+    for (std::size_t i = 0; i < dest.size(); ++i) {
+        dest[i].ptr = static_cast<SIZE_T>(handle_to_pc(dest_starts[i], false));
+    }
+    for (std::size_t i = 0; i < source.size(); ++i) {
+        source[i].ptr = static_cast<SIZE_T>(handle_to_pc(source_starts[i], false));
+    }
+    static_cast<ID3D12Device*>(self->pc)->CopyDescriptors(dest_count, dest_starts ? dest.data() : nullptr, dest_sizes,
+                                                          source_count, source_starts ? source.data() : nullptr,
+                                                          source_sizes, static_cast<D3D12_DESCRIPTOR_HEAP_TYPE>(type));
+}
+
+// The five functions below are written for public list methods whose slot on the console's list is not measured
+// yet; they are not installed (see wrap_kind). Slot is the PC list's slot the call goes to.
+//
+// Set{Compute,Graphics}RootDescriptorTable(index, GPU handle): PC slots 31 and 32.
+template <int Slot>
+void __stdcall w_list_root_table(Wrap* self, unsigned int index, unsigned long long handle) {
+    using Fn = void(__stdcall*)(void*, unsigned int, unsigned long long);
+    reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][Slot])(self->pc, index, handle_to_pc(handle, true));
+}
+
+// OMSetRenderTargets(count, handles, one range?, depth handle).
+void __stdcall w_list_set_render_targets(Wrap* self, unsigned int count, const unsigned long long* targets,
+                                         int single_range, const unsigned long long* depth) {
+    std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> pc_targets;
+    if (targets) {
+        pc_targets.resize(single_range ? (count ? 1u : 0u) : count);
+        for (std::size_t i = 0; i < pc_targets.size(); ++i) {
+            pc_targets[i].ptr = static_cast<SIZE_T>(handle_to_pc(targets[i], false));
+        }
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE pc_depth{};
+    if (depth) {
+        pc_depth.ptr = static_cast<SIZE_T>(handle_to_pc(*depth, false));
+    }
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)->OMSetRenderTargets(
+        count, targets ? pc_targets.data() : nullptr, single_range, depth ? &pc_depth : nullptr);
+}
+
+// ClearDepthStencilView(handle, flags, depth, stencil, rect count, rects). Written out because the
+// depth is a floating-point argument, which the general forwarding does not carry.
+void __stdcall w_list_clear_depth(Wrap* self, unsigned long long handle, unsigned int flags, float depth,
+                                  unsigned char stencil, unsigned int rect_count, const D3D12_RECT* rects) {
+    D3D12_CPU_DESCRIPTOR_HANDLE pc{};
+    pc.ptr = static_cast<SIZE_T>(handle_to_pc(handle, false));
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)->ClearDepthStencilView(
+        pc, static_cast<D3D12_CLEAR_FLAGS>(flags), depth, stencil, rect_count, rects);
+}
+
+// ClearRenderTargetView(handle, colour, rect count, rects).
+void __stdcall w_list_clear_target(Wrap* self, unsigned long long handle, const float* colour, unsigned int rect_count,
+                                   const D3D12_RECT* rects) {
+    D3D12_CPU_DESCRIPTOR_HANDLE pc{};
+    pc.ptr = static_cast<SIZE_T>(handle_to_pc(handle, false));
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)->ClearRenderTargetView(pc, colour, rect_count, rects);
+}
+
+// ---- command signatures and indirect execution ----------------------------------------------------------------
+//
+// Device slot 41, CreateCommandSignature(description, root signature, identifier, out); the description is the
+// public one (measured at the image's five calls: stride, argument count, argument list, node mask). The image
+// creates five: draw (stride 16), indexed draw (20), an argument type 105 (stride 12), dispatch (12) and mesh
+// dispatch (12). Type 105 is not a type the PC library has, and what it draws is not known.
+//
+// A signature the PC device can make is a real PC signature. One with a type it does not have is kept here as
+// its description only, with no PC object behind it: the image's start-up requires all five to exist, and a
+// signature is a description, not work. The work is the execution, and that is where it is refused: executing
+// such a signature draws nothing and says so (counted, first use logged with its arguments).
+struct ConsoleSignature {
+    unsigned stride = 0;
+    std::vector<unsigned> types;
+    std::atomic<unsigned long long> executions{0};
+};
+SRWLOCK g_signatures_lock = SRWLOCK_INIT;
+std::map<const Wrap*, std::unique_ptr<ConsoleSignature>> g_console_signatures;
+
+constexpr unsigned kLastPcIndirectType = 11;  // D3D12_INDIRECT_ARGUMENT_TYPE_INCREMENTING_CONSTANT
+
+Wrap* wrap_object(void* pc, int kind_id, const char* kind, int forward_last, const std::map<int, void*>& overrides);
+HRESULT __stdcall w_get_device(Wrap*, const GUID*, void** out, void*, void*, void*, void*, void*, void*);
+Wrap* wrap_kind(void* pc, int kind);
+
+HRESULT __stdcall w_device_slot41(Wrap* self, const D3D12_COMMAND_SIGNATURE_DESC* desc, void* root_signature,
+                                  const GUID*, void** out, void*, void*, void*, void*) {
+    if (!desc || !out) {
+        return 0x80004003L;  // E_POINTER
+    }
+    *out = nullptr;
+    unsigned unknown_type = 0;
+    bool has_unknown = false;
+    for (unsigned i = 0; desc->pArgumentDescs && i < desc->NumArgumentDescs; ++i) {
+        const unsigned type = static_cast<unsigned>(desc->pArgumentDescs[i].Type);
+        if (type > kLastPcIndirectType) {
+            has_unknown = true;
+            unknown_type = type;
+        }
+    }
+    if (!has_unknown) {
+        ID3D12CommandSignature* signature = nullptr;
+        const HRESULT hr = static_cast<ID3D12Device*>(self->pc)->CreateCommandSignature(
+            desc, static_cast<ID3D12RootSignature*>(to_pc(root_signature)), __uuidof(ID3D12CommandSignature),
+            reinterpret_cast<void**>(&signature));
+        if (hr != 0 || !signature) {
+            logf("device slot 41: the PC device could not create the command signature (stride %u, %u arguments, "
+                 "first type %u): 0x%lx\n",
+                 desc->ByteStride, desc->NumArgumentDescs,
+                 desc->NumArgumentDescs && desc->pArgumentDescs ? static_cast<unsigned>(desc->pArgumentDescs[0].Type) : 0u,
+                 static_cast<unsigned long>(hr));
+            return hr ? hr : static_cast<HRESULT>(0x80004005L);
+        }
+        *out = wrap_kind(signature, kCommandSignature);
+        logf("device slot 41: a real PC command signature (stride %u, %u arguments, first type %u) was created and "
+             "wrapped\n",
+             desc->ByteStride, desc->NumArgumentDescs,
+             desc->NumArgumentDescs && desc->pArgumentDescs ? static_cast<unsigned>(desc->pArgumentDescs[0].Type) : 0u);
+        return 0;
+    }
+    auto kept = std::make_unique<ConsoleSignature>();
+    kept->stride = desc->ByteStride;
+    for (unsigned i = 0; i < desc->NumArgumentDescs; ++i) {
+        kept->types.push_back(static_cast<unsigned>(desc->pArgumentDescs[i].Type));
+    }
+    // No PC object behind it: no slot is forwarded, and every one of its own methods says "not provided".
+    Wrap* wrapped = wrap_object(nullptr, kCommandSignature, "command signature (description only)", 2,
+                                {{7, reinterpret_cast<void*>(&w_get_device)}});
+    AcquireSRWLockExclusive(&g_signatures_lock);
+    g_console_signatures[wrapped] = std::move(kept);
+    ReleaseSRWLockExclusive(&g_signatures_lock);
+    *out = wrapped;
+    logf("device slot 41: command signature with argument type %u (stride %u, %u arguments) - a type the PC device "
+         "does not have. Kept as a description only: executing it draws nothing until the type is understood, and "
+         "says so\n",
+         unknown_type, desc->ByteStride, desc->NumArgumentDescs);
+    return 0;
+}
+
+void forget_console_signature(const Wrap* signature) {
+    AcquireSRWLockExclusive(&g_signatures_lock);
+    g_console_signatures.erase(signature);
+    ReleaseSRWLockExclusive(&g_signatures_lock);
+}
+
+// List slot 61: the arguments of ExecuteIndirect (signature, maximum count, argument buffer, offset, count
+// buffer, offset), measured at two calls of the image (+0x248cdef, +0x9444x). The PC list has it at slot 59.
+void __stdcall w_list_execute_indirect(Wrap* self, void* signature, unsigned int max_count, void* arguments,
+                                       unsigned long long arguments_offset, void* count_buffer,
+                                       unsigned long long count_offset) {
+    AcquireSRWLockShared(&g_signatures_lock);
+    const auto found = g_console_signatures.find(static_cast<const Wrap*>(signature));
+    ConsoleSignature* console = found == g_console_signatures.end() ? nullptr : found->second.get();
+    const unsigned long long nth = console ? console->executions.fetch_add(1) : 0;
+    const unsigned type = console && !console->types.empty() ? console->types[0] : 0;
+    ReleaseSRWLockShared(&g_signatures_lock);
+    if (console) {
+        if (nth == 0 || (nth & (nth - 1)) == 0) {  // the first, then every power of two
+            logf("command list: indirect execution with argument type %u asked (time %llu; maximum count %u, "
+                 "argument buffer %p at offset %llu, count buffer %p) - NOT DRAWN, the type is not understood\n",
+                 type, nth + 1, max_count, arguments, arguments_offset, count_buffer);
+        }
+        return;
+    }
+    if (!is_wrap(signature)) {
+        logf("command list: indirect execution with a signature that is not an object of this library; nothing done\n");
+        return;
+    }
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)->ExecuteIndirect(
+        static_cast<ID3D12CommandSignature*>(to_pc(signature)), max_count,
+        static_cast<ID3D12Resource*>(to_pc(arguments)), arguments_offset,
+        static_cast<ID3D12Resource*>(to_pc(count_buffer)), count_offset);
+}
+
 // Wraps a PC object of the given kind. The number is the last method slot the kind shares with the PC interface
 // (public d3d12.h order); the slots above it are the console's own and are answered "not implemented", each
 // logged the first time, until they are written.
@@ -387,17 +726,27 @@ Wrap* wrap_kind(void* pc, int kind) {
     case kAllocator:
         return wrap_object(pc, kAllocator, "command allocator", 8, {{7, get_device}});
     case kList:
-        return wrap_object(pc, kList, "command list", 59,
+        // Which method sits at which slot of the console's command list is only partly measured. Three calls of
+        // the image agree with the public order: slot 9 (Close, no arguments, result checked), slot 15 (the five
+        // arguments of CopyBufferRegion) and slot 26 (count and a 16-byte transition record, ResourceBarrier).
+        // One does not: the image executes its command signatures through slot 61 with exactly the arguments of
+        // ExecuteIndirect, which the public list has at slot 59. So slots 3..26 are forwarded by the public
+        // order, slot 61 is ExecuteIndirect, and every other slot says "not provided" with its arguments until
+        // the image's own calls show what it is. The functions for SetDescriptorHeaps, the root descriptor
+        // tables, the render targets and the two clears (w_list_set_heaps, w_list_root_table,
+        // w_list_set_render_targets, w_list_clear_depth, w_list_clear_target) are written but not installed for
+        // that reason.
+        return wrap_object(pc, kList, "command list", 26,
                            {{7, get_device},
                             {16, reinterpret_cast<void*>(&w_list_copy_texture)},
                             {26, reinterpret_cast<void*>(&w_list_barrier)},
-                            {28, reinterpret_cast<void*>(&w_list_set_heaps)}});
+                            {61, reinterpret_cast<void*>(&w_list_execute_indirect)}});
     case kHeap:
         return wrap_object(pc, kHeap, "descriptor heap", 10,
                            {{7, get_device},
-                            {8, reinterpret_cast<void*>(&struct_return_thunk<8>)},     // GetDesc
-                            {9, reinterpret_cast<void*>(&struct_return_thunk<9>)},     // CPU handle of the start
-                            {10, reinterpret_cast<void*>(&struct_return_thunk<10>)}}); // GPU handle of the start
+                            {8, reinterpret_cast<void*>(&struct_return_thunk<8>)},  // GetDesc
+                            {9, reinterpret_cast<void*>(&w_heap_start<0>)},         // CPU handle of the start
+                            {10, reinterpret_cast<void*>(&w_heap_start<1>)}});      // GPU handle of the start
     case kResource:
         return wrap_object(pc, kResource, "resource", 14,
                            {{7, get_device},
@@ -491,6 +840,67 @@ HRESULT __stdcall w_device_pipeline(Wrap*, void*, void*, void** out, void*, void
              "game's shaders yet\n");
     });
     return 0x80004001L;  // E_NOTIMPL
+}
+
+// Device slot 14, CreateDescriptorHeap(description, identifier, out). The description is the public 16-byte one
+// (type, count, flags, node mask; measured at the image's call). See "descriptor heaps" above for the address
+// the image sees. Heap type 4 exists only on the console and is refused.
+HRESULT __stdcall w_device_slot14(Wrap* self, const D3D12_DESCRIPTOR_HEAP_DESC* desc, const GUID*, void** out, void*,
+                                  void*, void*, void*, void*) {
+    if (!desc || !out) {
+        return 0x80004003L;  // E_POINTER
+    }
+    *out = nullptr;
+    if (static_cast<unsigned>(desc->Type) > 3u) {
+        logf("device slot 14: descriptor heap type %u is not one a PC device has; answered not implemented\n",
+             static_cast<unsigned>(desc->Type));
+        return 0x80004001L;  // E_NOTIMPL
+    }
+    ID3D12Device* device = static_cast<ID3D12Device*>(self->pc);
+    ID3D12DescriptorHeap* heap = nullptr;
+    const HRESULT hr = device->CreateDescriptorHeap(desc, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&heap));
+    if (hr != 0 || !heap) {
+        logf("device slot 14: the PC device could not create the descriptor heap (type %u, %u descriptors, flags "
+             "0x%x): 0x%lx\n",
+             static_cast<unsigned>(desc->Type), desc->NumDescriptors, static_cast<unsigned>(desc->Flags),
+             static_cast<unsigned long>(hr));
+        return hr ? hr : static_cast<HRESULT>(0x80004005L);
+    }
+    HeapRange range{};
+    const unsigned step = device->GetDescriptorHandleIncrementSize(desc->Type);
+    range.bytes = static_cast<unsigned long long>(desc->NumDescriptors) * step;
+    range.pc_cpu = heap->GetCPUDescriptorHandleForHeapStart().ptr;
+    if (desc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
+        range.pc_gpu = heap->GetGPUDescriptorHandleForHeapStart().ptr;
+    }
+    Wrap* wrapped = wrap_kind(heap, kHeap);
+    range.wrap = wrapped;
+    if (const auto allocate =
+            reinterpret_cast<void* (*)(unsigned long long, unsigned long long)>(xmem_function("XMemAlloc"))) {
+        void* at = allocate(range.bytes, kDescriptorHeapAttributes);
+        if (!at) {
+            logf("device slot 14: the memory library had no %llu bytes for the heap's address; answered out of "
+                 "memory\n",
+                 range.bytes);
+            w_release(wrapped);
+            return 0x8007000EL;  // E_OUTOFMEMORY
+        }
+        range.title = reinterpret_cast<unsigned long long>(at);
+        wrapped->title_address = range.title;
+        wrapped->title_bytes = range.bytes;
+    }
+    AcquireSRWLockExclusive(&g_heaps_lock);
+    g_heaps.push_back(range);
+    ReleaseSRWLockExclusive(&g_heaps_lock);
+    static std::atomic<int> shown{0};
+    if (shown.fetch_add(1) < 8) {
+        logf("device slot 14: descriptor heap type %u, %u descriptors of %u bytes, flags 0x%x - the image sees it at "
+             "0x%llx (from the memory library), the PC heap is at 0x%llx\n",
+             static_cast<unsigned>(desc->Type), desc->NumDescriptors, step, static_cast<unsigned>(desc->Flags),
+             range.title, range.pc_cpu);
+    }
+    *out = wrapped;
+    return 0;
 }
 
 // Device slot 48 is a second queue-creating call the console device has (on the PC device that slot is another
@@ -861,6 +1271,7 @@ ID3D12Heap* span_heap(Wrap* device, unsigned long long address, unsigned long lo
 }
 
 Wrap* wrap_kind(void* pc, int kind);
+unsigned public_resource_flags(unsigned flags, const char* where);
 
 HRESULT __stdcall w_device_slot133(Wrap* self, void* address_arg, const D3D12_RESOURCE_DESC* desc, void* state_arg,
                                    const D3D12_CLEAR_VALUE* clear, const GUID* riid, void** out, void*, void*) {
@@ -893,17 +1304,8 @@ HRESULT __stdcall w_device_slot133(Wrap* self, void* address_arg, const D3D12_RE
         return 0x80004001L;
     }
     D3D12_RESOURCE_DESC pc_desc = *desc;
-    const unsigned known_flags = 0x1FF;  // the flag bits the public D3D12_RESOURCE_FLAGS has
-    if (static_cast<unsigned>(desc->Flags) & ~known_flags) {
-        static std::once_flag once;
-        const unsigned extra = static_cast<unsigned>(desc->Flags) & ~known_flags;
-        std::call_once(once, [extra] {
-            logf("device slot 133: resource flag bits 0x%x are console-only; they are not understood and not "
-                 "applied\n",
-                 extra);
-        });
-        pc_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(static_cast<unsigned>(desc->Flags) & known_flags);
-    }
+    pc_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(
+        public_resource_flags(static_cast<unsigned>(desc->Flags), "device slot 133"));
     // The PC library marks a heap opened over existing memory as a cross-adapter heap and asks for the matching
     // flag on every resource placed in it.
     pc_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(static_cast<unsigned>(pc_desc.Flags) |
@@ -917,7 +1319,8 @@ HRESULT __stdcall w_device_slot133(Wrap* self, void* address_arg, const D3D12_RE
              address, static_cast<unsigned long long>(desc->Width), static_cast<unsigned long>(hr));
         return hr;
     }
-    // The state number 0xffffffff is not a public state; a PC buffer starts in the common state.
+    // The number 0xffffffff is the public "undefined layout" value of the newer resource calls (see slot 127); a
+    // buffer has no layout, and a PC buffer made with this older call starts in the common state.
     const D3D12_RESOURCE_STATES pc_state =
         state == 0xFFFFFFFFu ? D3D12_RESOURCE_STATE_COMMON : static_cast<D3D12_RESOURCE_STATES>(state);
     ID3D12Resource* resource = nullptr;
@@ -935,6 +1338,178 @@ HRESULT __stdcall w_device_slot133(Wrap* self, void* address_arg, const D3D12_RE
     if (show) {
         logf("device slot 133: a PC buffer of %llu bytes now lies over the image's memory at 0x%llx (no copy)\n",
              static_cast<unsigned long long>(desc->Width), address);
+    }
+    return 0;
+}
+
+// The image sets resource flag bits above the ones the public D3D12_RESOURCE_FLAGS has. What they ask of the
+// console is not known; they are taken off before the PC device sees the description, and each new set of such
+// bits is logged once.
+unsigned public_resource_flags(unsigned flags, const char* where) {
+    const unsigned known = 0x1FF;
+    const unsigned extra = flags & ~known;
+    if (extra) {
+        static std::mutex lock;
+        static std::set<unsigned> seen;
+        bool first = false;
+        {
+            std::lock_guard<std::mutex> guard(lock);
+            first = seen.insert(extra).second;
+        }
+        if (first) {
+            logf("%s: resource flag bits 0x%x are console-only; they are not understood and not applied\n", where,
+                 extra);
+        }
+    }
+    return flags & known;
+}
+
+// Device slot 25, GetResourceAllocationInfo(visible mask, count, descriptions): returns a 16-byte structure, so
+// the place for it comes first and the device second (measured). The descriptions are the public ones except
+// for the console-only flag bits.
+void* __stdcall w_device_allocation_info(void* place, Wrap* self, unsigned int visible_mask, unsigned int count,
+                                         const D3D12_RESOURCE_DESC* descs) {
+    if (!is_wrap(self) || !place) {
+        logf("device slot 25: called without a place for the result and the device after it; nothing done\n");
+        return place;
+    }
+    std::vector<D3D12_RESOURCE_DESC> pc(descs ? count : 0);
+    for (std::size_t i = 0; i < pc.size(); ++i) {
+        pc[i] = descs[i];
+        pc[i].Flags = static_cast<D3D12_RESOURCE_FLAGS>(
+            public_resource_flags(static_cast<unsigned>(descs[i].Flags), "device slot 25"));
+    }
+    const D3D12_RESOURCE_ALLOCATION_INFO info = static_cast<ID3D12Device*>(self->pc)->GetResourceAllocationInfo(
+        visible_mask, static_cast<UINT>(pc.size()), pc.data());
+    std::memcpy(place, &info, sizeof(info));
+    return place;
+}
+
+// Device slot 127: a committed resource. Measured at the image's call (+0x193e1b4): heap properties (20 bytes),
+// heap flags, description, a number, clear value, three zeros (pointer, 32-bit, pointer), the public resource
+// identifier, place for the result. That is the argument list of the public CreateCommittedResource3 (initial
+// layout, protected session, castable-format count and list); the number 0xffffffff the image passes elsewhere
+// in that position is the public "undefined layout" value. So the call is answered with the PC device's
+// CreateCommittedResource3. The image takes this path for surfaces it creates with the "can be displayed" heap
+// flag (8), which the PC library knows for committed resources.
+// Read from the description: the first 56 bytes, which the public description and its longer form share.
+//
+// Memory of a surface that can be displayed. Measured in the image (the function that creates these surfaces,
+// +0x247ad10): before creating them it registers one of its allocation routines for requests whose attributes
+// have allocator class 0x80 and the value 2 in bits 14-15, hands such requests out of one block of its own, and
+// afterwards stops itself unless nearly the whole block was handed out. So the console's graphics library asks
+// XMemAlloc for each such surface's memory. This library does the same: one request per surface, of width x
+// height x array size x bytes per pixel, with attributes 0x00808000.
+// What is ours and not measured: the exact size and the low attribute bits the console's library asks with (the
+// image accepts a range of sizes that contains the plain pixel size). And what is NOT done: the pixels are in
+// the PC device's memory, not in that block - nothing is stored in the block and nothing reads it.
+constexpr unsigned long long kDisplaySurfaceAttributes = 0x00808000ull;
+
+// Bytes per pixel of the formats a displayable surface can have here; 0 for a format not in the list.
+unsigned display_pixel_bytes(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8X8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+    case DXGI_FORMAT_R11G11B10_FLOAT:
+        return 4;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+    case DXGI_FORMAT_R16G16B16A16_UNORM:
+        return 8;
+    default:
+        return 0;
+    }
+}
+
+HRESULT __stdcall w_device_slot127(Wrap* self, const D3D12_HEAP_PROPERTIES* properties, unsigned int heap_flags,
+                                   const D3D12_RESOURCE_DESC* desc, unsigned int layout,
+                                   const D3D12_CLEAR_VALUE* clear, void* session, unsigned int castable_count,
+                                   const void* castable, const GUID* riid, void** out) {
+    if (out) {
+        *out = nullptr;
+    }
+    if (!properties || !desc || !out) {
+        return 0x80004003L;  // E_POINTER
+    }
+    static std::atomic<int> shown{0};
+    const bool show = shown.fetch_add(1) < 12;
+    if (show) {
+        logf("device slot 127: committed resource - heap type %d, heap flags 0x%x; dimension %d, %llu x %u x %u, "
+             "mips %u, format %d, samples %u, layout order %d, flags 0x%x; initial layout 0x%x, clear value %p, "
+             "then %p %u %p, identifier {%08lx-...}\n",
+             static_cast<int>(properties->Type), heap_flags, static_cast<int>(desc->Dimension),
+             static_cast<unsigned long long>(desc->Width), desc->Height, static_cast<unsigned>(desc->DepthOrArraySize),
+             static_cast<unsigned>(desc->MipLevels), static_cast<int>(desc->Format), desc->SampleDesc.Count,
+             static_cast<int>(desc->Layout), static_cast<unsigned>(desc->Flags), layout, clear, session,
+             castable_count, castable, riid ? static_cast<unsigned long>(riid->Data1) : 0ul);
+    }
+    if (session || castable_count || castable) {
+        logf("device slot 127: a protected session or castable formats were given; not provided, answered not "
+             "implemented\n");
+        return 0x80004001L;  // E_NOTIMPL
+    }
+    ID3D12Device13* device = pc_device13(self);
+    if (!device) {
+        logf("device slot 127: the PC device has no CreateCommittedResource3; answered not implemented\n");
+        return 0x80004001L;
+    }
+    D3D12_RESOURCE_DESC1 pc_desc{};
+    std::memcpy(&pc_desc, desc, sizeof(D3D12_RESOURCE_DESC));
+    pc_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(
+        public_resource_flags(static_cast<unsigned>(desc->Flags), "device slot 127"));
+    ID3D12Resource* resource = nullptr;
+    const HRESULT hr = device->CreateCommittedResource3(properties, static_cast<D3D12_HEAP_FLAGS>(heap_flags), &pc_desc,
+                                                        static_cast<D3D12_BARRIER_LAYOUT>(layout), clear, nullptr, 0,
+                                                        nullptr, __uuidof(ID3D12Resource),
+                                                        reinterpret_cast<void**>(&resource));
+    if (hr != 0 || !resource) {
+        logf("device slot 127: the PC device refused the committed resource (0x%lx)\n", static_cast<unsigned long>(hr));
+        return hr ? hr : 0x80004005L;
+    }
+    unsigned long long block = 0;
+    unsigned long long block_bytes = 0;
+    if (heap_flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY) {
+        const unsigned pixel = display_pixel_bytes(desc->Format);
+        const auto allocate =
+            reinterpret_cast<void* (*)(unsigned long long, unsigned long long)>(xmem_function("XMemAlloc"));
+        if (!pixel || desc->Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || !allocate) {
+            logf("device slot 127: a displayable surface of format %d, dimension %d - its memory request cannot be "
+                 "made (unknown pixel size, or no memory library); answered not implemented\n",
+                 static_cast<int>(desc->Format), static_cast<int>(desc->Dimension));
+            resource->Release();
+            return 0x80004001L;
+        }
+        block_bytes = desc->Width * desc->Height * desc->DepthOrArraySize * pixel;
+        block = reinterpret_cast<unsigned long long>(allocate(block_bytes, kDisplaySurfaceAttributes));
+        if (!block) {
+            logf("device slot 127: XMemAlloc refused the %llu bytes of a displayable surface; answered out of "
+                 "memory\n",
+                 block_bytes);
+            resource->Release();
+            return 0x8007000EL;  // E_OUTOFMEMORY
+        }
+    }
+    Wrap* wrapped = wrap_kind(resource, kResource);
+    wrapped->requested_block = block;
+    wrapped->requested_bytes = block_bytes;
+    wrapped->requested_attributes = kDisplaySurfaceAttributes;
+    *out = wrapped;
+    if (show) {
+        if (block) {
+            logf("device slot 127: a real PC surface was created and wrapped; %llu bytes were asked of XMemAlloc for "
+                 "it as the console's library does (answered 0x%llx) - the pixels are in the PC device's memory, "
+                 "nothing is stored in that block\n",
+                 block_bytes, block);
+        } else {
+            logf("device slot 127: a real PC resource was created and wrapped\n");
+        }
     }
     return 0;
 }
@@ -1050,9 +1625,17 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {10, reinterpret_cast<void*>(&w_device_pipeline)},
          {11, reinterpret_cast<void*>(&w_device_pipeline)},
          {12, reinterpret_cast<void*>(&create_thunk<12, 5, 6, kList>)},
-         {14, reinterpret_cast<void*>(&create_thunk<14, 2, 3, kHeap>)},
+         {14, reinterpret_cast<void*>(&w_device_slot14)},
          {16, reinterpret_cast<void*>(&create_thunk<16, 4, 5, kRootSignature>)},
-         {25, reinterpret_cast<void*>(&struct_return_thunk<25>)},  // GetResourceAllocationInfo
+         {17, reinterpret_cast<void*>(&cpu_handle_thunk<17, 2, 0>)},  // constant buffer view (description, handle)
+         {18, reinterpret_cast<void*>(&cpu_handle_thunk<18, 3, 0>)},  // shader resource view (resource, description, handle)
+         {19, reinterpret_cast<void*>(&cpu_handle_thunk<19, 4, 0>)},  // unordered access view (resource, counter, description, handle)
+         {20, reinterpret_cast<void*>(&cpu_handle_thunk<20, 3, 0>)},  // render target view
+         {21, reinterpret_cast<void*>(&cpu_handle_thunk<21, 3, 0>)},  // depth stencil view
+         {22, reinterpret_cast<void*>(&cpu_handle_thunk<22, 2, 0>)},  // sampler (description, handle)
+         {23, reinterpret_cast<void*>(&w_device_copy_descriptors)},
+         {24, reinterpret_cast<void*>(&cpu_handle_thunk<24, 2, 3>)},  // copy (count, to, from, type)
+         {25, reinterpret_cast<void*>(&w_device_allocation_info)},
          {26, reinterpret_cast<void*>(&struct_return_thunk<26>)},  // GetCustomHeapProperties
          {27, reinterpret_cast<void*>(&create_thunk<27, 6, 7, kResource>)},  // committed resource
          {28, reinterpret_cast<void*>(&create_thunk<28, 2, 3, kMemoryHeap>)},
@@ -1060,11 +1643,12 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {30, reinterpret_cast<void*>(&create_thunk<30, 4, 5, kResource>)},  // reserved resource
          {36, reinterpret_cast<void*>(&create_thunk<36, 3, 4, kFence>)},
          {39, reinterpret_cast<void*>(&create_thunk<39, 2, 3, kQueryHeap>)},
-         {41, reinterpret_cast<void*>(&create_thunk<41, 3, 4, kCommandSignature>)},
+         {41, reinterpret_cast<void*>(&w_device_slot41)},
          {43, reinterpret_cast<void*>(&struct_return_thunk<43>)},  // GetAdapterLuid
          {48, reinterpret_cast<void*>(&w_device_slot48)},
          {73, reinterpret_cast<void*>(&w_device_slot73)},
          {74, reinterpret_cast<void*>(&w_device_slot74)},
+         {127, reinterpret_cast<void*>(&w_device_slot127)},
          {133, reinterpret_cast<void*>(&w_device_slot133)},
          {78, reinterpret_cast<void*>(&w_set_frame_interval)},
          {79, reinterpret_cast<void*>(&w_schedule_frame_event)},
@@ -1096,4 +1680,17 @@ extern "C" __declspec(dllexport) long __stdcall D3D12SerializeVersionedRootSigna
         return 0x80004005L;
     }
     return fn(desc, blob, error_blob);
+}
+
+// The game itself does not import this one; the upscaler library that ships with the game does (measured from
+// that library's import table). It is the PC's own function: forwarded to d3d12.dll unchanged.
+extern "C" __declspec(dllexport) long __stdcall D3D12CreateRootSignatureDeserializer(const void* data,
+                                                                                    unsigned long long size,
+                                                                                    const GUID* riid, void** out) {
+    static const auto fn = reinterpret_cast<long(__stdcall*)(const void*, unsigned long long, const GUID*, void**)>(
+        GetProcAddress(LoadLibraryA("d3d12.dll"), "D3D12CreateRootSignatureDeserializer"));
+    if (!fn) {
+        return 0x80004005L;
+    }
+    return fn(data, size, riid, out);
 }
