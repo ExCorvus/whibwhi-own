@@ -33,9 +33,14 @@ What works today, and where a run currently stops, is in the **Current state** b
 6. **Leave the game's hang watchdog alone.** The game runs its own watchdog thread (described in
    [docs/exe-map/MAP.md](docs/exe-map/MAP.md) section 4). Do not disable it and do not report progress to it that
    did not happen.
-7. **Two Vulkan paths are banned** because they crashed the graphics driver and the whole machine (AMD RX 9070 XT,
+7. **One Vulkan path is banned** because it crashed the graphics driver and the whole machine (AMD RX 9070 XT,
    measured during the earlier attempt): sparse buffers created with
-   `VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT`, and building pipelines on another thread.
+   `VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT`. The earlier ban on building pipelines on another thread
+   was withdrawn by ExCorvus on 2026-11-26. It was not a measured crash: it came from an instruction in the earlier
+   attempt to have its helpers build pipelines one at a time. The game asks for its pipelines from its worker
+   threads, and the shell
+   builds each one on the thread that asks, side by side (4,800 built one at a time in boots b160-b161 without a
+   fault). If the driver or the machine fails during a run, write it down in FINDINGS.md before anything else.
 8. **No third-party code in the repository.** vkd3d-proton (LGPL-2.1) is built separately by the user and loaded
    as a DLL; see [docs/BUILD-AND-RUN.md](docs/BUILD-AND-RUN.md) and [NOTICE.md](NOTICE.md).
 9. **The earlier attempt is not a reference.** Before this shell there was an attempt built on another project's
