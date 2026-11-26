@@ -6,7 +6,7 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 
 ## Current state (2026-11-26)
 
-- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 21 tests pass.
+- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 23 tests pass.
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
@@ -1124,3 +1124,45 @@ pipeline requests named together. Numbers only; no byte of a shader is in the lo
 Code: shell/d3d12_xs.cpp (the counts, and a root signature's ranges, static samplers and flags are now read),
 shell/shader_shape.* (a no-operation reads nothing), shell/shader_program.* (kind 5 is understood; the header
 states the rule). Write-up: docs/exe-map/SHADER-PATH.md section 12.
+
+## 2026-11-26 - control flow and instruction meanings; the reader's three-operand instructions corrected (boot b109; measured)
+
+**New code, made up of public facts and checked on hand-built words.**
+
+- `shell/shader_flow.*`: the control flow of a decoded program - blocks, branches (target = the branch's
+  position + 4 + its signed 16-bit number x 4, as two public sources state), dominators, loops, whether the
+  flow is reducible, and a tree of nested ifs and loops when the flow can be written that way. It refuses, with
+  a reason, what it cannot express.
+- `shell/shader_meaning.*` and docs/SHADER-MEANINGS.md: what the most used arithmetic, move, compare and bit
+  instructions compute, as a reference interpreter for one lane. It refuses memory, image, interpolation,
+  export and branch instructions, and the cases its sources do not state (shift counts of 32 and more,
+  out-of-range float-to-integer conversions, reciprocal of zero, and others listed in the document).
+
+**The control-flow pass on the game's programs (boot b109; 927 programs decoded from the first 1,024 different
+containers: 505 pixel, 227 vertex, 195 compute).**
+
+- Analysed: all 505 pixel, all 195 compute, 1 vertex. All 701 are reducible.
+- Not analysed: 226 vertex programs, because they call through the address in s4 (the call found in boots
+  b100-b108); the pass refuses a call to a register address.
+- No loop: 401 pixel, 132 compute, 1 vertex. With loops: 104 pixel (100 with several), 63 compute.
+- Written as nested ifs and loops: 538 (401 pixel, 136 compute, 1 vertex). Not: all 104 pixel programs with a
+  loop and 18 compute programs (the block that heads the loop branches two ways inside the loop), 31 compute
+  programs (a loop leaves to more than one block), 10 compute programs (a block would appear twice or was not
+  placed).
+- No program contains a subroutine call by number, a hardware loop, a debug branch, a trap or another
+  end-of-program form.
+
+**A fault in the instruction reader, found while checking the meanings and corrected.** In the two-word vector
+format the reader typed every destination as a vector register and counted three sources always. Compares
+(opcodes below 0x100) write a scalar register pair or a mask register, and the public table gives each
+instruction two, three, one or no sources; an unused field holding 0 had been read as scalar register 0. The
+reader now takes the count from the public table (numbers only) and says when the table does not list an
+opcode. Measured effect, on the 502 of 505 pixel programs whose register sets the report lists: in b108, 106
+seemed to read s0 or s1 before writing it; in b109 none does, and each reads only the registers the module's
+first table names and the one after them. Earlier entries that list s0 or s1 among a pixel program's inputs
+are superseded by this.
+
+**Not established / not built.** The translator itself. The vertex call. The two loop shapes the tree form does
+not cover. The meanings of memory, image, interpolation and export instructions. How many lanes a wave has (the
+shape pass treats a mask held in scalar registers as a pair, inferred from the 64-bit mask instructions the
+programs use). The game folder was unchanged after the run. 23 tests pass.
