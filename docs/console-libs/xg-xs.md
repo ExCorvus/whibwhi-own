@@ -10,59 +10,6 @@ said.
 
 ---
 
-## 0. What runs showed, and what the shell answers today (added after boots b65-b74)
-
-The sections below are the map made before the library was built. Where this section and a later one disagree,
-this one holds.
-
-**The description is the resource description (measured).** The 0x38-byte block the game passes has the field
-order of the public `D3D12_RESOURCE_DESC`: `+0x00` dimension (2 one-dimensional, 3 two-dimensional, 4 volume),
-`+0x08` alignment, `+0x10` width, `+0x18` height, `+0x1c` depth or array size, `+0x1e` mips, `+0x20` format,
-`+0x24` samples per pixel, `+0x28` sample quality, `+0x2c` layout - on the console a tiling number (0x100 and
-up; 0x102 and 0x105 were seen) - `+0x30` flags. The game passes the same block to the device's
-allocation-info and placed-resource methods. So `+0x24` is the sample count, not an element size as section 3
-reads it. Format numbers are the public DXGI ones (code 61 is the one-byte format; the depth formats are
-rewritten to their typeless partners exactly as the public pairs go); codes 0x76 and 0x79-0x7c are not public
-formats.
-
-**The object's copy methods (measured).** `+0x40` is (object, texture memory, 0, subresource, source rows,
-bytes per row, bytes per two-dimensional slice): the value section 4.3 calls "rows" is the byte size of one
-slice. `+0x48` is (object, the caller's buffer, 0, subresource, 0, texture memory, bytes per row, bytes per
-slice) and copies OUT of texture memory. The game's texture lock (fn 0x5121690) reads a layout record's
-`+0x1c` as bytes per row and `+0x10` as bytes per slice (inferred from the shape of what it returns).
-
-**What the shell's library does** (`shell/xg_xs.cpp`, test `shell/tests/test_xg.cpp`):
-
-- `XGCreateTextureComputer` answers one-, two- and three-dimensional textures whose format is in the public
-  format list with a known size per pixel, 1 to 15 mips, sides up to 16,384. Everything else is refused with
-  the result cleared - including the formats that are not public ones.
-- The layout it answers with is the SHELL'S OWN, untiled: each mip is rows of pixels (rows of 4 x 4 blocks for
-  block formats), mips follow one another, array slices follow one another. It is the same arithmetic the game
-  uses for its own untiled source data (section 7), so the game's "does the layout equal my own packing"
-  comparison succeeds and it copies directly. It is NOT the console's tiled layout, and no claim is made that
-  it is.
-- The limit this puts on the shell: the layout is right for texture bytes that pass through this library's
-  copy methods. Texture bytes that reach memory another way - read straight from a package, where the console
-  keeps them tiled - are not covered by it. That case has not been reached by a run.
-- The object's methods `+0x08` (release), `+0x10` (fill the 0x6c8-byte block), `+0x40` (copy in) and `+0x48`
-  (copy out) are written; the copies check the subresource, the caller's row and slice sizes against the
-  layout, and that both memory ranges are usable, and refuse otherwise without touching anything. Every other
-  method, `+0x50` included, is logged and answered "not implemented". Fields of the block the game was not seen
-  to read are left zero.
-- `XGSuggestSwizzleMode` is refused: the numbering of the modes is not known. The game goes on without it.
-- The device's allocation-info methods answer a texture with this layout's total size
-  (`whiwhi_xg_total_bytes`).
-
-In runs the game created its first textures this way (256 x 128 in the one-byte format; 1 x 1 textures in
-three formats), then larger ones through the device (docs/exe-map/GRAPHICS-CALLS.md section 2.2d).
-
----
-
-**Added 2026-11-26 (boot b152):** the library also remembers which memory it copied texture rows into, by
-start address, with the description and a number that grows with each copy (`whiwhi_xg_written_at`). The
-graphics library uses it to make and fill a PC texture when a view names such memory (FINDINGS.md, entry of that
-date).
-
 ## 1. The two imports
 
 | import | import thunk | call sites (image RVA) |
