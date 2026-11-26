@@ -7,8 +7,8 @@
 // A PC already has the unified memory the console's APU shares, so the memory side is real on a PC: ApuCreateHeap
 // creates a committed heap below 4 GiB, ApuAlloc bump-allocates from it, the shape contexts are a real zeroed
 // array, and ApuMapVirtualAddress/ApuMapApuAddress are the identity map (the APU address of a byte is the byte's
-// own address). AcpHalCreate hands out a SILENT device object (a stated exception ExCorvus granted, 2026-11-26):
-// its vtable answers success and does nothing, so the game runs on without sound; the real audio path comes later.
+// own address). AcpHalCreate is the one thing a PC cannot provide - the audio device itself - so it still answers
+// E_NOTIMPL and writes no handle rather than inventing an object the image would wait on forever.
 #ifndef WHIWHI_SHELL_ACP_HAL_H
 #define WHIWHI_SHELL_ACP_HAL_H
 
@@ -34,8 +34,8 @@ extern "C" {
 WHIWHI_ACP_HAL_API long AcpHalAllocateShapeContexts(void* config);
 
 // Creates the audio device. `handle` receives an interface pointer whose vtable the image then calls (slots
-// 0x00, 0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38 are all used). The silent host answers success and writes a
-// device object whose every vtable slot returns success and does nothing (no sound). Negative on failure.
+// 0x00, 0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38 are all used). Negative on failure; the image then leaves
+// audio uninitialised instead of calling through a missing vtable.
 WHIWHI_ACP_HAL_API long AcpHalCreate(void** handle);
 
 // Gives the shape contexts back. The image calls it with whatever happens to be in rcx, so it reads no
