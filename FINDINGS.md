@@ -1278,7 +1278,7 @@ ExCorvus's find (ATTRIBUTION.md item 14): by its code the shell is a shell, but 
 executable, it is woven all through it. The project now calls it a shell-based weave. The folder `shell/` is now
 `weave/` (build: `weave\build.cmd`), the code's namespace is `whiwhi::weave`, and the word is changed in the code,
 its comments and log texts, the scripts and the docs. Windows' own word PowerShell is unchanged. ExCorvus's own
-words keep the word she used, and so do the dated entries below this one: there, `shell/...` paths mean `weave/...`.
+words keep the word she used, and so do the dated entries before this one: there, `shell/...` paths mean `weave/...`.
 
 Check (visible game test 23:50 on the renamed build, the copy's folder unchanged): the run stops at the same place
 as the run of 23:13 - the same throw inside the installation's XboxBvhBuilder.dll after device slot 62, through the
