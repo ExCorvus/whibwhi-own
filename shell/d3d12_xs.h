@@ -60,6 +60,18 @@ WHIWHI_D3D12_XS_API int __stdcall whiwhi_d3d12_view_page(unsigned long long addr
 // How many pages of the view show a pool page right now.
 WHIWHI_D3D12_XS_API unsigned long long __stdcall whiwhi_d3d12_view_pages_shown(void);
 
+// Every object the game is given starts with its method table followed by bytes that belong to the game (it
+// reads and writes fields inside the console's objects); the library's own fields come after them. This logs,
+// per kind of object, which of those bytes the game has written, and returns how many.
+WHIWHI_D3D12_XS_API unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void);
+
+// The layout the library gives its objects: where the game's area ends, the two command-list fields the game
+// compares before writing a command record itself, and the device byte that decides who copies descriptors.
+WHIWHI_D3D12_XS_API int __stdcall whiwhi_d3d12_object_layout(unsigned long long* image_area_end,
+                                                             unsigned long long* list_position,
+                                                             unsigned long long* list_end,
+                                                             unsigned long long* device_copy_byte);
+
 #ifdef __cplusplus
 }
 #endif
