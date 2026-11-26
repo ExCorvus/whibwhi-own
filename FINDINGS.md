@@ -1006,3 +1006,10 @@ kind, order and registers of their parameters, but what a descriptor table holds
 the named root signature's table lists (measured). Why the console does not mind is inferred, not measured: its
 shaders read a table by position, and each shader's own table says which position. Using the program's root signatures unchanged on the PC would therefore not give most shaders
 their table resources. How the shell is to provide the table contents is not decided; nothing of it is built.
+
+A second test run (2026-11-26 19:20, PASS, the copy's folder unchanged) checked the shaders' own tables on their
+own, with no root signature and no heap memory read. For all 1,540 resources that come through a descriptor
+table: word 1 is a whole multiple of the descriptor's size in words (the low byte of word 4); no two resources of
+one table share a word 1; and the first table has a kind 3 entry with the same parameter, the same word 1 and the
+same register. So each such resource has a position of its own in its table, said twice and consistently by the
+shader's own tables (measured). That the console reads the table at that position is still inferred.
