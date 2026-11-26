@@ -59,8 +59,8 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   slots 57, 62, 67 and 86; each request is read and counted, and none can be made (the shader translator
   handles only straight-line compute test shaders), so every draw is held. The
   command-list methods at slots 70, 71, 72, 74, 75, 126, 131, 132, 142 and 146 (what they are is not known).
-  The primitive topology number 0x11 (not a PC topology). Views made from raw descriptor words (device slot 70)
-  and samplers (slot 61). Reading or writing a texture the game keeps at its own address (its Map is refused).
+  The primitive topology number 0x11 (not a PC topology). Views made from raw descriptor words (device slot 70).
+  Reading or writing a texture the game keeps at its own address (its Map is refused).
   Device slot 81 (a per-frame query; the game tolerates the refusal). The queue's page-mapping call (slot 31)
   is recorded but nothing reads the record. The game runtime library answers every interface query with "no
   such interface", except the system interface, where one method is answered: the sandbox name. The audio
@@ -1166,3 +1166,23 @@ are superseded by this.
 not cover. The meanings of memory, image, interpolation and export instructions. How many lanes a wave has (the
 shape pass treats a mask held in scalar registers as a pair, inferred from the 64-bit mask instructions the
 programs use). The game folder was unchanged after the run. 23 tests pass.
+
+## 2026-11-26 - samplers are made (device slot 61; boot b110; measured)
+
+- The game makes its samplers through device slot 61 with a console description of 0x54 bytes and a destination
+  in its descriptor memory. Read in the game's code (the function at image+0x12b96b0 that builds the
+  description): the game's sampler record holds a flag word that is taken apart bit by bit exactly as the public
+  D3D12 filter value is laid out (mip linear 0x1, magnify linear 0x4, minify linear 0x10, anisotropic 0x40,
+  comparison 0x80, and the reduction: standard, comparison, minimum, maximum), plus three address modes, the
+  smallest and largest level of detail, a bias, a 5-bit number, a comparison number and a border colour. The
+  field-by-field table is in the comment above `w_device_slot61` in shell/d3d12_xs.cpp.
+- The shell puts the public description back together from those fields and makes a real sampler at the same
+  position of the PC heap. Anything the game's code cannot have built is refused and logged, with nothing
+  written. Taken to be so, not measured: the address modes and the comparison number use the public numbering,
+  and the 5-bit number is the anisotropy limit. A comparison sampler with the function "never" cannot be told
+  from a sampler without comparison and is made without.
+- Boot b110: six samplers made in the first 30 seconds, none refused, and the PC library reported nothing:
+  linear and point filtering, each with address modes 1 1 1, 1 1 3 and 3 3 3, level of detail 0 to 12. The game
+  then copies each into its shader-visible sampler heap through the public copy call, which the shell already
+  passes on. (That the modes come out as the pairs wrap / clamp one would expect fits the public numbering.)
+- Not checked yet: that a shader sees these samplers - no shader of the game runs yet.
