@@ -54,7 +54,9 @@ WHIWHI_THREAD_BLOCK_API void whiwhi_thread_block_release(void);
 
 // Whether array entry 0 is pointed at the block while an image holds it (default on; the console gives the
 // game, the main module, storage index 0). WHIWHI_TLS_REDIRECT=0 in the environment turns it off.
-WHIWHI_THREAD_BLOCK_API void whiwhi_thread_block_set_redirect(int on);
+WHIWHI_THREAD_BLOCK_API // Set to 1 (the default) to point array entry 0 at the zeroed upper half of the block while an image holds it;
+// pass 0 to leave entry 0 alone.
+void whiwhi_thread_block_set_redirect(int on);
 
 #ifdef __cplusplus
 }
