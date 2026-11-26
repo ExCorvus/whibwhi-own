@@ -385,3 +385,152 @@ a program reads that are not root parameters (s12 in most pixel programs, s5-s7 
 vertex programs).
 
 Next in the order of work: control flow, then the in-between form.
+
+## 17. Control flow: blocks, branches and loops
+
+Step 2 of the order of work is built: `shell/shader_flow.{hpp,cpp}` reads a decoded program and answers what a
+compiler needs about its control flow, and `shell/tests/test_shader_flow.cpp` measures every number below on
+programs built word by word in the test (no game bytes). This section is written from that code and those tests;
+statements taken from a public source are marked, and what is not established is listed at the end.
+
+**Branches.** The program-control words of this generation and their numbers are taken from two public tables,
+which agree: LLVM's AMDGPU backend, `SOPInstructions.td` (the gfx10 `SOPP_Real_32` definitions) and Mesa's ACO
+compiler, `aco_opcodes.py` (its gfx10 column). `s_endpgm` is 0x001, `s_branch` 0x002, and the six conditional
+branches are 0x004 `s_cbranch_scc0`, 0x005 `scc1`, 0x006 `vccz`, 0x007 `vccnz`, 0x008 `execz`, 0x009 `execnz`.
+The 16-bit immediate is a signed count of 4-byte words counted from the instruction that follows the branch:
+target byte = branch pc + 4 + immediate * 4. LLVM states this in `MCTargetDesc/AMDGPUAsmBackend.cpp`
+(`adjustFixupValue`, `fixup_si_sopp_br`: the encoded value is (label - branch - 4) / 4) and Mesa's ACO in
+`aco_assembler.cpp` (`fix_branches` writes target offset - branch offset - 1, both in words). Measured by the
+test: a program whose branch carries an immediate of 1 starts the block at the third instruction after the
+branch, and one carrying -3 branches to the instruction two words before it.
+
+**Blocks.** A block starts at the first instruction, at every branch target, and at the instruction after every
+branch (an unconditional branch included, so dead code after one forms its own block and is reported). Each
+`FlowBlock` records the first instruction and its count, both byte offsets, how it ends (fallthrough,
+unconditional branch, conditional branch with one of the six conditions, or end of program) and its successor
+block indices. A branch target that is outside the program, or that is not the first word of an instruction (for
+example the second word of a two-word VOP3), makes the whole analysis refuse with the branch's pc and the target's
+pc: measured by the test with three such programs.
+
+**Graph facts.** Predecessors, reachability from the entry, and a reverse postorder are reported; unreachable
+blocks are listed in `FlowGraph::unreachable` and left in the block list (the test's dead block after an
+unconditional branch is still block 1). Immediate dominators are computed by the iterative algorithm of Cooper,
+Harvey and Kennedy (the intersection walks two blocks up their dominator chains by postorder number, relaxed in
+reverse postorder). Back edges are the edges whose head dominates their tail; a natural loop is its header plus
+every block that reaches the back edge's tail without passing the header (the construction in Muchnick and in
+Aho/Lam/Sethi/Ullman), and each loop lists its blocks, its back edges, the blocks that leave it, and the blocks
+it leaves to. A graph is reducible exactly when every retreating edge of a depth-first walk is a back edge
+(Tarjan; Hecht and Ullman); the test's irreducible program is an entry that branches into both blocks of a
+two-block cycle - its dominators are computed, no edge qualifies as a back edge, its end-of-program block is
+unreachable, and the pass reports "not reducible".
+
+**Structuring.** For a reducible graph, `structure_of` builds a tree of regions a shader language can express
+without goto: `sequence`, `if-then` (with which side the body is on), `if-then-else`, `loop` (header, the one
+block it leaves to, the body, the blocks that break and the blocks that continue), and plain `block` leaves. It
+works the way Cifuentes and Erosa/Hendren describe: postdominators of the reversed graph (with one virtual exit)
+give the block where the two paths of a conditional meet again, so a conditional becomes an if-then when one
+successor is that meeting block and an if-then-else when neither is; natural loops are built from the inside out,
+a loop's body is read from the header's inside successor until the loop's exit or header, and inner loops and
+conditionals inside it are handled the same way. The test measures exact trees for: straight line, if-then,
+if-then-else, nested ifs (an inner conditional whose merge is inside the outer body), a loop with one exit, a
+loop with a break out of the middle (block 2 leaves, the latch at block 3 continues), and two nested loops; it
+also measures the case where a branch targets the program's last instruction.
+
+**What is refused, with a reason, never guessed.** An irreducible graph is not structured. A loop that leaves to
+more than one block is not structured (the test's loop leaves to blocks 4 and 5; one loop statement can only
+leave to one). A loop whose header has two paths into its body is refused. A conditional branch whose two paths
+do not meet again at one block inside the region being built is refused - that covers one side ending the
+program, and one side leaving the enclosing loop while the other stays. A block that would have to appear twice
+(a crossing edge) is refused. The flow pass itself refuses, by name: `s_setpc_b64` and `s_swappc_b64` (jumps and
+calls to an address in a register), `s_call_b64` (subroutine call), `s_subvector_loop_begin` and
+`s_subvector_loop_end` (hardware loops), the four `s_cbranch_cdbg*` debug-system conditional branches,
+`s_trap`, `s_endpgm_saved` and `s_endpgm_ordered_ps_done`. Their existence and numbers are public (LLVM
+`SOPInstructions.td` and ACO `aco_opcodes.py`). Which of them the game's programs contain is measured in
+section 18.
+
+**Not established.** How the hardware's execution-mask instructions (`s_and_saveexec_b64` and the like) interact
+with branches in compiled shaders: public sources describe the mask instructions as ordinary scalar
+instructions, and no source read for this work says how a compiler divides a wave's work with them. The pass
+treats a conditional branch as "either edge possible" and makes no claim about which lanes take it; a back end
+will need that from measurement, not from this file. Also open: both LLVM (the gfx1010 offset-0x3f workaround in
+`AMDGPUAsmBackend.cpp`) and ACO (`fix_branches_gfx10`) document a hardware bug for a branch whose encoded offset
+is 0x3f and avoid emitting it; whether the console's GPU has that bug is not established here, and this pass
+decodes the arithmetic only. Finally, the two text forms (`flow_text`, `structure_text`) are diagnostics for
+this project's logs: they print block indices, pcs and numbers, and are never written to a file by the shell.
+
+## 18. What the control-flow pass makes of the game's programs (boot b109; measured)
+
+The pass of section 17 was run, in memory, on every program the instruction reader decoded in one run: 927
+programs from the first 1,024 different shader containers (505 pixel, 227 vertex, 195 compute). Numbers and the
+pass's own reasons only; no program text is logged.
+
+| | pixel | vertex | compute |
+|---|---|---|---|
+| programs decoded | 505 | 227 | 195 |
+| flow analysed | 505 | 1 | 195 |
+| not analysed: a call to an address held in a register (`s_swappc_b64`) | 0 | 226 | 0 |
+| analysed and reducible | 505 | 1 | 195 |
+| no loop | 401 | 1 | 132 |
+| one loop / several loops | 4 / 100 | 0 | 9 / 54 |
+| written as nested ifs and loops | 401 | 1 | 136 |
+| not written as a tree | 104 | 0 | 59 |
+
+- **Every analysed program is reducible** (701 of 701): no loop is entered at two places.
+- **Sizes.** Pixel: 333 are one block, 68 have 2 to 4 blocks, 102 have 5 to 16, 2 have 17 to 64. Compute: 55 are
+  one block, 41 have 2 to 4, 21 have 5 to 16, 34 have 17 to 64, 44 have more than 64. 11 compute programs hold
+  blocks no path reaches.
+- **Why 163 are not written as a tree.** All 104 pixel programs with a loop, and 18 compute programs: the block
+  that heads the loop ends in a conditional branch with both ways inside the loop, and the pass only handles a
+  header with one way in. 31 compute programs: a loop leaves to more than one block. 10 compute programs: a
+  block would have to appear twice, or was not placed. None of the other refusals of section 17 occurred: no
+  subroutine call by number, no hardware loop, no debug branch, no trap, no other end-of-program form.
+- **The vertex call.** 226 of 227 vertex programs call through the address in s4 within their first
+  instructions (section 16 and FINDINGS.md). The pass refuses a program with such a call. Since the call comes
+  back to the next instruction, it can be treated as an ordinary instruction once the translator supplies what
+  the called routine supplies (the vertex inputs, in vector registers from v4 on). Not built.
+
+What this means for the translator: flow is not a blocker. The tree is the convenient form and already covers
+538 programs. For the rest, any flow graph can be written as one loop around a choice of the next block, which
+needs no tree; reducibility of all 701 means the tree form can also be extended (a loop header with two ways
+in, a loop with several exits) without changing the programs' meaning. Neither extension is built.
+
+## 19. The reader's three-operand instructions, corrected (public table; hand-built words; boot b109)
+
+Checking the instruction meanings against the reader showed two faults in how the reader read the two-word
+vector format (VOP3), both corrected in `shell/shader_isa.*`:
+
+- **A compare's result is not a vector register.** Opcodes below 0x100 in this format are the compares; their
+  destination field names the scalar register pair, the condition mask or the execution mask that gets the
+  result. The reader had typed it as a vector register for every instruction.
+- **Not every instruction uses all three source fields.** The reader counted three sources always, so an unused
+  field holding 0 looked like a read of scalar register 0. The public table gives the operand count of each
+  instruction; with its rule for this format (a compare keeps its number, a two-source instruction is its
+  number + 0x100, a one-source instruction its number + 0x180): compares use two fields; re-encoded two-source
+  instructions use two, except the select and the three carry-in adds and subtracts, whose third field is a
+  lane mask; re-encoded one-source instructions use one, and the no-operation, pipe flush and clear-exception
+  use none; the format's own instructions use two or three as listed. For an opcode the table does not list
+  all three fields are kept and the reader says the count is not established. Eight instructions have a
+  second, scalar result in bits 14 to 8 of the first word (the public encoding file states that field).
+
+Source: Mesa ACO's opcode table (the column for this GPU generation) for the lists and counts, LLVM's AMDGPU
+encoding description for the field positions. Numbers only were taken.
+
+Measured effect (boot b109 against b108, the same 505 pixel programs): the report lists the most common sets
+of scalar registers read before written, covering 502 of the 505. In b108, 106 of those 502 seemed to read s0
+or s1; in b109 none does. The listed programs read only registers the module's first table names and the one
+after them (353 read s8-s9 s11-s12, 96 s8-s12, 24 s12, 12 s8 and s12, 10 s8-s9, 5 s8, 2 s9-s14), and 225 of
+227 vertex programs read s4 and s8. The program-shape pass also counts a compare's result, and the mask
+a select reads, as a pair of scalar registers: the programs move and combine their masks with the 64-bit scalar
+instructions (inferred from that; the number of lanes of a wave is not stated by the programs).
+
+## 20. What the binding rule means for the back end (from the measurements of FINDINGS.md, boots b100-b108)
+
+The module's first table says which scalar register carries which root parameter and where in a descriptor
+table each resource sits; the game's root signature object agrees with it only in the order and kind of the
+parameters (16 different root signatures were named with 926 different programs; one with 98 different first
+tables). A PC pipeline therefore cannot take the game's root signature as it is. For each pipeline the shell
+has to build a PC root signature from the first tables of the pipeline's programs - the same parameters in
+the same order, each table holding the entries the first table lists at their places - and apply the root
+arguments the game sets against that one. Register spaces come from the container's public resource list for
+declared resources; for an entry no program of the pipeline declares, the class and space are not established.
+Not built.
