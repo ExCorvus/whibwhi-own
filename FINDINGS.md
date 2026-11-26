@@ -1081,3 +1081,25 @@ measured fact of that PC library version, not something Direct3D 12 promises.
 Game test 2026-11-26 20:25: PASS, alive after 60 s, the copy's folder unchanged, no new missing answers, a
 render-target clear reached the PC list, last frame token 119. Measured in the run: 21 render-target and depth
 views made, all 21 found filled in the program's own heap memory, none empty.
+
+## 2026-11-26 - which memory the program holds for the graphics side (measured, game test 20:48)
+
+The memory library keeps every region the program asked for, with the protection it gave. A count at the end of
+the run (the graphics library's end-of-run report, numbers only) groups them. The bits above the low byte of the
+protection are Windows' own public page flags (winnt.h, SDK 10.0.26100: PAGE_GRAPHICS_NOACCESS 0x800, _READONLY
+0x1000, _READWRITE 0x2000, _EXECUTE_READ 0x8000, _COHERENT 0x20000, _NOCACHE 0x40000; PAGE_WRITECOMBINE 0x400).
+Held at the end of the 60-second run:
+
+- the two 24 GiB views: processor read-write (0x4), and graphics no-access (0x801) with no pages mapped yet;
+- graphics read-write (0x2004): the 6.5 GB streaming pool, a 100 MiB and a 30 MiB pool;
+- graphics read-write, write-combined (0x2404): 2.3 GB and 49 MB;
+- graphics read-write and coherent (0x22004): three pools, 2.4 GB together;
+- graphics execute-read, write-combined (0x8404): 28 MB (inferred: shader code);
+- graphics read-only (0x1004, 0x1404): 11 MB; graphics read-write, write-combined, no-cache (0x42404): 64 KiB;
+- processor only (0x4): one 20 MiB pool; and through XMemAlloc (protection 0x4) the five descriptor heaps
+  (attributes 0x00800004) and the display surface (0x00808000).
+
+The shell's memory library uses only the low byte (processor access) when it asks Windows; none of the memory is
+reachable by the graphics card today. The coherent flag is where the graphics side writes memory the processor
+reads at once: free on the console's shared memory, a property of the memory on a PC (ExCorvus: "a precise flag
+where the pipeline injects into the cpu").
