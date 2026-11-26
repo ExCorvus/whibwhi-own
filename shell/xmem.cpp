@@ -86,6 +86,29 @@ void note(const char* format, ...) {
     }
 }
 
+// WHIWHI_XMEM_TRACE=1 logs every call with its arguments (diagnostic boots), uncapped.
+bool trace() {
+    static const bool on = [] {
+        char v[8] = {};
+        const DWORD n = GetEnvironmentVariableA("WHIWHI_XMEM_TRACE", v, sizeof(v));
+        return n > 0 && v[0] == '1';
+    }();
+    return on;
+}
+
+void tracef(const char* format, ...) {
+    if (!trace()) {
+        return;
+    }
+    char text[512];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(text, sizeof(text), format, args);
+    va_end(args);
+    std::fprintf(stderr, "[xmem] %s", text);
+    std::fflush(stderr);
+}
+
 std::uint64_t round_up(std::uint64_t value, std::uint64_t to) {
     return (value + to - 1) & ~(to - 1);
 }
@@ -720,8 +743,17 @@ void* XMemVirtualAlloc(void* address, unsigned long long size, unsigned long typ
                        unsigned long protect) {
     Guard guard;
     ++state().stats.calls_virtual_alloc;
+    if (trace()) {
+        tracef("XMemVirtualAlloc(address 0x%llx, size 0x%llx, type 0x%lx, attr 0x%lx, protect 0x%lx)\n",
+               static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(address)), size, type, attributes,
+               protect);
+    }
     try {
-        return virtual_alloc(address, size, type, attributes, protect);
+        void* r = virtual_alloc(address, size, type, attributes, protect);
+        if (trace()) {
+            tracef("  -> 0x%llx\n", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(r)));
+        }
+        return r;
     } catch (...) {
         return refuse_virtual_alloc(ERROR_NOT_ENOUGH_MEMORY, "ran out of memory for its record", address, size, type,
                                     attributes, protect);
