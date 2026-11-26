@@ -18,7 +18,9 @@
 #include <cstdio>
 #include <intrin.h>
 
-// The block. Non-zero first byte keeps the linker from dropping the thread-local directory.
+// The block. Plain thread-local (no allocate override, so the compiler accesses it per-thread). whiwhi_seat is
+// linked first so its .tls comes first in the exe's thread-local section - our array at offset 0, the CRT's own
+// thread-local vars after it. The game reads its data at slot0+0.
 __declspec(thread) __declspec(align(WHIWHI_THREAD_BLOCK_ALIGNMENT))
 unsigned char whiwhi_exe_block[WHIWHI_THREAD_BLOCK_BYTES] = {1};
 
@@ -62,7 +64,6 @@ void write_template() {
     }
     const auto* tls = reinterpret_cast<const IMAGE_TLS_DIRECTORY64*>(base + tls_rva);
     auto* tpl = reinterpret_cast<unsigned char*>(tls->StartAddressOfRawData);
-    seat_log("[seat] write_template\n");
     DWORD old = 0;
     if (VirtualProtect(tpl, WHIWHI_THREAD_BLOCK_BYTES, PAGE_READWRITE, &old)) {
         std::memset(tpl, 0, WHIWHI_THREAD_BLOCK_BYTES);
@@ -86,7 +87,6 @@ void* whiwhi_thread_block(void) {
 }
 
 int whiwhi_thread_block_claim(const WhiwhiThreadImage* image) {
-    seat_log("[seat] claim\n");
     if (!image || image->initial_bytes > WHIWHI_THREAD_BLOCK_BYTES ||
         (image->initial_bytes != 0 && !image->initial_data)) {
         return 0;
@@ -96,9 +96,7 @@ int whiwhi_thread_block_claim(const WhiwhiThreadImage* image) {
     }
     g_image = *image;
     fill_current();
-    seat_log("[seat] filled, writing template\n");
     write_template();
-    seat_log("[seat] claim done\n");
     return 1;
 }
 
