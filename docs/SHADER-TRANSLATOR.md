@@ -320,3 +320,48 @@ public definitions (LLVM's `VOP3Pe_gfx10`, `MUBUF_Real_gfx10`, `MTBUF_Real_gfx10
 as defined there; its test has a word for each. The counts of section 13 are not changed by this: the packed
 format appears there with opcodes 33 and 34 and the untyped buffer format with 13 and 14, all below 128, and no
 typed buffer instruction appears in that list at all.
+
+## 15. Where the translator gets its program, and what the programs expect (boots b89-b96; measured)
+
+**The input is the container, not the precompiled description.** Section 12 said the code is only in the
+descriptions of device slots 57 and 67. That was wrong: every container holds the console's program,
+zlib-packed, inside a module (`docs/exe-map/SHADER-PATH.md` section 10). `shell/shader_program.*` unpacks
+the module in memory and finds the program; the instruction reader decodes it. In a run this worked for
+all 581 distinct containers. Because the game falls back to the public pipeline descriptions with these
+containers when slots 57 and 67 are refused, a translator can work from the container alone:
+
+| from | what |
+|---|---|
+| the module's code | the program |
+| the container's ISG1 and OSG1 parts (public layout) | the shader's inputs and outputs by name |
+| the container's PSV0 part (public layout) | the resources the shader binds: kind, register, space |
+| the pipeline description (public layout) | the root signature, the other fixed state |
+
+**What the programs expect and use** (`shell/shader_shape.*`; counts in FINDINGS.md, entry for boots
+b89-b96). The points a translator has to be built around:
+
+- A descriptor (of an image, a sampler, a buffer) is always loaded in one step from a table whose address
+  arrives in a register, at an offset that is a multiple of 32 bytes. Inference: the register holds a
+  root descriptor table's place in the game's descriptor memory. If that holds, "load 8 words from
+  [table + 32 * n], then sample" translates to "resource n of that table", and the translator never has to
+  read the game's descriptor records at run time.
+- Which register carries which table is not the same in every program. It has to come from data: the
+  module's tables, the PSV0 part and the root signature. Not established yet; it is the next thing to
+  work out.
+- 608 of 1,302 precompiled programs have branches, 108 have loops. Control flow has to be rebuilt
+  (section 6) before most programs can be translated.
+
+**The back end is an open decision.** The PC device takes shaders only as containers of its own two kinds;
+it has no in-memory way to be handed SPIR-V (its one SPIR-V input reads files from a folder, which the shell
+does not use). So either this translator writes one of those container kinds instead of SPIR-V, or the
+separately built PC library gets a small in-memory entry for translated shaders. Until that is decided, the
+work that is the same either way comes first: the register-to-table mapping, control flow, and a form of the
+program in between (operations on values, resources by table and position) that either back end can be
+written from.
+
+**Order of work from here.**
+
+1. The register-to-table mapping (module tables, PSV0, root signature), measured on the game's containers.
+2. Control flow: blocks, branches, loops, as a structure a shader language can express.
+3. The in-between form and the most used instructions (section 13's list) on top of it.
+4. The back end, once decided.
