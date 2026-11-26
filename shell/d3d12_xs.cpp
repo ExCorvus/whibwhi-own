@@ -4696,8 +4696,13 @@ void census_packed_program(const std::uint8_t* container, std::uint32_t bytes) {
                         } else if (statement.find("refused: reads s") != std::string::npos ||
                                    statement.find("SMEM 9") != std::string::npos) {
                             listing_class = 0x700;
-                        } else if (statement.find("refused: reads v") != std::string::npos) {
+                        } else if (statement.find("refused: reads v") != std::string::npos ||
+                                   statement.find("refused: not written: MIMG 0") != std::string::npos) {
                             listing_class = 0x800;
+                        } else if (statement.find("refused: not written: VOP1 2") != std::string::npos ||
+                                   statement.find("refused: not written: VINTRP 2") != std::string::npos ||
+                                   statement.find("from the descriptor heap by number") != std::string::npos) {
+                            listing_class = 0xA00;
                         } else if (statement.find("a parameter the container") != std::string::npos ||
                                    statement.find("a destination of a form") != std::string::npos ||
                                    statement.find("holds a word of a descriptor") != std::string::npos) {
