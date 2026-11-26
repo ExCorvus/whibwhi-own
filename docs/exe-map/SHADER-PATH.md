@@ -375,3 +375,72 @@ The register space is in neither table; the container's 'PSV0' part has it.
 resources the container's 'PSV0' part declares, and with what the program does (which register it loads each
 descriptor through, and at which offset). The numbers are in FINDINGS.md under the same date. No byte of a
 table is logged.
+
+## 12. Which register carries what, checked against the root signature (boots b100-b108; measured)
+
+Section 11 read the two tables against what each program does. This section checks them against the root
+signature the image names in the same pipeline request (device slot 86: the stream names a root signature and
+the vertex and pixel containers; device slot 62: a root signature and a compute container). The shell reads
+every root signature the image creates with the PC's own deserializer: parameters, the ranges of each table,
+static samplers, flags.
+
+**Correction to sections 10 and 11.** Their totals ("581 distinct containers") told containers apart by address.
+Worker threads keep a container at an address that is used again for the next shader, so most containers were
+never looked at. Containers are now told apart by their bytes; the first 1,024 different ones of a run are 505
+pixel, 292 compute and 227 vertex shaders. The module reader finds the program in 927 of them (97 compute
+modules are refused: more than one end-of-program word with something other than filler after the first, or a
+word of no public instruction format).
+
+### The rule (926 pairs, no exception)
+
+Root parameters take scalar registers in their order, starting at **s8** (vertex and pixel programs) or **s4**
+(compute programs):
+
+| root parameter | registers | first-table entries at its first register |
+|---|---|---|
+| descriptor table | 1 (the table's address) | one entry for each descriptor: kind 3 (resource) or kind 6 (sampler), with the shader register and the place in the table in 32-bit words (a resource descriptor is 8 words) |
+| run of n constants | n | one entry of kind 0, count word n |
+| buffer address | 2 | one entry of kind 1, count word 2 |
+
+After the last parameter's registers:
+
+| when the root signature says | the first table has | at |
+|---|---|---|
+| shaders index the resource heap directly (flag 0x400) | one entry of kind 5 | the next register |
+| shaders index the sampler heap directly (flag 0x800) | one entry of kind 6 | the next register after that (or the next, without a resource heap) |
+
+The second byte of an entry's last word is the number of its root parameter. A static sampler is an entry of
+kind 4 with no register: the program holds the sampler's state itself (see below).
+
+### What the root signature does not say
+
+The 926 pairs name 16 different root signature layouts. One layout was named with 98 different first tables.
+The image names one root signature for all shaders of the same shape, so the ranges of its tables, its static
+samplers and sometimes the shader register of its constants are those of one of these shaders, not of the one
+in the request. Only 36 of 926 pairs agree entry for entry. What a table holds for a shader is said by that
+shader's own first table (and, for the resources the shader declares, by its second table and its container's
+'PSV0' part, which also give the class and the register space).
+
+For binding on a PC this means the image's root signature object cannot be handed to the PC device with these
+shaders: the PC needs table ranges that cover what the shaders read. The shell will have to build a root
+signature for each pipeline from its modules, in the image's parameter order, and apply the root arguments the
+image sets against it. Not built.
+
+### The start of a program
+
+- Two no-operation instructions, each with a constant word, begin every program (927 of 927). The words are the
+  third and fifth words of the container's 'HASH' part. The instruction is used nowhere else.
+- Pixel: the register right after the last one the first table names is moved into the register the
+  interpolation instructions read (489 of the 500 programs that interpolate).
+- Vertex: a call through the address in s4 within two instructions of the start (226 of 227). What is called has
+  not been read; afterwards the vertex inputs are in vector registers.
+- Compute: one to three of the registers right after the last one named are read before being written. What
+  they hold is not established.
+
+### Static samplers
+
+A program does not load a static sampler. Where it samples with one, the four sampler registers are written by
+moves of constants just before (all 12 pixel programs with fixed-sampler entries, 44 of 79 compute programs).
+The constants are the hardware's sampler state. The second table names which declared sampler register a fixed
+sampler is. In 35 compute programs with fixed-sampler entries some or all sampling instructions get their
+sampler another way; not read yet.
