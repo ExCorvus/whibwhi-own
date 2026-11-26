@@ -1169,3 +1169,40 @@ descriptor, one null descriptor and 4,096 descriptors for its own internal work,
 writes into them. The program's heap memory is exactly the size it asked for, and the memory around it is the
 program's, so vkd3d-proton cannot use that memory as its heap as it is. ExCorvus chose to mirror the program's heap
 into vkd3d-proton's heap at the border instead (no vkd3d-proton change for this).
+## 2026-11-26 - the device byte watched in two visible runs, and the installation's own libraries (game tests 22:07, 22:09, 22:36)
+
+Two runs with the window shown (game_test.ps1 -Show), one with the device byte at +0x18 set to 0 for that run only
+(22:07) and one with the committed 1 (22:09). Both passed: alive after 60 s, the copy's folder unchanged, frame
+tokens 1,591 and 1,579, 4,096 pipelines each. ExCorvus watched: with 0 the window was white, with 1 it was black.
+In both runs the log shows exactly one picture presented to the window, at the very end of the run; for the rest
+of each run the window held nothing from the program, so the white and the black are not the program's picture.
+The log does not record the calls in which the two settings differ (device slots 17 and 24). Why the two windows
+differ is not measured.
+
+ExCorvus: a test has to run with the program's whole installation, not with libraries left out. Measured, from the
+files only: the executable imports 68 libraries; six of them ship in the installation (XboxBvhBuilder.dll,
+Bink2Scarlett.dll, amd_fidelityfx_loader_xbox.dll, libHttpClient.GDK.dll, MSVCP140.dll, VCRUNTIME140(_1).dll).
+Everything those shipped libraries import is present: the shell's d3d12_xs.dll and xmem.dll export the functions
+they ask for (XboxBvhBuilder: D3D12SerializeVersionedRootSignature and XMemVirtualQuery; Bink2Scarlett: XMemAlloc,
+XMemFree and Windows' own XAudio2_9.dll, which is in System32; the FidelityFX upscaler: D3D12CreateRootSignatureDeserializer,
+XMemAlloc, XMemFree, XMemGetWorkingSetStatistics). Until now the shell put its own XboxBvhBuilder.dll (a skeleton
+that answers failure) in place of the installation's, with the stated reason that the shipped one cannot load on
+a PC; that reason did not hold. The exe map (GRAPHICS-CALLS.md section 5, item 7) already said it is to be loaded
+unchanged against the shell's device and memory libraries.
+
+Changed for the run at 22:36 (not committed: the run failed): host_libraries.cpp logs, once per library, the file
+it was loaded from; game_test.ps1 leaves out of the run folder every shell file whose name the installation ships
+itself. Result of that run (FAIL, 5 s, the copy's folder unchanged):
+- every import connected (587 of 587). The shipped XboxBvhBuilder.dll, amd_fidelityfx_loader_xbox.dll,
+  libHttpClient.GDK.dll and Bink2Scarlett.dll were loaded from the installation. MSVCP140.dll, VCRUNTIME140.dll and
+  VCRUNTIME140_1.dll were loaded from C:\Windows\System32, not from the installation (why is not measured).
+- the run ended at the step where, in the passing run 22:09, the program constructs its ray-tracing builder (right
+  after the second 3840 x 2160 surface). Windows recorded an application crash of boot_image.exe in KERNELBASE.dll
+  with code 0xe06d7363 (a C++ exception that nothing caught). No device call is logged between the surface and the
+  end. Which code threw it, and what it was given, is not measured.
+- Windows also recorded two LiveKernelEvent 141 reports (a graphics hang report) at 22:36:40. Their attached dumps
+  are named WATCHDOG-20261125-2149 and -2150 (the day before), and the System log holds no driver event from these
+  minutes; so they look like older reports sent now, not a failure of this run. Not established.
+
+Also noted, not followed: the tool connect_imports now ends with a Windows heap-corruption stop (0xc0000374)
+before printing its report, with and without the installation folder.
