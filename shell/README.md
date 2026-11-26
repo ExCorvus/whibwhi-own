@@ -65,6 +65,12 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
   instructions compute, written as a one-lane reference interpreter and checked on hand-built words. It
   refuses memory, image, interpolation, export and branch instructions, and every case its public sources
   do not state. `docs/SHADER-MEANINGS.md` lists each instruction with its source.
+- `shader_access.hpp` / `shader_access.cpp` - for an instruction that touches memory, an image, an interpolated
+  attribute or an output: which registers hold what, in which order, and how many (scalar loads, buffer loads
+  and stores, the order of an image instruction's address words, the interpolation steps, exports, whole-wave
+  instructions). A description, not an execution; it refuses what its public sources do not establish. Tried
+  on hand-built words only: nothing uses it on the game's programs yet. `docs/SHADER-ACCESS.md` gives the
+  source of each statement.
 - `shader_translate.hpp` / `shader_translate.cpp` — translates a console shader to SPIR-V, kept in memory. Today
   it handles straight-line compute shaders of a handful of instructions and refuses everything else.
 - `spirv.hpp` / `spirv.cpp` — our own small SPIR-V writer.
@@ -109,9 +115,9 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 
 ## Tests
 
-`tests/` holds 25 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
+`tests/` holds 26 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
 shader_container, shader_dxbc, shader_program, shader_walk, shader_names, shader_shape, shader_flow,
-shader_emit_flow, shader_meaning, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
+shader_emit_flow, shader_meaning, shader_access, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
 game files, no GPU.
 
 ## Build and test
