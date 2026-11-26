@@ -32,6 +32,8 @@
 // were read and matched: 8 queue, 9 allocator, 14 descriptor heap, 26 custom heap properties, 41 command
 // signature, and the console-only methods above slot 43). See docs/exe-map/GRAPHICS-CALLS.md.
 #include "d3d12_xs.h"
+#include "shader_container.hpp"  // names and sizes of the chunks of a shader container
+#include "shader_isa.hpp"        // the console instruction reader, used to say what a shader's code part holds
 #include "xg_xs.h"  // the texture description; the library's functions are looked up by name at run time
 
 #define WIN32_LEAN_AND_MEAN
@@ -449,6 +451,7 @@ void __stdcall w_list_copy_texture(Wrap* self, const D3D12_TEXTURE_COPY_LOCATION
 }
 
 Wrap* g_device = nullptr;  // the one device wrapper
+unsigned long g_device_thread = 0;  // the thread D3D12XboxCreateDevice was called on
 
 // Slot 7 of every object the device creates, GetDevice(identifier, out): the device the image knows is our
 // wrapper, so that is the one handed back.
@@ -1649,6 +1652,665 @@ HRESULT __stdcall w_device_pipeline(Wrap*, void*, void*, void** out, void*, void
              "game's shaders yet\n");
     });
     return 0x80004001L;  // E_NOTIMPL
+}
+
+// ---- pipeline state requests: what they carry ----------------------------------------------------------------
+//
+// The image asks for pipeline states through console entry points of the device (call sites and shapes in
+// docs/exe-map/SHADER-PATH.md): slot 62 (description, 0, 0, identifier, out) with a description shaped like the
+// public compute one; slots 55, 57 and 67 (description, identifier, out); slot 86 ({size, stream}, identifier,
+// out); slot 101 ({kind, count, entries}, identifier, out). Slots 62 and 86 are answered further down. Slots 55,
+// 57 and 67 name no shader container in a run (their descriptions hold other blocks, not understood) and slot
+// 101 is the ray-tracing one; those are refused with the result place cleared, and the image's own check
+// decides what happens (it carries on without the pipeline).
+//
+// What a request carries is shown, as numbers and header fields only - never shader bytes: the thread
+// that asks, the first words of the description, and for every pointer in the description that leads to a
+// 'DXBC' container the names and sizes of that container's chunks. Each distinct list of chunk names is shown
+// once, with how many containers had it when the run ends.
+struct ContainerCensus {
+    SRWLOCK lock = SRWLOCK_INIT;
+    std::map<std::string, unsigned long long> seen;  // chunk names in order -> containers with exactly that list
+    unsigned long long containers = 0;
+    unsigned long long refused = 0;
+};
+ContainerCensus g_containers;
+std::atomic<unsigned long long> g_pipeline_requests[6];  // slots 55, 57, 62, 67, 86, 101
+
+// What is inside a DXIL part whose bitcode was taken out. Measured in a run (boot b83): the part has the public
+// program header, but its bitcode is four bytes, "NOBC", at the very end, and the room between the header and
+// those four bytes holds something else. This looks at that room in memory and reports numbers only: its size,
+// where the word that ends a program in the console GPU's instruction set (0xBF810000, public instruction set
+// description) stands on a 4-byte boundary, and what the shell's instruction reader makes of the words up to
+// the first such end - how many instructions of which format, and where it first cannot classify one. No
+// instruction word is printed.
+void show_stripped_program(const char* where, const std::uint8_t* part, std::uint32_t part_bytes,
+                           const char* kind) {
+    static SRWLOCK lock = SRWLOCK_INIT;
+    static std::map<std::string, int> shown;
+    AcquireSRWLockExclusive(&lock);
+    const int number = ++shown[kind];
+    ReleaseSRWLockExclusive(&lock);
+    if (number > 3) {
+        return;
+    }
+    std::uint32_t bitcode_offset = 0, bitcode_size = 0;
+    std::memcpy(&bitcode_offset, part + 16, 4);
+    std::memcpy(&bitcode_size, part + 20, 4);
+    if (bitcode_offset < 16 || static_cast<unsigned long long>(8) + bitcode_offset + bitcode_size > part_bytes) {
+        logf("%s: %s shader: the DXIL part's header does not describe its own contents\n", where, kind);
+        return;
+    }
+    const std::uint8_t* room = part + 24;
+    const std::uint32_t room_bytes = bitcode_offset - 16;
+    const bool nobc = bitcode_size == 4 && std::memcmp(part + 8 + bitcode_offset, "NOBC", 4) == 0;
+    std::string ends;
+    std::uint32_t first_end = room_bytes;
+    int end_count = 0;
+    for (std::uint32_t at = 0; at + 4 <= room_bytes; at += 4) {
+        std::uint32_t word = 0;
+        std::memcpy(&word, room + at, 4);
+        if (word == 0xBF810000u) {
+            if (end_count == 0) {
+                first_end = at;
+            }
+            if (++end_count <= 6) {
+                char text[24];
+                std::snprintf(text, sizeof(text), " +0x%x", at);
+                ends += text;
+            }
+        }
+    }
+    std::string reading = "no end-of-program word found, nothing read";
+    if (end_count) {
+        const whiwhi::shell::DecodedShader decoded =
+            whiwhi::shell::decode_shader(room, first_end + 4, whiwhi::shell::ShaderStage::kUnknown);
+        std::map<std::string, int> formats;
+        for (const whiwhi::shell::Instruction& instruction : decoded.instructions) {
+            ++formats[whiwhi::shell::isa_format_name(instruction.format)];
+        }
+        reading = std::to_string(decoded.instructions.size()) + " instruction(s) read from the start of the room to "
+                  "the first end word:";
+        for (const auto& item : formats) {
+            reading += " " + item.first + " " + std::to_string(item.second);
+        }
+        if (decoded.has_bad_instruction) {
+            char text[96];
+            std::snprintf(text, sizeof(text), "; first word it cannot classify at +0x%x (%s)", decoded.bad_pc,
+                          decoded.bad_reason.c_str());
+            reading += text;
+        } else {
+            reading += "; every word classified";
+        }
+    }
+    logf("%s: %s shader: DXIL part of %u bytes, bitcode %s; %u bytes between the header and the bitcode; "
+         "end-of-program word %d time(s)%s%s; %s\n",
+         where, kind, part_bytes, nobc ? "taken out (\"NOBC\")" : "present or of another form", room_bytes, end_count,
+         end_count ? " at" : "", ends.c_str(), reading.c_str());
+}
+
+// Shows the chunk table of the container at `pointer` (names and sizes). Returns false when it is not one.
+bool show_container(const char* where, std::size_t offset_in_description, const void* pointer) {
+    if (!can_read(pointer, 0x20)) {
+        return false;
+    }
+    const auto* bytes = static_cast<const std::uint8_t*>(pointer);
+    if (std::memcmp(bytes, "DXBC", 4) != 0) {
+        return false;
+    }
+    std::uint32_t declared = 0;
+    std::memcpy(&declared, bytes + 0x18, 4);
+    if (declared < 0x20 || declared > 0x4000000 || !can_read(pointer, declared)) {
+        AcquireSRWLockExclusive(&g_containers.lock);
+        const bool first = g_containers.refused++ == 0;
+        ReleaseSRWLockExclusive(&g_containers.lock);
+        if (first) {
+            logf("%s: a 'DXBC' container at +0x%zx of the description declares %u bytes that cannot be read\n", where,
+                 offset_in_description, declared);
+        }
+        return true;
+    }
+    const whiwhi::shell::ShaderContainer container = whiwhi::shell::read_shader_container(bytes, declared);
+    std::string names;
+    std::string detail;
+    if (container.ok()) {
+        for (const whiwhi::shell::ShaderChunk& chunk : container.chunks) {
+            char text[48];
+            // A chunk name is four bytes of the header; anything not printable is shown as a dot.
+            char name[5] = {0, 0, 0, 0, 0};
+            for (int i = 0; i < 4; ++i) {
+                const char c = chunk.name[i];
+                name[i] = (c >= 0x20 && c < 0x7f) ? c : '.';
+            }
+            names += names.empty() ? "" : " ";
+            names += name;
+            std::snprintf(text, sizeof(text), "%s%s %u", detail.empty() ? "" : ", ", name, chunk.size);
+            detail += text;
+        }
+        // The DXIL part's own header says what kind of shader it is and for which shader model (the version
+        // word of the public DXIL program header: kind in the high half, model in the low byte).
+        for (const whiwhi::shell::ShaderChunk& chunk : container.chunks) {
+            if (std::memcmp(chunk.name, "DXIL", 4) == 0 && chunk.size >= 24) {
+                std::uint32_t version = 0;
+                std::memcpy(&version, bytes + chunk.offset + 8, 4);
+                static const char* const kKinds[] = {"pixel", "vertex", "geometry", "hull", "domain", "compute",
+                                                     "library", "ray generation", "intersection", "any hit",
+                                                     "closest hit", "miss", "callable", "mesh", "amplification"};
+                const unsigned kind = version >> 16;
+                char text[64];
+                std::snprintf(text, sizeof(text), "  [%s shader, model %u.%u]", kind < 15 ? kKinds[kind] : "unknown kind",
+                              (version >> 4) & 0xf, version & 0xf);
+                names += text;
+                detail += text;
+                show_stripped_program(where, bytes + chunk.offset + 8, chunk.size, kind < 15 ? kKinds[kind] : "unknown kind");
+                break;
+            }
+        }
+    } else {
+        names = std::string("(not readable: ") + container.reason + ")";
+    }
+    AcquireSRWLockExclusive(&g_containers.lock);
+    ++g_containers.containers;
+    const unsigned long long count = ++g_containers.seen[names];
+    const std::size_t kinds = g_containers.seen.size();
+    ReleaseSRWLockExclusive(&g_containers.lock);
+    if (count == 1 && kinds <= 64) {
+        logf("%s: shader container at +0x%zx of the description: %u bytes, %u chunk(s): %s%s\n", where,
+             offset_in_description, declared, container.chunk_count, container.ok() ? detail.c_str() : names.c_str(),
+             container.ok() && container.has_priv
+                 ? (container.priv_well_formed ? " (the PRIV chunk starts as the image requires)"
+                                               : " (the PRIV chunk does not start as the image requires)")
+                 : "");
+    }
+    return true;
+}
+
+// Looks at every 8-byte place of a description for a pointer to a container. Returns how many were found.
+int show_containers_in(const char* where, const void* description, std::size_t bytes) {
+    int found = 0;
+    for (std::size_t at = 0; at + 8 <= bytes; at += 8) {
+        if (!can_read(static_cast<const std::uint8_t*>(description) + at, 8)) {
+            break;
+        }
+        std::uintptr_t value = 0;
+        std::memcpy(&value, static_cast<const std::uint8_t*>(description) + at, 8);
+        if (value > 0x10000 && value < 0x7FFFFFFF0000ull && (value & 3) == 0 &&
+            show_container(where, at, reinterpret_cast<const void*>(value))) {
+            ++found;
+        }
+    }
+    return found;
+}
+
+// Looks, in memory, at one block a description points at (a pointer followed by its size): how long it is,
+// where the console instruction set's end-of-program word stands in it, and what the shell's instruction reader
+// makes of the words before the first such end. Numbers only; no word of the block is printed.
+void probe_block(const char* where, std::size_t offset_in_description, const std::uint8_t* block,
+                 std::size_t block_bytes) {
+    std::string ends;
+    std::size_t first_end = block_bytes;
+    int end_count = 0;
+    for (std::size_t at = 0; at + 4 <= block_bytes; at += 4) {
+        std::uint32_t word = 0;
+        std::memcpy(&word, block + at, 4);
+        if (word == 0xBF810000u) {
+            if (end_count == 0) {
+                first_end = at;
+            }
+            if (++end_count <= 6) {
+                char text[24];
+                std::snprintf(text, sizeof(text), " +0x%zx", at);
+                ends += text;
+            }
+        }
+    }
+    std::string reading;
+    if (end_count) {
+        // Try each 4-byte start before the first end and keep the earliest one from which every word classifies.
+        std::size_t clean_start = first_end + 4;
+        std::size_t clean_count = 0;
+        std::map<std::string, int> formats;
+        for (std::size_t start = 0; start <= first_end; start += 4) {
+            const whiwhi::shell::DecodedShader decoded = whiwhi::shell::decode_shader(
+                block + start, first_end + 4 - start, whiwhi::shell::ShaderStage::kUnknown);
+            if (!decoded.has_bad_instruction && !decoded.instructions.empty()) {
+                clean_start = start;
+                clean_count = decoded.instructions.size();
+                for (const whiwhi::shell::Instruction& instruction : decoded.instructions) {
+                    ++formats[whiwhi::shell::isa_format_name(instruction.format)];
+                }
+                break;
+            }
+        }
+        if (clean_count) {
+            char text[96];
+            std::snprintf(text, sizeof(text), "; from +0x%zx to the first end every word classifies: %zu instruction(s):",
+                          clean_start, clean_count);
+            reading = text;
+            for (const auto& item : formats) {
+                reading += " " + item.first + " " + std::to_string(item.second);
+            }
+        } else {
+            reading = "; no start before the first end from which every word classifies";
+        }
+    }
+    logf("%s: block at +0x%zx of the description: %zu bytes; end-of-program word %d time(s)%s%s%s\n", where,
+         offset_in_description, block_bytes, end_count, end_count ? " at" : "", ends.c_str(), reading.c_str());
+}
+
+void probe_blocks_in(const char* where, const void* description, std::size_t bytes) {
+    for (std::size_t at = 0; at + 16 <= bytes; at += 8) {
+        if (!can_read(static_cast<const std::uint8_t*>(description) + at, 16)) {
+            break;
+        }
+        std::uintptr_t pointer = 0;
+        unsigned long long size = 0;
+        std::memcpy(&pointer, static_cast<const std::uint8_t*>(description) + at, 8);
+        std::memcpy(&size, static_cast<const std::uint8_t*>(description) + at + 8, 8);
+        if (pointer > 0x10000 && pointer < 0x7FFFFFFF0000ull && size >= 4 && size <= 0x1000000 &&
+            can_read(reinterpret_cast<const void*>(pointer), static_cast<std::size_t>(size))) {
+            probe_block(where, at, reinterpret_cast<const std::uint8_t*>(pointer), static_cast<std::size_t>(size));
+        }
+    }
+}
+
+void show_pipeline_request(int index, const char* where, const void* description, std::size_t bytes,
+                           const void* caller) {
+    const unsigned long long number = ++g_pipeline_requests[index];
+    const int found = description ? show_containers_in(where, description, bytes) : 0;
+    if (number <= 3 && description) {
+        probe_blocks_in(where, description, bytes);
+    }
+    if (number <= 2 || (number & (number - 1)) == 0) {
+        unsigned long long words[8] = {};
+        if (description && can_read(description, sizeof(words))) {
+            std::memcpy(words, description, sizeof(words));
+        }
+        logf("%s: pipeline state request #%llu on thread %lu, returns to %p; %d shader container(s) named in the "
+             "first 0x%zx bytes; description words %llx %llx %llx %llx %llx %llx %llx %llx\n",
+             where, number, GetCurrentThreadId(), caller, found, bytes, words[0], words[1], words[2], words[3],
+             words[4], words[5], words[6], words[7]);
+    }
+}
+
+void clear_result(void** out) {
+    if (out && can_read(out, sizeof(void*))) {
+        *out = nullptr;
+    }
+}
+
+// ---- pipeline states made on the PC device -------------------------------------------------------------------
+//
+// Measured in a run (boot b81): every shader container a pipeline request names has the chunks SFI0, ISG1, OSG1,
+// PSV0, HASH, DXIL and PRIV. Apart from PRIV (the image's own, read by the image for its root signature) that is
+// the public DXIL container, the shader form a PC D3D12 device takes. So no translation of shader code is needed
+// for these requests: the same bytes are handed to the PC device, which is what reads them.
+//
+// Two requests are answered this way: slot 86 (the public "pipeline state from a stream" argument list, the
+// stream in the public subobject format) and slot 62 (a description in the public compute form, with two extra
+// arguments that were zero at the one call site). The root signature named is this library's object and is
+// replaced by the PC object behind it; a cached pipeline blob is the console's and is not passed on (the PC
+// device then builds from the shaders, which is the documented fallback); everything else goes through
+// unchanged. A stream with a subobject type the public list does not have, or a shader that is not such a
+// container, is refused.
+//
+// Threads: the image asks for most pipeline states from its worker threads (tens of thousands of requests in the
+// first seconds of a run). Building pipelines on another thread is one of the two paths this project bans until
+// ExCorvus decides otherwise (AGENTS.md rule 7), so only a request made on the thread the device was created on is
+// carried out here; a request on any other thread is refused as before and counted.
+ID3D12Device13* pc_device13(Wrap* device);
+
+std::atomic<unsigned long long> g_pipelines_made{0};
+std::atomic<unsigned long long> g_pipelines_failed{0};
+std::atomic<unsigned long long> g_pipelines_not_taken{0};
+std::atomic<unsigned long long> g_pipelines_other_thread{0};
+
+bool on_device_thread() {
+    return g_device_thread != 0 && GetCurrentThreadId() == g_device_thread;
+}
+
+// Whether the bytes are a shader the PC device takes: a 'DXBC' container with a DXIL part whose own header
+// checks out (the public DXIL program header: version word, size, 'DXIL', version, bitcode offset and size,
+// and the bitcode's first four bytes).
+bool pc_takes_shader(const void* code, unsigned long long length, std::string& why) {
+    if (!code || length < 0x20 || length > 0x4000000 || !can_read(code, static_cast<std::size_t>(length))) {
+        why = "the shader bytes cannot be read";
+        return false;
+    }
+    const auto* bytes = static_cast<const std::uint8_t*>(code);
+    const whiwhi::shell::ShaderContainer container =
+        whiwhi::shell::read_shader_container(bytes, static_cast<std::size_t>(length));
+    if (!container.ok() || container.kind != whiwhi::shell::ContainerKind::kDxbc) {
+        why = "the shader is not a readable 'DXBC' container";
+        return false;
+    }
+    for (const whiwhi::shell::ShaderChunk& chunk : container.chunks) {
+        if (std::memcmp(chunk.name, "DXIL", 4) != 0) {
+            continue;
+        }
+        if (chunk.size < 24) {
+            why = "the DXIL part is too short for its header";
+            return false;
+        }
+        const std::uint8_t* part = bytes + chunk.offset + 8;
+        std::uint32_t magic = 0, bitcode_offset = 0, bitcode_size = 0;
+        std::memcpy(&magic, part + 8, 4);
+        std::memcpy(&bitcode_offset, part + 16, 4);
+        std::memcpy(&bitcode_size, part + 20, 4);
+        if (magic != 0x4C495844u) {  // 'DXIL'
+            why = "the DXIL part does not have the DXIL program header";
+            return false;
+        }
+        if (bitcode_size < 4 || static_cast<unsigned long long>(8) + bitcode_offset + bitcode_size > chunk.size) {
+            why = "the DXIL part's bitcode does not fit inside it";
+            return false;
+        }
+        const std::uint8_t* bitcode = part + 8 + bitcode_offset;
+        if (bitcode[0] != 'B' || bitcode[1] != 'C' || bitcode[2] != 0xC0 || bitcode[3] != 0xDE) {
+            // Measured (boot b83): header words 00010066 00000079 4c495844 00000106 000001d8 00000004 for a
+            // part of 484 bytes, and the four bytes at the bitcode's place are "NOBC".
+            why = bitcode_size == 4 && std::memcmp(bitcode, "NOBC", 4) == 0
+                      ? "the shader's DXIL part has no bitcode (it holds \"NOBC\" in its place); what the part "
+                        "carries instead is not something the PC device takes"
+                      : "the DXIL part's bitcode does not start as bitcode does";
+            return false;
+        }
+        return true;
+    }
+    why = "the container has no DXIL part";
+    return false;
+}
+
+template <typename T>
+struct StreamSubobject {
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type;
+    T data;
+};
+
+// Where the payload of a subobject of the public stream format starts and how long the whole subobject is.
+// Returns false for a type the public list does not have.
+bool stream_subobject_shape(unsigned type, std::size_t& payload_at, std::size_t& payload_bytes,
+                            std::size_t& whole_bytes) {
+#define WHIWHI_SHAPE(T)                                                                                               \
+    do {                                                                                                              \
+        payload_at = offsetof(StreamSubobject<T>, data);                                                              \
+        payload_bytes = sizeof(T);                                                                                    \
+        whole_bytes = (sizeof(StreamSubobject<T>) + 7) & ~static_cast<std::size_t>(7);                                \
+        return true;                                                                                                  \
+    } while (0)
+    switch (type) {
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE: WHIWHI_SHAPE(void*);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS: WHIWHI_SHAPE(D3D12_SHADER_BYTECODE);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT: WHIWHI_SHAPE(D3D12_STREAM_OUTPUT_DESC);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND: WHIWHI_SHAPE(D3D12_BLEND_DESC);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK: WHIWHI_SHAPE(UINT);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER: WHIWHI_SHAPE(D3D12_RASTERIZER_DESC);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL: WHIWHI_SHAPE(D3D12_DEPTH_STENCIL_DESC);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT: WHIWHI_SHAPE(D3D12_INPUT_LAYOUT_DESC);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE: WHIWHI_SHAPE(D3D12_INDEX_BUFFER_STRIP_CUT_VALUE);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY: WHIWHI_SHAPE(D3D12_PRIMITIVE_TOPOLOGY_TYPE);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS: WHIWHI_SHAPE(D3D12_RT_FORMAT_ARRAY);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT: WHIWHI_SHAPE(DXGI_FORMAT);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC: WHIWHI_SHAPE(DXGI_SAMPLE_DESC);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK: WHIWHI_SHAPE(UINT);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO: WHIWHI_SHAPE(D3D12_CACHED_PIPELINE_STATE);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS: WHIWHI_SHAPE(D3D12_PIPELINE_STATE_FLAGS);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1: WHIWHI_SHAPE(D3D12_DEPTH_STENCIL_DESC1);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING: WHIWHI_SHAPE(D3D12_VIEW_INSTANCING_DESC);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL2: WHIWHI_SHAPE(D3D12_DEPTH_STENCIL_DESC2);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER1: WHIWHI_SHAPE(D3D12_RASTERIZER_DESC1);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER2: WHIWHI_SHAPE(D3D12_RASTERIZER_DESC2);
+    default: return false;
+    }
+#undef WHIWHI_SHAPE
+}
+
+// Counts a request that was not handed to the PC device, and says why for the first of each reason.
+HRESULT pipeline_not_taken(const char* where, const std::string& why) {
+    static SRWLOCK lock = SRWLOCK_INIT;
+    static std::map<std::string, unsigned long long> reasons;
+    ++g_pipelines_not_taken;
+    AcquireSRWLockExclusive(&lock);
+    const unsigned long long count = ++reasons[why];
+    const std::size_t kinds = reasons.size();
+    ReleaseSRWLockExclusive(&lock);
+    if (count == 1 && kinds <= 32) {
+        logf("%s: the request is not handed to the PC device: %s\n", where, why.c_str());
+    }
+    return 0x80004001L;  // E_NOTIMPL
+}
+
+HRESULT pipeline_other_thread(const char* where) {
+    if (++g_pipelines_other_thread == 1) {
+        logf("%s: asked on thread %lu, not the thread the device was created on (%lu) - refused: pipeline states "
+             "are built on the device's own thread only until building them on other threads is decided\n",
+             where, GetCurrentThreadId(), g_device_thread);
+    }
+    return 0x80004001L;
+}
+
+HRESULT pipeline_result(const char* where, HRESULT hr, ID3D12PipelineState* state, void** out,
+                        const std::string& what) {
+    if (hr != 0 || !state) {
+        if (state) {
+            state->Release();
+        }
+        const unsigned long long failed = ++g_pipelines_failed;
+        if (failed <= 8 || (failed & (failed - 1)) == 0) {
+            logf("%s: the PC device did not make the pipeline state (0x%lx) from %s; %llu such failure(s) so far\n",
+                 where, static_cast<unsigned long>(hr), what.c_str(), failed);
+        }
+        return hr != 0 ? hr : 0x80004005L;
+    }
+    *out = wrap_kind(state, kPipeline);
+    const unsigned long long made = ++g_pipelines_made;
+    if (made <= 8 || (made & (made - 1)) == 0) {
+        logf("%s: a real PC pipeline state was made from %s; %llu made so far\n", where, what.c_str(), made);
+    }
+    return 0;
+}
+
+// Slot 62: (description in the public compute form, 0, 0, identifier, out).
+HRESULT __stdcall w_device_slot62(Wrap* self, const void* desc, void* third, void* fourth, const GUID*, void** out,
+                                  void*, void*, void*) {
+    static const char* const where = "device slot 62";
+    clear_result(out);
+    show_pipeline_request(2, where, desc, 0x40, _ReturnAddress());
+    if (!out || !desc || !can_read(desc, sizeof(D3D12_COMPUTE_PIPELINE_STATE_DESC))) {
+        return pipeline_not_taken(where, "the description or the result place cannot be read");
+    }
+    if (third || fourth) {
+        return pipeline_not_taken(where, "its third or fourth argument is not zero (they were zero at the measured "
+                                         "call; what they mean is not known)");
+    }
+    if (!on_device_thread()) {
+        return pipeline_other_thread(where);
+    }
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pc;
+    std::memcpy(&pc, desc, sizeof(pc));
+    if (kind_of(pc.pRootSignature) != kRootSignature) {
+        return pipeline_not_taken(where, "the root signature named is not one of this library's");
+    }
+    std::string why;
+    if (!pc_takes_shader(pc.CS.pShaderBytecode, pc.CS.BytecodeLength, why)) {
+        return pipeline_not_taken(where, why);
+    }
+    if (pc.Flags != D3D12_PIPELINE_STATE_FLAG_NONE) {
+        return pipeline_not_taken(where, "the description has flags set");
+    }
+    pc.pRootSignature = static_cast<ID3D12RootSignature*>(to_pc(pc.pRootSignature));
+    pc.CachedPSO.pCachedBlob = nullptr;  // a cached blob would be the console's
+    pc.CachedPSO.CachedBlobSizeInBytes = 0;
+    ID3D12Device13* device = pc_device13(self);
+    if (!device) {
+        return pipeline_not_taken(where, "the PC device does not have the interface needed");
+    }
+    ID3D12PipelineState* state = nullptr;
+    const HRESULT hr = device->CreateComputePipelineState(&pc, IID_PPV_ARGS(&state));
+    char what[96];
+    std::snprintf(what, sizeof(what), "a compute shader of %llu bytes",
+                  static_cast<unsigned long long>(pc.CS.BytecodeLength));
+    return pipeline_result(where, hr, state, out, what);
+}
+
+template <int Index, int Slot, int Bytes>
+HRESULT __stdcall w_device_pipeline_request(Wrap*, const void* desc, const GUID*, void** out, void*, void*, void*,
+                                            void*, void*) {
+    static char where[24];
+    std::snprintf(where, sizeof(where), "device slot %d", Slot);
+    clear_result(out);
+    show_pipeline_request(Index, where, desc, Bytes, _ReturnAddress());
+    return 0x80004001L;
+}
+
+// Slot 86: ({stream size, stream}, identifier, out) - the public "pipeline state from a stream" argument list.
+HRESULT __stdcall w_device_slot86(Wrap* self, const void* desc, const GUID*, void** out, void*, void*, void*, void*,
+                                  void*) {
+    static const char* const where = "device slot 86";
+    clear_result(out);
+    unsigned long long size = 0;
+    const std::uint8_t* stream = nullptr;
+    if (desc && can_read(desc, 16)) {
+        std::memcpy(&size, desc, 8);
+        std::memcpy(&stream, static_cast<const std::uint8_t*>(desc) + 8, 8);
+    }
+    show_pipeline_request(4, where, stream, size <= 0x4000 ? static_cast<std::size_t>(size) : 0x4000,
+                          _ReturnAddress());
+    if (!out || !stream || size < 8 || size > 0x10000 || (size & 7) != 0 ||
+        !can_read(stream, static_cast<std::size_t>(size))) {
+        return pipeline_not_taken(where, "the stream or the result place cannot be read, or its size is not a "
+                                         "multiple of eight below 64 KiB");
+    }
+    if (!on_device_thread()) {
+        return pipeline_other_thread(where);
+    }
+    // The stream is copied so that the image's own description is not changed.
+    std::vector<std::uint8_t> copy(stream, stream + static_cast<std::size_t>(size));
+    std::string types;
+    unsigned long long seen = 0;
+    bool cached_dropped = false;
+    for (std::size_t at = 0; at < copy.size();) {
+        unsigned type = 0;
+        std::memcpy(&type, copy.data() + at, 4);
+        std::size_t payload_at = 0, payload_bytes = 0, whole = 0;
+        char text[16];
+        std::snprintf(text, sizeof(text), "%s%u", types.empty() ? "" : " ", type);
+        types += text;
+        if (!stream_subobject_shape(type, payload_at, payload_bytes, whole)) {
+            return pipeline_not_taken(where, "the stream has a subobject type the public list does not have (types "
+                                             "so far: " + types + ")");
+        }
+        if (at + whole > copy.size()) {
+            return pipeline_not_taken(where, "a subobject runs past the end of the stream (types: " + types + ")");
+        }
+        if (type < 64 && (seen & (1ull << type))) {
+            return pipeline_not_taken(where, "the stream names one subobject type twice (types: " + types + ")");
+        }
+        seen |= type < 64 ? (1ull << type) : 0;
+        std::uint8_t* payload = copy.data() + at + payload_at;
+        switch (type) {
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE: {
+            void* signature = nullptr;
+            std::memcpy(&signature, payload, 8);
+            if (signature) {
+                if (kind_of(signature) != kRootSignature) {
+                    return pipeline_not_taken(where, "the root signature named is not one of this library's");
+                }
+                signature = to_pc(signature);
+                std::memcpy(payload, &signature, 8);
+            }
+            break;
+        }
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS: {
+            D3D12_SHADER_BYTECODE code;
+            std::memcpy(&code, payload, sizeof(code));
+            std::string why;
+            if ((code.pShaderBytecode || code.BytecodeLength) &&
+                !pc_takes_shader(code.pShaderBytecode, code.BytecodeLength, why)) {
+                return pipeline_not_taken(where, why);
+            }
+            break;
+        }
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO: {
+            D3D12_CACHED_PIPELINE_STATE cached;
+            std::memcpy(&cached, payload, sizeof(cached));
+            if (cached.pCachedBlob || cached.CachedBlobSizeInBytes) {
+                cached_dropped = true;
+                std::memset(payload, 0, sizeof(cached));  // a cached blob would be the console's
+            }
+            break;
+        }
+        default:
+            break;
+        }
+        at += whole;
+    }
+    if (cached_dropped) {
+        static std::once_flag once;
+        std::call_once(once, [] {
+            logf("device slot 86: a stream names a cached pipeline blob - not passed on (it is the console's); the "
+                 "PC device builds from the shaders\n");
+        });
+    }
+    ID3D12Device13* device = pc_device13(self);
+    if (!device) {
+        return pipeline_not_taken(where, "the PC device does not have the interface needed");
+    }
+    D3D12_PIPELINE_STATE_STREAM_DESC pc_desc = {copy.size(), copy.data()};
+    ID3D12PipelineState* state = nullptr;
+    const HRESULT hr = device->CreatePipelineState(&pc_desc, IID_PPV_ARGS(&state));
+    return pipeline_result(where, hr, state, out, "a stream of subobject types " + types);
+}
+
+// Slot 101: ({kind, count, entries}, identifier, out); an entry is {type, unused, payload} of 16 bytes, and the
+// payload of the entries that carry code begins with {code, code size}.
+HRESULT __stdcall w_device_slot101(Wrap*, const void* desc, const GUID*, void** out, void*, void*, void*, void*,
+                                   void*) {
+    clear_result(out);
+    const unsigned long long number = ++g_pipeline_requests[5];
+    unsigned kind = 0, count = 0;
+    const std::uint8_t* entries = nullptr;
+    if (desc && can_read(desc, 16)) {
+        std::memcpy(&kind, desc, 4);
+        std::memcpy(&count, static_cast<const std::uint8_t*>(desc) + 4, 4);
+        std::memcpy(&entries, static_cast<const std::uint8_t*>(desc) + 8, 8);
+    }
+    std::string types;
+    int found = 0;
+    if (entries && count <= 256 && can_read(entries, static_cast<std::size_t>(count) * 16)) {
+        for (unsigned i = 0; i < count; ++i) {
+            unsigned type = 0;
+            const void* payload = nullptr;
+            std::memcpy(&type, entries + i * 16, 4);
+            std::memcpy(&payload, entries + i * 16 + 8, 8);
+            char text[16];
+            std::snprintf(text, sizeof(text), "%s%u", types.empty() ? "" : " ", type);
+            types += text;
+            if (payload && can_read(payload, 16)) {
+                found += show_containers_in("device slot 101", payload, 16);
+            }
+        }
+    }
+    if (number <= 2 || (number & (number - 1)) == 0) {
+        logf("device slot 101: state object request #%llu on thread %lu, returns to %p - refused (ray tracing is "
+             "not provided); kind %u, %u entries of types %s; %d shader container(s) named\n",
+             number, GetCurrentThreadId(), _ReturnAddress(), kind, count, types.c_str(), found);
+    }
+    return 0x80004001L;
 }
 
 // Device slot 14, CreateDescriptorHeap(description, identifier, out). The description is the public 16-byte one
@@ -3180,6 +3842,7 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
     }
     // Creating methods, by their public D3D12 slot: (slot, position of the identifier, position of the place for
     // the result, kind of object).
+    g_device_thread = GetCurrentThreadId();
     g_device = wrap_object(
         pc, kDevice, "device", 43,
         {{8, reinterpret_cast<void*>(&create_thunk<8, 2, 3, kQueue>)},
@@ -3210,6 +3873,12 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {43, reinterpret_cast<void*>(&struct_return_thunk<43, 8>)},  // GetAdapterLuid
          {48, reinterpret_cast<void*>(&w_device_slot48)},
          {73, reinterpret_cast<void*>(&w_device_slot73)},
+         {55, reinterpret_cast<void*>(&w_device_pipeline_request<0, 55, 0x400>)},
+         {57, reinterpret_cast<void*>(&w_device_pipeline_request<1, 57, 0x300>)},
+         {62, reinterpret_cast<void*>(&w_device_slot62)},
+         {67, reinterpret_cast<void*>(&w_device_pipeline_request<3, 67, 0x40>)},
+         {86, reinterpret_cast<void*>(&w_device_slot86)},
+         {101, reinterpret_cast<void*>(&w_device_slot101)},
          {74, reinterpret_cast<void*>(&w_device_slot74)},
          {127, reinterpret_cast<void*>(&w_device_slot127)},
          {133, reinterpret_cast<void*>(&w_device_slot133)},
@@ -3300,6 +3969,29 @@ unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
     if (written == 0) {
         logf("the image has written nothing into the objects it was given\n");
     }
+    // Pipeline state requests of the run, and the chunk lists of the shader containers they named.
+    static const int kRequestSlots[6] = {55, 57, 62, 67, 86, 101};
+    for (int i = 0; i < 6; ++i) {
+        if (const unsigned long long n = g_pipeline_requests[i].load()) {
+            logf("device slot %d: %llu pipeline state request(s) in this run\n", kRequestSlots[i], n);
+        }
+    }
+    if (g_pipelines_made.load() || g_pipelines_failed.load() || g_pipelines_not_taken.load() ||
+        g_pipelines_other_thread.load()) {
+        logf("pipeline states: %llu made on the PC device, %llu the PC device did not make, %llu not handed to it, "
+             "%llu refused because they were asked on another thread than the device's\n",
+             g_pipelines_made.load(), g_pipelines_failed.load(), g_pipelines_not_taken.load(),
+             g_pipelines_other_thread.load());
+    }
+    AcquireSRWLockShared(&g_containers.lock);
+    if (g_containers.containers) {
+        logf("shader containers named by pipeline state requests: %llu, with %zu different chunk list(s):\n",
+             g_containers.containers, g_containers.seen.size());
+        for (const auto& item : g_containers.seen) {
+            logf("  %llu x  %s\n", item.second, item.first.c_str());
+        }
+    }
+    ReleaseSRWLockShared(&g_containers.lock);
     return written;
 }
 
