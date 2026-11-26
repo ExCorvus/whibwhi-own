@@ -755,32 +755,45 @@ void test_sop2() {
         CHECK(state.sgpr[1] == 3u);
         expect_refused(decode_one({sop2(30, 1, 128 + 32, 0)}), state, "shift count of 32");
     }
-    {  // s_bfe_u32: the field is offset in bits [4:0] and width - 1 in bits [10:5].
-       // 0xDEADBEEF, offset 4, width 8: spec = 4 | (7 << 5) = 0xE4; (0xDEADBEEF >> 4) & 0xFF = 0xEE.
+    {  // s_bfe_u32: the field is offset in bits [4:0] and width in bits [22:16] (the public compiler writes
+       // the operand as (width << 16) | offset).
+       // 0xDEADBEEF, offset 4, width 8: spec = 4 | (8 << 16); (0xDEADBEEF >> 4) & 0xFF = 0xEE.
         MachineState state = fresh_state();
         state.sgpr[0] = 0xDEADBEEFu;
-        run(decode_one({sop2(39, 1, 255, 0), 0xE4u}), state);  // the field spec as the constant word
+        run(decode_one({sop2(39, 1, 255, 0), 4u | (8u << 16)}), state);  // the field spec as the constant word
         CHECK(state.sgpr[1] == 0xEEu);
         CHECK(state.scc);
     }
-    {  // The smallest field: width 1 (the field stores width - 1 = 0), offset 0: the low bit. 0xDEADBEEF -> 1.
+    {  // The public compiler's own example: 28 | (4 << 16) takes the top four bits. 0xDEADBEEF -> 0xD.
         MachineState state = fresh_state();
         state.sgpr[0] = 0xDEADBEEFu;
-        run(decode_one({sop2(39, 1, kInlineZero, 0)}), state);
+        run(decode_one({sop2(39, 1, 255, 0), 28u | (4u << 16)}), state);
+        CHECK(state.sgpr[1] == 0xDu);
+    }
+    {  // The smallest field: width 1 at offset 0 is the low bit. 0xDEADBEEF -> 1.
+        MachineState state = fresh_state();
+        state.sgpr[0] = 0xDEADBEEFu;
+        run(decode_one({sop2(39, 1, 255, 0), 1u << 16}), state);
         CHECK(state.sgpr[1] == 1u);
     }
     {  // A field that runs past bit 31 keeps only the bits the source has: offset 30, width 8 -> the top two
        // bits: 0xDEADBEEF >> 30 = 3.
         MachineState state = fresh_state();
         state.sgpr[0] = 0xDEADBEEFu;
-        run(decode_one({sop2(39, 1, 255, 0), 30u | (7u << 5)}), state);
+        run(decode_one({sop2(39, 1, 255, 0), 30u | (8u << 16)}), state);
         CHECK(state.sgpr[1] == 3u);
     }
-    {  // A field of width 32 (field value 31) starting at 0 is the value itself; from 0xDEADBEEF, offset 0.
+    {  // A field of width 32 starting at 0 is the value itself.
         MachineState state = fresh_state();
         state.sgpr[0] = 0xDEADBEEFu;
-        run(decode_one({sop2(39, 1, 255, 0), 31u * 32u}), state);
+        run(decode_one({sop2(39, 1, 255, 0), 32u << 16}), state);
         CHECK(state.sgpr[1] == 0xDEADBEEFu);
+    }
+    {  // Width 0 is refused: the sources read do not say what the hardware gives. The old reading of this
+       // operand (width - 1 in bits [10:5]) would have taken a plain small number as a field; it is not one.
+        MachineState state = fresh_state();
+        state.sgpr[0] = 0xDEADBEEFu;
+        expect_refused(decode_one({sop2(39, 1, 255, 0), 0xE4u}), state, "width 0");
     }
     {  // s_cselect_b64: SCC picks the FIRST source; with SCC clear the second one is used.
         MachineState state = fresh_state();
