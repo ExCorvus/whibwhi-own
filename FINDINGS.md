@@ -1040,3 +1040,25 @@ Open, to be fixed next (ExCorvus, 2026-11-26): (1) the records only grow - every
 is removed; (2) a record keeps the resource without a reference, so a remake after the resource is gone would use
 a stale one; (3) a copy from a position without a note writes zeros instead of the source's bytes; (4) the remake
 almost never happens, because the PC copy already carries the view across.
+
+## 2026-11-26 - render-target notes: the four open points fixed (game test 20:06)
+
+The four points left open in the entry above, fixed as ExCorvus decided (written by a helper agent, read through
+and corrected once before the test):
+
+1. Each record counts the notes in the program's memory that name it. A note is added by device slot 20 and by a
+   copy, and removed when its 32-byte place is overwritten or its heap is released (the heap's memory is walked
+   for notes before it is given back). At zero the record is freed and its number used again.
+2. A record holds a reference on its resource while notes name it, and gives it back when it is freed, so a view
+   is never made again from a resource that is gone.
+3. A copy is a raw copy: the 32 bytes move as they are, whatever they hold.
+4. The notes are the only record: a render-target copy between two heaps with program memory is no longer passed
+   to the PC library. The destination's PC position is cleared, and the view is made there from the note when a
+   binding or a clear uses it. Where one side is not in such a heap, the PC copy is passed on as before.
+
+Game test 2026-11-26 20:06: PASS, alive after 60 s, the copy's folder unchanged, no new missing answers, a
+render-target clear reached the PC list, last frame token 122 (accepted run 116).
+
+Not changed (rare cases, written down): a view being made again while another thread overwrites the last note
+naming it could let its resource go during the remake; a held resource can outlive the program's use of its
+memory, which the program may reuse - using such a view would be the program's own late use.
