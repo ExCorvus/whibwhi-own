@@ -279,6 +279,22 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
   the queue. Not yet measured on the real image: which paths reach OpenFile and whether RPF member offsets
   arrive as file offsets - that needs a boot.
 
+## 2026-11-26 - the install folder and xgameruntime (measured)
+
+- The game derives its install dir from GetModuleFileNameW(NULL) (fn 0x55e2910): it takes the exe's folder and
+  appends the string at 0x67e2008 ("xgameruntime.dll"), then GetFileAttributesW on that. The xgameruntime load
+  (fn 0x55e29dc) uses mode 2 (app-dir search, 0xa00) only when that file EXISTS next to the exe and the
+  ForceUseLocalServices probe (fn 0x55e286c, HKLM GamingServices) is 1; otherwise mode 1 (System32-only, 0x800).
+  On a real PC GDK install the game folder holds exe + xgameruntime.dll + the package files together.
+- Our answer: stage a work folder that looks like that install - copy our binaries (boot_image.exe + the console
+  DLLs) into it and hard-link/junction every game-folder entry into it (game folder itself untouched, listing
+  hash unchanged). Then GetModuleFileNameW(NULL) is the work exe, xgameruntime.dll is present beside it (mode 2),
+  and the package reads resolve through the links. run_boot.ps1 does the staging; boot_image's PEB image-path
+  patch is now opt-in (WHIWHI_PEB_GAME=1) since the staged folder makes the natural path correct.
+- xgameruntime.dll skeleton answers InitializeApiImpl/Ex/Ex2 = 0, QueryApiImpl = E_NOTIMPL, Uninitialize = 0,
+  XErrorReport = 0; the game resolves these by name from the loaded module (fn 0x55e2a70) and calls InitEx2 with
+  version constants 0x633600002712 / 0x65f400001edd.
+
 ## 2026-11-26 - install path and the Game Runtime (measured, boots b28/b29)
 
 - **Install path.** The game derives its install directory from GetModuleFileNameW(NULL) (fn 0x55e2910) and
