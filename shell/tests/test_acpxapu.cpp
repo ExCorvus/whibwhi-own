@@ -97,37 +97,47 @@ static_assert(offsetof(ShapeConfig, count) == 0x10, "shape context count is at +
 static_assert(offsetof(ShapeConfig, contexts) == 0x38, "shape context array pointer is at +0x38");
 
 void test_acp_hal(const AcpHal& api) {
+    // The memory side is real on a PC (unified memory): shape contexts are a real zeroed array.
     ShapeConfig config{};
     config.count = 350;
-    CHECK(api.allocate_shape_contexts(&config) < 0);
-    CHECK(config.count == 350 && config.contexts == nullptr); // the call wrote nothing
-    CHECK(api.release_shape_contexts(nullptr) < 0);
+    CHECK(api.allocate_shape_contexts(&config) == 0);
+    CHECK(config.contexts != nullptr);
+    bool zeroed = true;
+    for (int i = 0; i < 350 * 64; ++i) {
+        zeroed = zeroed && static_cast<unsigned char*>(config.contexts)[i] == 0;
+    }
+    CHECK(zeroed);
+    CHECK(api.allocate_shape_contexts(nullptr) < 0);
+    CHECK(api.release_shape_contexts(nullptr) == 0);
 
+    // The audio device itself is still not provided: no handle is invented.
     void* handle = reinterpret_cast<void*>(kSentinel);
     CHECK(api.create(&handle) < 0);
-    CHECK(handle == reinterpret_cast<void*>(kSentinel)); // no handle was invented
-    CHECK(api.create(nullptr) < 0);                      // and no pointer is required to answer
+    CHECK(handle == reinterpret_cast<void*>(kSentinel));
+    CHECK(api.create(nullptr) < 0);
 
-    // The two heap sizes the image asks for (fn 0x75140 picks one), and the second argument it passes.
-    CHECK(api.create_heap(0x1C700000u, 0x226E00u) < 0);
-    CHECK(api.create_heap(0x0FF00000u, 0x226E00u) < 0);
-
-    void* block = reinterpret_cast<void*>(kSentinel);
-    CHECK(api.alloc(&block, 0, 0x222E00u, 0x800u, 2) < 0); // as fn 0x43aec40 asks
-    CHECK(block == reinterpret_cast<void*>(kSentinel));
-    CHECK(api.alloc(&block, 0, 0, 0x800u, 1) < 0); // the second call site asks for no bytes
+    // The APU heap is real committed memory below 4 GiB; ApuAlloc bump-allocates from it, aligned as asked.
+    CHECK(api.create_heap(0x1000000u, 0x226E00u) == 0);
+    void* block = nullptr;
+    CHECK(api.alloc(&block, 0, 0x222E00u, 0x800u, 2) == 0);
+    CHECK(block != nullptr);
+    CHECK(reinterpret_cast<unsigned long long>(block) < 0x100000000ull);  // identity APU addresses fit 32 bits
+    CHECK(reinterpret_cast<unsigned long long>(block) % 0x800 == 0);
+    void* block2 = nullptr;
+    CHECK(api.alloc(&block2, 0, 0x100u, 0x800u, 1) == 0);
+    CHECK(block2 > block);
     api.free(nullptr);
-    api.free(block); // nothing to free: no crash, no complaint beyond the first note
+    api.free(block);
 
+    // Address validity is checked against real committed memory; the map is the identity below 4 GiB (use the
+    // sub-4-GiB heap block - a stack address is above 4 GiB on x64 and is refused, logged).
     char buffer[0x800] = {};
-    CHECK(api.is_virtual_address_valid(buffer, 0x40) == 0);
-    CHECK(api.is_virtual_address_valid(buffer, 0x80) == 0);
-    CHECK(api.is_virtual_address_valid(buffer, 0x800) == 0);
+    CHECK(api.is_virtual_address_valid(buffer, 0x40) == 1);
     CHECK(api.is_virtual_address_valid(nullptr, 0x40) == 0);
-    CHECK(api.map_apu_address(0) == nullptr);
-    CHECK(api.map_apu_address(0x1FFFF000u) == nullptr);
-    CHECK(api.map_virtual_address(buffer) == 0);
-    CHECK(api.map_virtual_address(nullptr) == 0);
+    CHECK(api.map_virtual_address(block) == static_cast<unsigned>(reinterpret_cast<unsigned long long>(block)));
+    CHECK(api.map_virtual_address(buffer) == 0);  // above 4 GiB: refused, logged
+    CHECK(api.map_virtual_address(reinterpret_cast<void*>(0x100000000ull)) == 0);
+    CHECK(api.map_apu_address(static_cast<unsigned>(reinterpret_cast<unsigned long long>(block))) == block);
 }
 
 void test_xapu(const XApu& api) {
