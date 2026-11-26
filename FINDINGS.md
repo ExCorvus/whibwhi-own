@@ -1,4 +1,4 @@
-﻿# Findings
+# Findings
 
 What has been measured about the game and about the shell. The **Current state** block is always the latest;
 below it is the dated log, oldest entry first. A later entry overrides an earlier one. Addresses written as
