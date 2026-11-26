@@ -88,6 +88,23 @@ int main() {
         const Range* ranges;
     };
     CHECK(sizeof(Range) == 12 && sizeof(Batch) == 24);
+
+    // The layout of the objects the game is given: the game's area covers every field it was measured to touch
+    // (the last one ends at 0x564), the two command-list fields sit where the game compares them, and with no
+    // device made nothing has been written.
+    const auto object_layout = reinterpret_cast<int(__stdcall*)(unsigned long long*, unsigned long long*,
+                                                                 unsigned long long*, unsigned long long*)>(
+        GetProcAddress(lib, "whiwhi_d3d12_object_layout"));
+    const auto image_writes =
+        reinterpret_cast<unsigned long long(__stdcall*)(void)>(GetProcAddress(lib, "whiwhi_d3d12_report_image_writes"));
+    CHECK(object_layout != nullptr && image_writes != nullptr);
+    if (object_layout && image_writes) {
+        unsigned long long area_end = 0, position = 0, end = 0, copy_byte = 0;
+        CHECK(object_layout(&area_end, &position, &end, &copy_byte) == 1);
+        CHECK(area_end >= 0x564 && position == 0x18 && end == 0x30 && copy_byte == 0x18);
+        CHECK(image_writes() == 0);
+    }
+
     const auto apply = reinterpret_cast<long(__stdcall*)(unsigned int, const Batch*, unsigned long long)>(
         GetProcAddress(lib, "whiwhi_d3d12_apply_page_mappings"));
     const auto view_page = reinterpret_cast<int(__stdcall*)(unsigned long long, unsigned int*)>(
