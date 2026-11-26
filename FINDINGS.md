@@ -257,6 +257,28 @@ answer "not provided" - never a faked success:
 
 All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's gate, GitHub only).
 
+## 2026-11-26 - TLS slot 0, the COM layout bug, and the storage wrapper (measured)
+
+- **TLS slot 0.** Parts of the image read the per-thread storage array entry 0 directly (`gs:[0x58]` then entry
+  0), at offsets up to 0x13a8 - on the console the game is the main module, so its storage owns index 0. With a
+  small foreign block at entry 0 that crashes (boot b8's AV); with the game's own data block there it corrupts
+  whatever else owns entry 0 on Windows (kernelbase; the 0xC0000374 in ntdll). Fix: entry 0 is redirected to
+  the zeroed upper half of our own per-thread 64 KiB block (default on, WHIWHI_TLS_REDIRECT=0 to disable), so
+  the image's entry-0 accesses land in bounds and other slot-0 users see zeros (measured safe in a probe).
+  The image's index variable still points at the full block. Covered in test_thread_storage.
+- **COM layout bug** (found by the xcrdapi test segfaulting): the vtable pointer must be the object's FIRST
+  field - both our xcrdapi objects and the d3d12_xs wrapper had it second. Fixed in both; this was also the
+  likely cause of the earlier boot AV inside a wrapper thunk.
+- **XCRDAPI stage 1/2 (the storage wrapper).** DStorageGetFactory now returns OUR factory in the console
+  vtable layout (+0x20 OpenFile, +0x28 CreateStatusArray, +0x40 SetStagingBufferSize, +0x50 CreateQueue). The
+  queue reads each request synchronously straight into the request's destination address - host memory the
+  xmem library owns - validating the destination is committed writable first (an unmapped destination is
+  logged and skipped, never written). Status array reports IsComplete=true / GetHResult=S_OK, which is honest
+  because the read really finished. Paths are logged and mapped onto the read-only game folder
+  (WHIWHI_GAME_DIR). 12/12 tests pass, including a functional test that reads a temp file into a buffer through
+  the queue. Not yet measured on the real image: which paths reach OpenFile and whether RPF member offsets
+  arrive as file offsets - that needs a boot.
+
 ## 2026-11-26 - booting the image in the shell; what the runs showed (measured)
 
 - shell/tools/boot_image.cpp (run by Temp\opencode\run_boot.ps1) loads the image, connects imports, optionally
