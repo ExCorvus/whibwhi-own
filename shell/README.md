@@ -43,19 +43,25 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
   pages are mapped into, committed memory. Keeps a record of every region with the flags the game asked for.
 - `d3d12_xs.h` / `d3d12_xs.cpp` → `d3d12_xs.dll`. The console's graphics entry points. Creates a PC D3D12
   device and hands the game its own objects around the PC ones: functions the two share are forwarded, the
-  console-only ones the game's start-up needs are written out (queues, command lists, the frame clock,
-  descriptor heaps, buffers over the game's own memory, display surfaces), and every other one logs its
-  arguments once and answers "not implemented".
+  console-only ones the game uses are written out as they are measured (queues and submission, command lists,
+  fences, the frame clock, descriptor heaps, buffers over the game's own memory, textures, display surfaces,
+  presentation to the game's window), and every other one logs its arguments once and answers "not
+  implemented". Draws are held while no pipeline state exists.
 - `xcrdapi.h` / `xcrdapi.cpp` → `XCRDAPI.dll`. The console's file-read library: our own factory, file, status
-  array and queue; a read goes straight from the file into the address the game names.
+  array and queue; a read goes straight from the file into the address the game names, and a piece the game
+  marks as compressed is decoded on the way.
+- `inflate.hpp` / `inflate.cpp` — our own zlib decoder (written from the public format description), built into
+  `XCRDAPI.dll`.
 - `xgameruntime.h` / `xgameruntime.cpp` → `xgameruntime.dll`. The runtime library the game loads at start:
   initialise and uninitialise answer success, interface queries are logged and answered "no such interface".
 - `acp_hal.h` / `acp_hal.cpp` → `AcpHal.dll`. Console audio hardware library: the memory functions are real, the
   audio device answers "not implemented".
 - `xapu.h` / `xapu.cpp` → `xapu.dll`, `chad.h` / `chad.cpp` → `chad.dll`. Console audio command libraries:
   skeletons that log and answer failure.
-- `xg_xs.h` / `xg_xs.cpp` → `xg_xs.dll`, `xbox_bvh_builder.h` / `xbox_bvh_builder.cpp` → `XboxBvhBuilder.dll`.
-  Texture layout and ray-tracing builder libraries: skeletons that log and answer failure.
+- `xg_xs.h` / `xg_xs.cpp` → `xg_xs.dll`. The texture layout library: answers with the shell's own untiled layout
+  for formats in the public format list, copies rows in and out, refuses everything else.
+- `xbox_bvh_builder.h` / `xbox_bvh_builder.cpp` → `XboxBvhBuilder.dll`. Ray-tracing builder: a skeleton that
+  logs and answers failure.
 
 ## Tools
 
@@ -71,8 +77,9 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 
 ## Tests
 
-`tests/` holds 15 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
-shader_container, offline, acpxapu, chad, xcrdapi, gfx_stubs). They use made-up inputs only: no game files, no GPU.
+`tests/` holds 17 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
+shader_container, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
+game files, no GPU.
 
 ## Build and test
 
