@@ -6,7 +6,7 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 
 ## Current state (2026-11-26)
 
-- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 25 tests pass.
+- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 26 tests pass.
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
@@ -1222,3 +1222,27 @@ the coordinating agent before they were taken in. No picture is drawn by any of 
   (docs/SHADER-TRANSLATOR.md section 24).
 
 The game folder was unchanged after every run. 25 tests pass.
+
+## 2026-11-26 - what memory, image, interpolation and export instructions touch; the interpolation field read correctly (boot b115; measured)
+
+- **A new pass, a helper's work, reviewed before folding** (`shell/shader_access.*`, test `shader_access`,
+  `docs/SHADER-ACCESS.md`): for an instruction that touches memory, an image, an interpolated attribute or an
+  output it tells which registers hold what, in which order and how many. It describes and does not execute; it
+  refuses what its public sources do not establish. It has been tried on hand-built instruction words only; no
+  pass uses it on the game's programs yet.
+- **Review.** The coordinator rebuilt the branch, ran the game-data check and compared five statements with the
+  public files. Four agreed. The fifth was wrong: the helper read the source field of the interpolation "move"
+  as an inline-constant code, while both public sources (Mesa's assembler, LLVM's printer) put the number 0, 1
+  or 2 straight into the field. Corrected.
+- **Two mistakes of our own, found through that:** the instruction reader did not list the register an
+  interpolation step reads among the instruction's operands, and the shape pass counted the move's selector as a
+  register read (a selector of 2 looked like "reads v2"). Both corrected, with tests.
+- **Measured in boot b115** (505 pixel programs from the run's first 1,024 different containers; 500
+  interpolate): 499 use the two interpolation steps only, the first always reading through v0 and the second
+  through v1; one uses the move only, with selector 2. Vector registers read before they are written: v0 and v1
+  in 431 programs, v0 to v3 in 68 (all declare the position input), none in 6. The earlier line "v2 alone in 1
+  program" was the selector mistake and is withdrawn.
+- **Not established:** what v2 and v3 hold in those 68 programs; the arithmetic of the two interpolation steps
+  (operand roles are from public source, the formula is a reading of the public names).
+
+The game folder was unchanged after the run. 26 tests pass.
