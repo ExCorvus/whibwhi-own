@@ -19,7 +19,8 @@
 //   device slots 78, 79, 80  the frame clock (interval, event offsets, waiting for a frame event)
 //   device slot 133  a buffer placed at an address of the image's memory: that memory opened as a heap, a PC
 //                                          buffer placed in it (no copy); textures refused
-//   queue  slot 31   CopyPageMappingsBatchX  not applied yet: logged, answered not implemented
+//   queue  slot 31   CopyPageMappingsBatchX  recorded exactly (which pool page each page of the GPU-only view
+//                                          shows); nothing reads the record yet
 //   queue  slots 30/32  PresentX            nothing is shown yet: logged, answered not implemented
 //
 // The slot numbers are the public D3D12 method indices, which is what the image's own calls use (its call sites
@@ -50,6 +51,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -1523,21 +1525,134 @@ unsigned long long __stdcall w_resource_gpu_address(Wrap* self) {
     return static_cast<ID3D12Resource*>(self->pc)->GetGPUVirtualAddress();
 }
 
-// Queue slot 31 (CopyPageMappingsBatchX) says which pool page each page of the GPU-only view shows. The shell
-// does not apply these yet, so it says so; the image does not look at the result of this call.
+// ---- queue slot 31 (CopyPageMappingsBatchX): which pool page each page of the GPU-only view shows ------------
+//
+// Read off the image's page mapper (fn 0xf2c470; the call is at 0xf2cc7f): the arguments are (number of batches,
+// batches, pool address, pool size in 64 KiB pages as a 32-bit number, a 32-bit 0). A batch is 24 bytes
+// {destination address in the GPU-only view, number of ranges, pointer to ranges} and a range is 12 bytes
+// {kind, first pool page, count}. The image passes exactly two shapes: to show pages, one range of kind 1 with
+// count 1 per page, naming the pool page; to stop showing pages, one range of kind 2 with first page 0 and the
+// number of pages. The ranges of a batch follow each other from the destination address.
+//
+// The console's graphics processor has page tables for this; a PC one does not share the process's addresses, so
+// the PC form of the work is the record below: for every 64 KiB page of the view, the pool page it shows. The
+// pool itself is open on the PC device as a heap (device slot 74), so a pool page is an offset in that heap.
+// Everything that later resolves an address in the view (views made from raw descriptor words, translated
+// shaders) has to go through this record; none of that is built yet. A call is checked completely before
+// anything changes, and a shape the image was not seen to use is refused, not guessed.
+SRWLOCK g_view_pages_lock = SRWLOCK_INIT;
+std::unordered_map<unsigned long long, unsigned> g_view_pages;  // view address >> 16 -> pool page
+std::atomic<unsigned long long> g_view_calls{0};
+std::atomic<unsigned long long> g_view_refused{0};
+std::atomic<unsigned long long> g_view_shown{0};    // pages shown, counted over all calls
+std::atomic<unsigned long long> g_view_removed{0};  // pages no longer shown, counted over all calls
+
+constexpr unsigned kPageRangeShow = 1;
+constexpr unsigned kPageRangeRemove = 2;
+constexpr unsigned kPageMappingLimit = 1u << 22;  // more batches or ranges than this is not a real call
+
+HRESULT refuse_page_mappings(const char* why, unsigned long long a, unsigned long long b) {
+    if (g_view_refused.fetch_add(1) < 8) {
+        logf("queue slot 31 CopyPageMappingsBatchX: refused, nothing changed - %s (0x%llx, 0x%llx)\n", why, a, b);
+    }
+    return 0x80070057L;  // E_INVALIDARG
+}
+
+HRESULT apply_page_mappings(unsigned batch_count, const WhiwhiPageBatch* batches, unsigned long long pool_pages) {
+    g_view_calls.fetch_add(1);
+    if (batch_count == 0) {
+        return 0;
+    }
+    if (!batches || batch_count > kPageMappingLimit) {
+        return refuse_page_mappings("no batches given, or too many", batch_count, 0);
+    }
+    // First pass: every batch and range is checked; nothing is changed until all of them are sound.
+    for (unsigned b = 0; b < batch_count; ++b) {
+        const WhiwhiPageBatch& batch = batches[b];
+        if (batch.destination & 0xFFFFull) {
+            return refuse_page_mappings("a destination is not on a 64 KiB boundary", batch.destination, b);
+        }
+        if (batch.range_count > kPageMappingLimit || (batch.range_count && !batch.ranges)) {
+            return refuse_page_mappings("a batch has no ranges, or too many", batch.range_count, b);
+        }
+        for (unsigned r = 0; r < batch.range_count; ++r) {
+            const WhiwhiPageRange& range = batch.ranges[r];
+            if (range.kind == kPageRangeShow) {
+                if (range.count != 1) {
+                    return refuse_page_mappings("a range that shows pages has a count other than 1, which the image "
+                                                "was never seen to pass",
+                                                range.count, range.first_pool_page);
+                }
+                if (range.first_pool_page >= pool_pages) {
+                    return refuse_page_mappings("a range names a page past the end of the pool",
+                                                range.first_pool_page, pool_pages);
+                }
+            } else if (range.kind == kPageRangeRemove) {
+                if (range.count == 0 || range.count > kPageMappingLimit) {
+                    return refuse_page_mappings("a range that removes pages has no count, or too large a one",
+                                                range.count, b);
+                }
+            } else {
+                return refuse_page_mappings("a range has a kind the image was never seen to pass", range.kind, b);
+            }
+        }
+    }
+    unsigned long long shown = 0, removed = 0;
+    AcquireSRWLockExclusive(&g_view_pages_lock);
+    for (unsigned b = 0; b < batch_count; ++b) {
+        const WhiwhiPageBatch& batch = batches[b];
+        unsigned long long page = batch.destination >> 16;
+        for (unsigned r = 0; r < batch.range_count; ++r) {
+            const WhiwhiPageRange& range = batch.ranges[r];
+            if (range.kind == kPageRangeShow) {
+                g_view_pages[page] = range.first_pool_page;
+                ++page;
+                ++shown;
+            } else {
+                for (unsigned i = 0; i < range.count; ++i) {
+                    removed += g_view_pages.erase(page + i);
+                }
+                page += range.count;
+            }
+        }
+    }
+    ReleaseSRWLockExclusive(&g_view_pages_lock);
+    g_view_shown.fetch_add(shown);
+    g_view_removed.fetch_add(removed);
+    return 0;
+}
+
 HRESULT __stdcall w_queue_slot31(Wrap*, void* batch_count, void* batches, void* pool_address, void* pool_pages,
                                  void* flags, void*, void*, void*) {
-    static std::atomic<unsigned long long> calls{0};
-    if (calls.fetch_add(1) == 0) {
-        logf("queue slot 31 CopyPageMappingsBatchX: first call, %llu batches at 0x%llx, pool 0x%llx, %llu pages, "
-             "flags 0x%llx - not applied yet, answered not implemented\n",
-             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(batch_count)),
-             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(batches)),
-             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(pool_address)),
-             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(pool_pages)),
-             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(flags)));
+    // The count of pool pages and the last argument are written by the image as 32-bit numbers.
+    const unsigned count = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(batch_count));
+    const unsigned pages = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(pool_pages));
+    const unsigned last = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(flags));
+    static std::atomic<bool> first{true};
+    const bool show = first.exchange(false);
+    if (show) {
+        logf("queue slot 31 CopyPageMappingsBatchX: first call, %u batches at 0x%llx, pool 0x%llx, %u pages, last "
+             "argument 0x%x\n",
+             count, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(batches)),
+             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(pool_address)), pages, last);
     }
-    return 0x80004001L;  // E_NOTIMPL
+    if (g_pool_address && pool_address != g_pool_address) {
+        return refuse_page_mappings("the pool named is not the pool the image registered with the device",
+                                    reinterpret_cast<std::uintptr_t>(pool_address),
+                                    reinterpret_cast<std::uintptr_t>(g_pool_address));
+    }
+    if (g_pool_address && (static_cast<unsigned long long>(pages) << 16) != g_pool_bytes) {
+        return refuse_page_mappings("the pool size named is not the size the image registered", pages,
+                                    g_pool_bytes >> 16);
+    }
+    const HRESULT hr = apply_page_mappings(count, static_cast<const WhiwhiPageBatch*>(batches), pages);
+    if (show && hr == 0) {
+        logf("queue slot 31 CopyPageMappingsBatchX: recorded - %llu pages of the view now show pool pages%s. "
+             "Nothing reads this record yet (views from raw descriptor words and translated shaders will)\n",
+             whiwhi_d3d12_view_pages_shown(),
+             g_pool_heap ? "" : " (the pool is NOT open on the PC device, so the record has nothing behind it)");
+    }
+    return hr;
 }
 
 // Queue slots 30/32 (PresentX): nothing is shown on screen yet, so the call answers not implemented. The image
@@ -1666,6 +1781,29 @@ long __stdcall D3D12ConfigureVirtualMemoryX(void* parameters) {
              d[0], d[1]);
     }
     return 0;
+}
+
+long __stdcall whiwhi_d3d12_apply_page_mappings(unsigned int batch_count, const WhiwhiPageBatch* batches,
+                                                unsigned long long pool_pages) {
+    return apply_page_mappings(batch_count, batches, pool_pages);
+}
+
+int __stdcall whiwhi_d3d12_view_page(unsigned long long address, unsigned int* pool_page) {
+    AcquireSRWLockShared(&g_view_pages_lock);
+    const auto found = g_view_pages.find(address >> 16);
+    const bool shown = found != g_view_pages.end();
+    if (shown && pool_page) {
+        *pool_page = found->second;
+    }
+    ReleaseSRWLockShared(&g_view_pages_lock);
+    return shown ? 1 : 0;
+}
+
+unsigned long long __stdcall whiwhi_d3d12_view_pages_shown(void) {
+    AcquireSRWLockShared(&g_view_pages_lock);
+    const unsigned long long shown = g_view_pages.size();
+    ReleaseSRWLockShared(&g_view_pages_lock);
+    return shown;
 }
 
 } // extern "C"
