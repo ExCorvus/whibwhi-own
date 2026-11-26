@@ -8,6 +8,8 @@ i now it is weird, but because of the ai traps it cannot be measure
 how far the game boots, but what i can say is that if my idea is correct, which was only verified by clankers so far, that as
 soon as the shell stands, there will not be any blocks for playing all of it.
 
+after further research i think i have 
+
 ## Why a shell, and what it does
 
 The Xbox Series build of GTA VI (1.0.2.1) is one 120 MB program file in the ordinary 64-bit Windows format, made
@@ -84,8 +86,8 @@ control because they will inspect the code an try to fix it.
 this only a hypothesis, but the game was written in a special OS and was folded into
 the xbox os. trying to stitch fix the the inside of the game will basically make the agents 
 write the original os into the drive. and i tested this hypothesis with fable. but for the moment this needs
-independent verification, as this might be a path to native xbox games in windows. look at whibwhi multi for
-this specfic idea
+independent verification, and after further research i noticed that this stitchfix pattern shows up all over the,
+so i think there is no way to circumvent a shell when porting these games.
 
 ## Files
 
