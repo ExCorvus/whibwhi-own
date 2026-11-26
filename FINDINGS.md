@@ -25,9 +25,9 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 - **Audio:** the APU memory side is real (a heap below 4 GiB, a shape-context array, an identity address map).
   The audio device (AcpHalCreate) and the command channel (xapu) are not provided and answer "not provided".
   The silent audio host of boot b141 was withdrawn on 2026-11-26 (see the entry "what went wrong" at the end):
-  it answered success for work that was not done. So a run stops where it stopped before b141: at about 13 s, at
-  the game's own breakpoint (image+0x43ad94e) after AcpHalCreate is refused (last measured before b141; not
-  re-run after the withdrawal).
+  it answered success for work that was not done. Boot b143 (after the withdrawal, normal priority, game folder unchanged):
+  AcpHalCreate is refused, the game presents 32 to 63 more frames, then stops itself at its own breakpoint
+  (image+0x43ad94e) with the same unwind as boot b137; the process ended after 35 s.
 - **Textures:** a texture's bytes in the game's memory are in the shell's own untiled layout (xg_xs.h); the
   device tells the game that size when asked. A texture the game places at an address of its own memory is a
   real texture in the PC device's memory - its pixels are not at that address. Nothing copies a texture's bytes
@@ -1430,3 +1430,10 @@ device. Where the pass takes something to be so, the code says so. ExCorvus can 
 Where a run stands now: as before boot b141 - it stops at about 13 s at the game's own breakpoint
 (image+0x43ad94e) after AcpHalCreate is refused. This was last measured before b141; no run was made after the
 withdrawal.
+
+Measured after the withdrawal (boot b143, normal priority, game folder unchanged): the run behaves as boot b137 did.
+The audio heap, shape contexts and first allocation are made; AcpHalCreate is refused; the game keeps presenting
+(the log line for 32 presented frames appears; the next, for 64, does not) and then stops itself at its own
+breakpoint, image+0x43ad94e, with the same unwind as b137. The process ended after 35 s. The entry for b141 says
+"8 presented frames": that number counted log lines, which the shell writes only at 1, 2, 4, 8, ... frames; b141
+in fact presented at least 128.
