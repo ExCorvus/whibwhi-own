@@ -341,6 +341,13 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
   Vulkan device, imports a host buffer with VK_EXT_external_memory_host, and the GPU reads it back with zero
   mismatches (64 MiB tested). So "what has to be mapped into VRAM" is: nothing is copied - the game's own RAM is
   imported as device memory and the GPU reads it directly (the flat-out zero-copy model).
+- TLS slot 0 solved structurally: the per-thread block now lives in the EXE's own .tls section (shell/tls_seat.cpp,
+  linked into every tool/test), so Windows gives it index 0 - the same slot the console gives the game. The
+  game's hardcoded slot-0 reads (e.g. the pool object pointer at entry0+0x13a8) and its index-variable reads now
+  hit the SAME block; kernelbase takes index 1. At claim the exe's .tls template is rewritten with the image's
+  initial data so every thread Windows starts afterwards gets it; the calling thread's block is filled directly.
+  The old whiwhi_tls.dll + entry-0 redirect is removed (redirecting slot 0 to the real block heap-corrupted the
+  PC-side slot-0 owner, boot b25; the zeroed-mirror variant left the game's slot-0 reads seeing zeros).
 
 ## 2026-11-26 - booting the image in the shell; what the runs showed (measured)
 
