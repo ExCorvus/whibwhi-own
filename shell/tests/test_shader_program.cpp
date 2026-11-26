@@ -38,6 +38,14 @@ void set32(Bytes& b, std::size_t at, std::uint32_t v) {
     }
 }
 
+std::uint32_t get32(const Bytes& b, std::size_t at) {
+    std::uint32_t v = 0;
+    for (int i = 0; i < 4; ++i) {
+        v |= static_cast<std::uint32_t>(b[at + i]) << (8 * i);
+    }
+    return v;
+}
+
 void put_tag(Bytes& b, const char* tag) {
     b.insert(b.end(), tag, tag + 4);
 }
@@ -180,6 +188,110 @@ Bytes module_with_place(std::size_t place) {
 bool refused(const Bytes& m) {
     const ModuleProgram found = find_module_program(m.data(), m.size());
     return !found.found && !found.reason.empty();
+}
+
+// A module with the two tables and the name after its code. Record at +0xC0 (0x80 bytes), code at +0x140
+// (0x40 bytes), first table at +0x180 with five entries, second table with three, then the name record.
+constexpr std::size_t kTablesCodeAt = 0x140, kFirstTableAt = 0x180;
+constexpr std::uint32_t kFirstEntries = 5, kSecondEntries = 3;
+const char kModuleName[] = "PS_Made_Up_Name";
+
+void put_entry(Bytes& b, std::uint32_t a, std::uint32_t c, std::uint32_t d, std::uint32_t e, std::uint32_t f) {
+    put32(b, a);
+    put32(b, c);
+    put32(b, d);
+    put32(b, e);
+    put32(b, f);
+}
+
+Bytes module_with_tables() {
+    Bytes m;
+    put_tag(m, "FSSM");
+    put32(m, 0x101);
+    put32(m, 0);
+    put32(m, 0);
+    put32(m, 6);
+    put32(m, 0);
+    while (m.size() < 0x78) {
+        put32(m, 0xDEADBEEFu);
+    }
+    set32(m, 0x40, static_cast<std::uint32_t>(kRecordAt - 0x10));
+    set32(m, 0x44, 0);
+    while (m.size() < kTablesCodeAt) {
+        put32(m, 0);
+    }
+    put32(m, kNop);
+    put32(m, kAdd);
+    put32(m, kNop);
+    put32(m, kEnd);
+    while (m.size() < kTablesCodeAt + kCodeBytes) {
+        put32(m, kFiller);
+    }
+    // First table: a descriptor table in s8 holding a texture and a constant buffer, two constants in s9,
+    // a sampler table in s11, and a fixed sampler with index 7.
+    put_entry(m, 3, 0, 1, 2, 8);
+    put_entry(m, 3, 8, 1, 0, 8);
+    put_entry(m, 0, 0, 2, 500, 0x109);
+    put_entry(m, 6, 0, 1, 0, 11);
+    put_entry(m, 4, 0, 0, 3, 7u << 8);
+    // Second table: the texture, the constants and the fixed sampler as this shader declares them.
+    put_entry(m, 0x300, 0, 2, 4, 0x808);
+    put_entry(m, 0x002, 0, 500, 0, 0x10904);
+    put_entry(m, 0x401, 0, 3, 0, 0x70004);
+    const std::size_t name_at = m.size();
+    const std::uint32_t length = static_cast<std::uint32_t>(sizeof(kModuleName) - 1);
+    put32(m, 0);
+    put32(m, 0);
+    put32(m, 0xFFFFFFFFu);
+    put32(m, 0);
+    put32(m, length << 16);
+    m.insert(m.end(), kModuleName, kModuleName + length);
+    m.insert(m.end(), {9, 9, 9});
+    set32(m, 8, static_cast<std::uint32_t>(m.size() - 16));
+    set32(m, kRecordAt, static_cast<std::uint32_t>(kTablesCodeAt - 0x10));
+    set32(m, kRecordAt + 8, static_cast<std::uint32_t>(kCodeBytes));
+    set32(m, kRecordAt + 0x28, static_cast<std::uint32_t>(kFirstTableAt - 0x10));
+    set32(m, kRecordAt + 0x30, static_cast<std::uint32_t>(kFirstTableAt + kFirstEntries * 20 - 0x10));
+    set32(m, kRecordAt + 0x38, kFirstEntries);
+    set32(m, kRecordAt + 0x3C, kSecondEntries);
+    set32(m, kRecordAt + 0x60, static_cast<std::uint32_t>(name_at - 0x10));
+    set32(m, kRecordAt + 0x68, 1);
+    set32(m, kRecordAt + 0x6C, 20 + length);
+    return m;
+}
+
+ModuleTables tables_of(const Bytes& m) {
+    return read_module_tables(m.data(), m.size(), find_module_program(m.data(), m.size()));
+}
+
+bool tables_refused(const Bytes& m) {
+    const ModuleTables tables = tables_of(m);
+    return !tables.found && !tables.understood && !tables.reason.empty() && tables.layout.empty() &&
+           tables.resources.empty() && tables.name.empty();
+}
+
+// A 'PSV0' payload: a first block of `info` bytes, then `count` records of `record` bytes.
+Bytes declared_part(std::uint32_t info, std::uint32_t count, std::uint32_t record) {
+    Bytes p;
+    put32(p, info);
+    for (std::uint32_t i = 0; i < info / 4; ++i) {
+        put32(p, 0x11111111u);
+    }
+    put32(p, count);
+    if (count) {
+        put32(p, record);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            put32(p, 2 + i);        // type
+            put32(p, i);            // space
+            put32(p, 100 + i);      // lower
+            put32(p, 100 + i);      // upper
+            for (std::uint32_t extra = 16; extra < record; extra += 4) {
+                put32(p, 0x22222222u);
+            }
+        }
+    }
+    put32(p, 0x33333333u);  // whatever follows the records
+    return p;
 }
 
 } // namespace
@@ -381,6 +493,176 @@ int main() {
         m = module;
         set32(m, kRecordAt + 8, 12);  // the code stops before the end word
         CHECK(refused(m));
+    }
+
+    // The two tables and the name after the code.
+    {
+        const Bytes good_tables = module_with_tables();
+        const ModuleProgram where = find_module_program(good_tables.data(), good_tables.size());
+        CHECK(where.found && where.code_offset == kTablesCodeAt && where.code_bytes == kCodeBytes);
+        const ModuleTables tables = tables_of(good_tables);
+        CHECK(tables.found && tables.reason.empty());
+        CHECK(tables.understood && tables.not_understood.empty());
+        CHECK(tables.name == kModuleName);
+        CHECK(tables.layout.size() == kFirstEntries && tables.resources.size() == kSecondEntries);
+        if (tables.layout.size() == kFirstEntries && tables.resources.size() == kSecondEntries) {
+            CHECK(tables.layout[0].kind == 3 && tables.layout[0].offset_words == 0 &&
+                  tables.layout[0].shader_register == 2 && tables.layout[0].scalar_register == 8);
+            CHECK(tables.layout[1].kind == 3 && tables.layout[1].offset_words == 8 &&
+                  tables.layout[1].scalar_register == 8);
+            CHECK(tables.layout[2].kind == 0 && tables.layout[2].count == 2 &&
+                  tables.layout[2].shader_register == 500 && tables.layout[2].scalar_register == 9 &&
+                  tables.layout[2].last == 0x109);
+            CHECK(tables.layout[3].kind == 6 && tables.layout[3].scalar_register == 11);
+            CHECK(tables.layout[4].kind == 4 && tables.layout[4].shader_register == 3 &&
+                  tables.layout[4].fixed_index == 7 && tables.layout[4].scalar_register == 0);
+            CHECK(tables.resources[0].resource_class == 0 && tables.resources[0].arrival == 3 &&
+                  tables.resources[0].shader_register == 2 && tables.resources[0].word3 == 4 &&
+                  tables.resources[0].descriptor_words == 8 && tables.resources[0].scalar_register == 8);
+            CHECK(tables.resources[1].resource_class == 2 && tables.resources[1].arrival == 0 &&
+                  tables.resources[1].shader_register == 500 && tables.resources[1].descriptor_words == 4 &&
+                  tables.resources[1].scalar_register == 9 && tables.resources[1].fixed_index == 1);
+            CHECK(tables.resources[2].resource_class == 1 && tables.resources[2].arrival == 4 &&
+                  tables.resources[2].shader_register == 3 && tables.resources[2].fixed_index == 7);
+        }
+
+        // No program found, or no block: nothing is read.
+        CHECK(!read_module_tables(good_tables.data(), good_tables.size(), ModuleProgram{}).found);
+        CHECK(!read_module_tables(nullptr, 0, where).found);
+
+        // Empty tables are tables too.
+        Bytes m = good_tables;
+        set32(m, kRecordAt + 0x38, 0);
+        set32(m, kRecordAt + 0x3C, 0);
+        set32(m, kRecordAt + 0x28, get32(m, kRecordAt + 0x60));
+        set32(m, kRecordAt + 0x30, get32(m, kRecordAt + 0x60));
+        const ModuleTables empty = tables_of(m);
+        CHECK(empty.found && empty.understood && empty.layout.empty() && empty.resources.empty() &&
+              empty.name == kModuleName);
+
+        // A shader that declares no resources: no second table, the padding value where its offset would be.
+        m = good_tables;
+        m.erase(m.begin() + kFirstTableAt + kFirstEntries * 20,
+                m.begin() + kFirstTableAt + (kFirstEntries + kSecondEntries) * 20);
+        set32(m, 8, static_cast<std::uint32_t>(m.size() - 16));
+        set32(m, kRecordAt + 0x30, 0xDEADBEEFu);
+        set32(m, kRecordAt + 0x3C, 0);
+        set32(m, kRecordAt + 0x60, static_cast<std::uint32_t>(kFirstTableAt + kFirstEntries * 20 - 0x10));
+        const ModuleTables none_declared = tables_of(m);
+        CHECK(none_declared.found && none_declared.understood && none_declared.layout.size() == kFirstEntries &&
+              none_declared.resources.empty() && none_declared.name == kModuleName);
+        set32(m, kRecordAt + 0x3C, 1);  // the padding value with a count is not a place
+        CHECK(tables_refused(m));
+        set32(m, kRecordAt + 0x3C, 0);
+        set32(m, kRecordAt + 0x30, 0xDEADBEEEu);  // any other number is taken as an offset, and it is not one
+        CHECK(tables_refused(m));
+
+        // An entry of a kind, class or arrival not seen: the layout holds, the meaning is not claimed.
+        m = good_tables;
+        set32(m, kFirstTableAt + 20, 2);  // second entry of the first table: kind 2
+        ModuleTables odd = tables_of(m);
+        CHECK(odd.found && !odd.understood && !odd.not_understood.empty() && odd.layout.size() == kFirstEntries);
+        m = good_tables;
+        set32(m, kFirstTableAt + kFirstEntries * 20, 0x304);  // class 4
+        odd = tables_of(m);
+        CHECK(odd.found && !odd.understood);
+        m = good_tables;
+        set32(m, kFirstTableAt + kFirstEntries * 20, 0x200);  // arrival 2
+        odd = tables_of(m);
+        CHECK(odd.found && !odd.understood);
+        m = good_tables;
+        set32(m, kFirstTableAt + kFirstEntries * 20, 0x10300);  // something in the upper half
+        odd = tables_of(m);
+        CHECK(odd.found && !odd.understood);
+
+        // Every way the layout can fail to hold.
+        m = good_tables;
+        set32(m, kRecordAt + 0x38, kFirstEntries + 1);  // the first table would run into the second
+        CHECK(tables_refused(m));
+        m = good_tables;
+        set32(m, kRecordAt + 0x3C, kSecondEntries - 1);  // the second table stops short of the name record
+        CHECK(tables_refused(m));
+        m = good_tables;
+        set32(m, kRecordAt + 0x38, 5000);
+        CHECK(tables_refused(m));
+        m = good_tables;
+        set32(m, kRecordAt + 0x28, static_cast<std::uint32_t>(kTablesCodeAt + 0x20 - 0x10));  // inside the code
+        CHECK(tables_refused(m));
+        m = good_tables;
+        set32(m, kRecordAt + 0x28, static_cast<std::uint32_t>(kFirstTableAt + 2 - 0x10));  // not on a word
+        set32(m, kRecordAt + 0x30, get32(m, kRecordAt + 0x30) + 2);
+        set32(m, kRecordAt + 0x60, get32(m, kRecordAt + 0x60) + 2);
+        CHECK(tables_refused(m));
+        m = good_tables;
+        set32(m, kRecordAt + 0x28, 0x00F00000);  // far outside the block
+        CHECK(tables_refused(m));
+        m = good_tables;
+        set32(m, kRecordAt + 0x6C, 19);  // a name record shorter than its five words
+        CHECK(tables_refused(m));
+        m = good_tables;
+        set32(m, kRecordAt + 0x6C, 20 + 4000);  // a name that runs past the block
+        CHECK(tables_refused(m));
+        m = good_tables;
+        set32(m, kRecordAt + 0x6C, get32(m, kRecordAt + 0x6C) + 1);  // size and length disagree
+        CHECK(tables_refused(m));
+        const std::size_t name_at = get32(good_tables, kRecordAt + 0x60) + 0x10;
+        for (std::size_t word = 0; word < 4; ++word) {
+            m = good_tables;
+            set32(m, name_at + word * 4, word == 2 ? 0 : 1);  // one of the four fixed words
+            CHECK(tables_refused(m));
+        }
+        m = good_tables;
+        m[name_at + 20 + 3] = 0x01;  // a byte in the name that is not text
+        CHECK(tables_refused(m));
+        m = good_tables;
+        m[name_at + 20 + 3] = 0xC3;
+        CHECK(tables_refused(m));
+    }
+
+    // The resources a container's 'PSV0' part declares.
+    {
+        for (const std::uint32_t record : {16u, 24u}) {
+            const Bytes part = declared_part(0x34, 3, record);
+            const DeclaredResources declared = read_declared_resources(part.data(), part.size());
+            CHECK(declared.found && declared.reason.empty() && declared.resources.size() == 3);
+            if (declared.resources.size() == 3) {
+                CHECK(declared.resources[0].type == 2 && declared.resources[0].space == 0 &&
+                      declared.resources[0].lower == 100 && declared.resources[0].upper == 100);
+                CHECK(declared.resources[2].type == 4 && declared.resources[2].space == 2 &&
+                      declared.resources[2].lower == 102);
+            }
+        }
+        Bytes part = declared_part(0x34, 0, 24);
+        DeclaredResources declared = read_declared_resources(part.data(), part.size());
+        CHECK(declared.found && declared.resources.empty());
+        part = declared_part(0, 1, 16);  // no first block at all
+        declared = read_declared_resources(part.data(), part.size());
+        CHECK(declared.found && declared.resources.size() == 1);
+
+        CHECK(!read_declared_resources(nullptr, 0).found);
+        part = declared_part(0x34, 2, 24);
+        CHECK(!read_declared_resources(part.data(), 7).found);
+        CHECK(!read_declared_resources(part.data(), part.size() - 8).found);  // the last record is cut
+        Bytes broken = part;
+        set32(broken, 0, 0x35);  // a first block that is not whole words
+        CHECK(!read_declared_resources(broken.data(), broken.size()).found);
+        broken = part;
+        set32(broken, 0, 0x4000);  // a first block longer than the part
+        CHECK(!read_declared_resources(broken.data(), broken.size()).found);
+        broken = part;
+        set32(broken, 4 + 0x34 + 4, 20);  // a record size that is neither public size
+        CHECK(!read_declared_resources(broken.data(), broken.size()).found);
+        broken = part;
+        set32(broken, 4 + 0x34, 5000);  // more resources than the reader accepts
+        CHECK(!read_declared_resources(broken.data(), broken.size()).found);
+        broken = part;
+        set32(broken, 4 + 0x34, 3);  // one more record than there are bytes for
+        CHECK(!read_declared_resources(broken.data(), broken.size()).found);
+
+        CHECK(declared_resource_class(1) == 1 && declared_resource_class(2) == 2);
+        CHECK(declared_resource_class(3) == 0 && declared_resource_class(4) == 0 && declared_resource_class(5) == 0);
+        CHECK(declared_resource_class(6) == 3 && declared_resource_class(9) == 3);
+        CHECK(declared_resource_class(0) == 0xFF && declared_resource_class(10) == 0xFF);
     }
 
     if (failures == 0) {
