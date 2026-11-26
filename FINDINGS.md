@@ -1318,3 +1318,13 @@ Read from the installation's XboxBvhBuilder.dll (read-only; numbers only, tools 
   `xbox.global_store_dwordx4_with_cache`, which the converter does not know. The run ends before its report.
 - So this run cannot show whether the lane count is taken: the converter stops before the shader is finished.
   Not shown either way; left as it stands.
+Follow-up, game test 00:12 (visible, the copy's folder unchanged; FAIL about 5 s in):
+- The converter now writes the two console stores the first builder shader uses
+  (`xbox.global_store_dword_with_cache`, `xbox.global_store_dwordx4_with_cache`: 4 or 16 bytes to a GPU virtual
+  address; the last two arguments are taken and not interpreted). With them that shader (5,136 bytes) is accepted:
+  device slot 62 answers 0x0, a compute pipeline made by the PC device. That the pipeline does what the console's
+  does is not shown: it has not run yet.
+- The builder then hands over its next shader (7,876 bytes). It uses two console loads,
+  `xbox.global_load_dwordx3_with_cache` and `xbox.global_load_dwordx4_with_cache`; the converter does not know
+  them yet, the device answers 0x80070057 and the builder throws. That is the new stop.
+- The lane count change is in the same converter; this run still cannot show whether it is taken.
