@@ -315,6 +315,12 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
   got past image+0x2219650 and stopped at a null write at image+0x5be9387 inside the buddy allocator: the pool's
   sub-allocator slot (obj+0x1280) is null because the real body of slot +0x30 (a lazy init) is exactly what the
   console patch provides. Each converted slot reveals the next console-only body; the boundary is real.
+- APU side, per ExCorvus's point that a PC's memory is already unified: AcpHal.dll now answers the memory side for
+  real - ApuCreateHeap creates a committed heap below 4 GiB, ApuAlloc bump-allocates (aligned as asked), shape
+  contexts are a real zeroed array, ApuIsVirtualAddressValid checks real committed memory, and
+  ApuMapVirtualAddress/ApuMapApuAddress are the identity map (refused above 4 GiB, logged). AcpHalCreate still
+  answers E_NOTIMPL - the audio device itself is the one thing a PC cannot fake. The pool-trap path does not call
+  AcpHal (its call sites are the separate audio bring-up fn 0x43ad8b0), so this does not move the boot boundary.
 
 ## 2026-11-26 - booting the image in the shell; what the runs showed (measured)
 
