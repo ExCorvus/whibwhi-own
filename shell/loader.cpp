@@ -26,6 +26,26 @@ constexpr unsigned kRelocationPadding = 0;    // IMAGE_REL_BASED_ABSOLUTE
 constexpr unsigned kRelocation64 = 10;        // IMAGE_REL_BASED_DIR64
 
 UnprovidedHandler g_unprovided_handler = nullptr;
+bool g_count_import_calls = false;
+
+// A counting stub, 16 bytes: lock inc qword [rip + to count] ; jmp qword [rip + to target] ; int3 int3.
+// The counts and targets lie in one block after all the stubs, 16 bytes per import (count, target), so both
+// distances are the same for every stub.
+constexpr std::size_t kCountingStubSize = 16;
+void write_counting_stub(std::uint8_t* at, std::int32_t data_distance) {
+    const std::int32_t to_count = data_distance - 8;   // from the end of the 8-byte increment
+    const std::int32_t to_target = data_distance + 8 - 14;  // from the end of the 6-byte jump, to the second word
+    at[0] = 0xF0;
+    at[1] = 0x48;
+    at[2] = 0xFF;
+    at[3] = 0x05;
+    std::memcpy(at + 4, &to_count, 4);
+    at[8] = 0xFF;
+    at[9] = 0x25;
+    std::memcpy(at + 10, &to_target, 4);
+    at[14] = 0xCC;
+    at[15] = 0xCC;
+}
 
 std::uintptr_t unprovided_called(const UnprovidedImport* which) {
     if (g_unprovided_handler) {
@@ -258,6 +278,10 @@ bool connect_thread_storage(const Image& image, LoadedImage& out, std::string& r
 
 } // namespace
 
+void set_count_import_calls(bool count) {
+    g_count_import_calls = count;
+}
+
 void set_unprovided_handler(UnprovidedHandler handler) {
     g_unprovided_handler = handler;
 }
@@ -419,19 +443,51 @@ bool load_image(const Image& image, const ImportResolver& resolve, LoadedImage& 
             return fail("could not reserve memory for the unprovided-import stubs");
         }
     }
+    std::uint8_t* counting = nullptr;
+    std::size_t code_bytes = 0;
+    if (g_count_import_calls && !targets.empty()) {
+        code_bytes = (targets.size() * kCountingStubSize + 0xFFF) & ~static_cast<std::size_t>(0xFFF);
+        out.counting_bytes = code_bytes + targets.size() * 16;
+        counting = static_cast<std::uint8_t*>(
+            VirtualAlloc(nullptr, out.counting_bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        if (!counting) {
+            return fail("could not reserve memory for the call-counting stubs");
+        }
+        out.counting_stubs = counting;
+        out.call_counts = reinterpret_cast<const volatile std::uint64_t*>(counting + code_bytes);
+    }
     std::size_t next_target = 0;
     std::size_t next_stub = 0;
     for (const ImportedLibrary& lib : out.imports) {
         for (const ImportedFunction& fn : lib.functions) {
+            const std::size_t index = next_target;
             void* target = targets[next_target++];
+            const bool connected = target != nullptr;
             if (!target) {
                 auto* stub = static_cast<std::uint8_t*>(out.stubs) + next_stub * kStubSize;
                 write_stub(stub, &(*unprovided)[next_stub]);
                 ++next_stub;
                 target = stub;
             }
+            if (counting) {
+                std::uint8_t* stub = counting + index * kCountingStubSize;
+                std::uint8_t* data = counting + code_bytes + index * 16;
+                std::memset(data, 0, 8);
+                std::memcpy(data + 8, &target, 8);
+                write_counting_stub(stub, static_cast<std::int32_t>(data - stub));
+                out.counted.push_back(UnprovidedImport{lib.name, fn.name, fn.ordinal, fn.by_ordinal});
+                out.counted_connected.push_back(connected);
+                target = stub;
+            }
             std::memcpy(base + fn.slot_rva, &target, 8);
         }
+    }
+    if (counting) {
+        DWORD old = 0;
+        if (!VirtualProtect(counting, code_bytes, PAGE_EXECUTE_READ, &old)) {
+            return fail("could not make the call-counting stubs executable");
+        }
+        FlushInstructionCache(GetCurrentProcess(), counting, code_bytes);
     }
     out.unprovided = unprovided;
     if (out.stubs) {
@@ -501,6 +557,9 @@ void unload_image(LoadedImage& loaded) {
     }
     if (loaded.stubs) {
         VirtualFree(loaded.stubs, 0, MEM_RELEASE);
+    }
+    if (loaded.counting_stubs) {
+        VirtualFree(loaded.counting_stubs, 0, MEM_RELEASE);
     }
     loaded = LoadedImage{};
 }
