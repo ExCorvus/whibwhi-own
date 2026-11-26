@@ -83,8 +83,14 @@ $unchanged = ($before -eq (Get-Listing $Game)) -and ($exeHashBefore -eq (Get-Fil
 # What the run did, from its own log and the call ledger.
 $text = if (Test-Path $log) { Get-Content -LiteralPath $log } else { @() }
 $alive = [bool]($text -match 'still running after \d+s')
-$endLine = ($text | Select-String -Pattern 'still running after|exception 0x|entry thread finished|watchdog|process exiting' |
+$endLine = ($text | Where-Object { $_ -notmatch "the watchdog's progress stamp" } |
+    Select-String -Pattern 'still running after|exception 0x|entry thread finished|watchdog|process exiting' |
     Select-Object -First 1).Line
+# How long the image's own progress report went unchanged (read only by the boot tool; the watchdog stops the
+# image after about 30 s without a new one).
+$progressReports = ''; $progressLongest = ''
+$p = $text | Select-String -Pattern "progress stamp \(read only\): (\d+) new reports, longest unchanged ([\d.]+) s" | Select-Object -First 1
+if ($p) { $progressReports = $p.Matches[0].Groups[1].Value; $progressLongest = $p.Matches[0].Groups[2].Value }
 $frame = 0
 foreach ($m in ($text | Select-String -Pattern 'frame token (\d+)')) { $frame = [Math]::Max($frame, [int]$m.Matches[0].Groups[1].Value) }
 $made = 0
@@ -144,6 +150,7 @@ $summary = [ordered]@{
     imports_called = $called.Count; imports_called_not_provided = ($calledUnprovided -join ' ')
     last_frame_token = $frame; pipelines_made = $made; not_provided_answers = @($notProvided).Count
     imports_called_not_in_map = $unmappedImports; answers_not_in_map = $unmappedAnswers
+    progress_reports = $progressReports; progress_longest_unchanged_s = $progressLongest
 }
 $summary.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, $_.Value } | Set-Content -LiteralPath (Join-Path $run 'summary.txt') -Encoding utf8
 
