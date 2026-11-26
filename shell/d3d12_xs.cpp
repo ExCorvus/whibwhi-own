@@ -5327,10 +5327,7 @@ void compare_stream_binding(const std::uint8_t* stream, std::size_t size) {
 // ---- preparing a real PC pipeline from a request -----------------------------------------------------------
 //
 // Translation (shader_pc.*) and root-signature building (shader_root.*) are CPU work and run on the thread that
-// asks. The PC device's own pipeline build is the part rule 7 governs. ExCorvus decided (after boot b136 showed
-// the device's own thread does not call back into the shell each frame) that the build runs on the RENDER thread
-// - the one that presents frames and waits on the frame clock - serialized with drawing, fed by a queue the
-// worker threads fill. This section prepares the request; the queue and the render-thread build are below.
+// asks. This section prepares the request; the build, on the thread that asks, is below.
 
 // Translates one shader container into a PC shader (its container and bindings), or refuses with a reason. The
 // same reading the census does (read_packed_program -> find_module_program -> decode_shader -> the tables, the
@@ -5375,6 +5372,55 @@ whiwhi::shell::PcShader translate_shader_container(const std::uint8_t* container
     return write_pc_shader(input);
 }
 
+// Translations already made, kept in memory for the whole run. The image names the same shader containers in many
+// pipeline requests (boot b165: 34,136 requests), so each container is translated once: the entry is found by a
+// hash of the container's bytes and its stage, and taken only when the stored bytes match exactly. Refusals are
+// kept too, so a refused container is not read again either.
+struct TranslatedEntry {
+    std::vector<std::uint8_t> original;
+    whiwhi::shell::PcStage stage;
+    std::shared_ptr<const whiwhi::shell::PcShader> shader;
+};
+SRWLOCK g_translated_lock = SRWLOCK_INIT;
+std::unordered_multimap<unsigned long long, TranslatedEntry> g_translated;
+std::atomic<unsigned long long> g_translated_made{0}, g_translated_reused{0};
+
+std::shared_ptr<const whiwhi::shell::PcShader> translated_shader(const std::uint8_t* container, std::uint32_t bytes,
+                                                                 whiwhi::shell::PcStage stage) {
+    unsigned long long key = 1469598103934665603ull ^ static_cast<unsigned long long>(stage);
+    for (std::uint32_t i = 0; i < bytes; ++i) {
+        key = (key ^ container[i]) * 1099511628211ull;
+    }
+    const auto same = [&](const TranslatedEntry& entry) {
+        return entry.stage == stage && entry.original.size() == bytes &&
+               std::memcmp(entry.original.data(), container, bytes) == 0;
+    };
+    AcquireSRWLockShared(&g_translated_lock);
+    for (auto [at, end] = g_translated.equal_range(key); at != end; ++at) {
+        if (same(at->second)) {
+            auto shader = at->second.shader;
+            ReleaseSRWLockShared(&g_translated_lock);
+            ++g_translated_reused;
+            return shader;
+        }
+    }
+    ReleaseSRWLockShared(&g_translated_lock);
+    auto made = std::make_shared<const whiwhi::shell::PcShader>(translate_shader_container(container, bytes, stage));
+    AcquireSRWLockExclusive(&g_translated_lock);
+    for (auto [at, end] = g_translated.equal_range(key); at != end; ++at) {
+        if (same(at->second)) {  // another thread translated it meanwhile
+            made = at->second.shader;
+            ReleaseSRWLockExclusive(&g_translated_lock);
+            ++g_translated_reused;
+            return made;
+        }
+    }
+    g_translated.emplace(key, TranslatedEntry{std::vector<std::uint8_t>(container, container + bytes), stage, made});
+    ReleaseSRWLockExclusive(&g_translated_lock);
+    ++g_translated_made;
+    return made;
+}
+
 bool root_layout_of(const void* signature, RootLayout& layout) {
     AcquireSRWLockShared(&g_root_layouts_lock);
     const auto found = g_root_layouts.find(static_cast<const Wrap*>(signature));
@@ -5397,7 +5443,7 @@ struct PreparedPipeline {
     std::vector<std::uint8_t> root_blob;
     std::size_t root_pointer_at = 0;
     bool root_pointer_present = false;
-    std::vector<std::vector<std::uint8_t>> shaders;
+    std::vector<std::shared_ptr<const whiwhi::shell::PcShader>> shaders;  // keep the stream's pointers valid
 };
 
 PreparedPipeline prepare_stream_pipeline(const std::uint8_t* stream, std::size_t size) {
@@ -5405,7 +5451,6 @@ PreparedPipeline prepare_stream_pipeline(const std::uint8_t* stream, std::size_t
     PreparedPipeline prep;
     prep.stream.assign(stream, stream + size);
     const void* game_signature = nullptr;
-    std::vector<PcShader> translated;
     bool any_shader = false;
     for (std::size_t at = 0; at < prep.stream.size();) {
         unsigned type = 0;
@@ -5427,18 +5472,16 @@ PreparedPipeline prepare_stream_pipeline(const std::uint8_t* stream, std::size_t
             if (code.pShaderBytecode && code.BytecodeLength) {
                 any_shader = true;
                 const bool vertex = type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS;
-                PcShader shader = translate_shader_container(static_cast<const std::uint8_t*>(code.pShaderBytecode),
-                                                             static_cast<std::uint32_t>(code.BytecodeLength),
-                                                             vertex ? PcStage::kVertex : PcStage::kPixel);
-                if (!shader.ok) {
-                    prep.reason = std::string(vertex ? "vertex" : "pixel") + " shader: " + shader.reason;
+                auto shader = translated_shader(static_cast<const std::uint8_t*>(code.pShaderBytecode),
+                                                static_cast<std::uint32_t>(code.BytecodeLength),
+                                                vertex ? PcStage::kVertex : PcStage::kPixel);
+                if (!shader->ok) {
+                    prep.reason = std::string(vertex ? "vertex" : "pixel") + " shader: " + shader->reason;
                     return prep;
                 }
-                prep.shaders.push_back(std::move(shader.container));
-                const std::vector<std::uint8_t>& bytes = prep.shaders.back();
-                D3D12_SHADER_BYTECODE pc_code{bytes.data(), bytes.size()};
+                D3D12_SHADER_BYTECODE pc_code{shader->container.data(), shader->container.size()};
                 std::memcpy(payload, &pc_code, sizeof(pc_code));
-                translated.push_back(std::move(shader));
+                prep.shaders.push_back(std::move(shader));
             }
         } else if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS || type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS ||
                    type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS || type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS ||
@@ -5482,8 +5525,8 @@ PreparedPipeline prepare_stream_pipeline(const std::uint8_t* stream, std::size_t
     root_input.flags = layout.flags;
     root_input.graphics = true;
     std::vector<const PcBinding*> bindings;
-    for (const PcShader& shader : translated) {
-        for (const PcBinding& binding : shader.bindings) {
+    for (const auto& shader : prep.shaders) {
+        for (const PcBinding& binding : shader->bindings) {
             bindings.push_back(&binding);
         }
     }
@@ -5500,7 +5543,7 @@ PreparedPipeline prepare_stream_pipeline(const std::uint8_t* stream, std::size_t
     }
     prep.ok = true;
     char what[96];
-    std::snprintf(what, sizeof what, "%zu shader(s), a root signature of %zu bytes", translated.size(),
+    std::snprintf(what, sizeof what, "%zu shader(s), a root signature of %zu bytes", prep.shaders.size(),
                   prep.root_blob.size());
     prep.what = what;
     return prep;
@@ -5549,6 +5592,7 @@ SRWLOCK g_root_signatures_lock = SRWLOCK_INIT;
 std::map<std::vector<std::uint8_t>, ID3D12RootSignature*> g_root_signatures;  // by serialized blob; keeps a ref
 std::atomic<unsigned long long> g_locked_built{0};
 std::atomic<unsigned long long> g_locked_failed{0};
+std::unordered_set<unsigned long long> g_distinct_streams;  // under g_root_signatures_lock
 
 ID3D12RootSignature* cached_root_signature(ID3D12Device13* device, const std::vector<std::uint8_t>& blob,
                                            HRESULT& hr) {
@@ -5583,6 +5627,16 @@ HRESULT build_locked(const char* where, const PreparedPipeline& prep, void** out
         const D3D12_PIPELINE_STATE_STREAM_DESC desc = {stream.size(), stream.data()};
         hr = device->CreatePipelineState(&desc, IID_PPV_ARGS(&state));
     }
+    {
+        // How many of the built requests are different (a count only: each request still gets its own object).
+        unsigned long long key = 1469598103934665603ull;
+        for (const std::uint8_t byte : stream) {
+            key = (key ^ byte) * 1099511628211ull;
+        }
+        AcquireSRWLockExclusive(&g_root_signatures_lock);
+        g_distinct_streams.insert(key);
+        ReleaseSRWLockExclusive(&g_root_signatures_lock);
+    }
     if (hr == 0 && state) {
         ++g_locked_built;
     } else {
@@ -5599,6 +5653,9 @@ void log_locked_builds(const char* when) {
         logf("pipeline builds on the asking threads, side by side (%s): %llu built, %llu failed, %zu root "
              "signature(s)\n",
              when, g_locked_built.load(), g_locked_failed.load(), g_root_signatures.size());
+        logf("pipeline builds (%s): %zu different PC pipeline streams among them; shader translations: %llu made, "
+             "%llu taken from memory\n",
+             when, g_distinct_streams.size(), g_translated_made.load(), g_translated_reused.load());
     }
 }
 
