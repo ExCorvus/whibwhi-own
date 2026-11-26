@@ -16,6 +16,9 @@ namespace whiwhi::shell {
 // The address to connect one import of a console image to, or nullptr if nothing provides it.
 void* resolve_console_import(HostLibraries& host, const std::string& library, const ImportedFunction& fn);
 
+// Records the hosted image's base so GetModuleHandleA/W(NULL) answers with the game, not the shell tool.
+void set_hosted_image_base(void* base);
+
 } // namespace whiwhi::shell
 
 #endif // WHIWHI_SHELL_CONSOLE_HPP
