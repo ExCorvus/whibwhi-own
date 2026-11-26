@@ -60,7 +60,7 @@ target_link_libraries(xgameruntime PRIVATE onecore)
 # Shell core: image mapper, import table reader, image loader, host-library resolver, console imports, flat
 # hosting model.
 add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp loader.cpp
-                               shader_isa.cpp shader_translate.cpp spirv.cpp)
+                               shader_container.cpp shader_isa.cpp shader_translate.cpp spirv.cpp)
 target_include_directories(whiwhi_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(whiwhi_shell PUBLIC whiwhi_seat)
 
@@ -129,6 +129,10 @@ add_test(NAME d3d12_xs COMMAND test_d3d12_xs)
 add_executable(test_shader tests/test_shader.cpp)
 target_link_libraries(test_shader PRIVATE whiwhi_shell)
 add_test(NAME shader COMMAND test_shader)
+
+add_executable(test_shader_container tests/test_shader_container.cpp)
+target_link_libraries(test_shader_container PRIVATE whiwhi_shell)
+add_test(NAME shader_container COMMAND test_shader_container)
 
 # The audio libraries: the built DLLs beside this test must carry every imported name and answer not-provided.
 add_executable(test_acpxapu tests/test_acpxapu.cpp)
