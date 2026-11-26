@@ -68,9 +68,16 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 - `shader_access.hpp` / `shader_access.cpp` - for an instruction that touches memory, an image, an interpolated
   attribute or an output: which registers hold what, in which order, and how many (scalar loads, buffer loads
   and stores, the order of an image instruction's address words, the interpolation steps, exports, whole-wave
-  instructions). A description, not an execution; it refuses what its public sources do not establish. Tried
-  on hand-built words only: nothing uses it on the game's programs yet. `docs/SHADER-ACCESS.md` gives the
-  source of each statement.
+  instructions). A description, not an execution; it refuses what its public sources do not establish. Its
+  own test uses hand-built words only; `shader_pc` uses it on the game's programs. `docs/SHADER-ACCESS.md`
+  gives the source of each statement.
+- `shader_pc.hpp` / `shader_pc.cpp` - the pass that writes a PC shader for one console pixel or vertex
+  program: it walks the program's control-flow items, gives each machine register a PC temporary, looks the
+  program's descriptor loads up in the module's tables, takes inputs and outputs from the container's lists,
+  and writes the result with `shader_dxbc`. It refuses a whole program rather than leave an instruction out.
+  Checked against the reference interpreter of `shader_meaning` on thousands of random hand-built programs.
+  Run in memory on the game's programs: 281 of 505 pixel and 129 of 227 vertex programs of a run are written.
+  Nothing it writes is given to the graphics device yet. `docs/SHADER-TRANSLATOR.md` section 26.
 - `shader_translate.hpp` / `shader_translate.cpp` — translates a console shader to SPIR-V, kept in memory. Today
   it handles straight-line compute shaders of a handful of instructions and refuses everything else.
 - `spirv.hpp` / `spirv.cpp` — our own small SPIR-V writer.
@@ -115,9 +122,9 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 
 ## Tests
 
-`tests/` holds 26 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
+`tests/` holds 27 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
 shader_container, shader_dxbc, shader_program, shader_walk, shader_names, shader_shape, shader_flow,
-shader_emit_flow, shader_meaning, shader_access, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
+shader_emit_flow, shader_meaning, shader_access, shader_pc, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
 game files, no GPU.
 
 ## Build and test
