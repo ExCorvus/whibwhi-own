@@ -207,11 +207,18 @@ struct MimgFields {
 };
 
 // VINTRP (110010), one word: attribute interpolation.
+//
+// The source field means two different things. In the two interpolation steps (opcodes 0 and 1) it is a vector
+// register number, and the instruction's src[0] is that register. In the parameter move (opcode 2) it is not a
+// register at all but the number that selects which of the attribute's three values is taken, 0, 1 or 2, written
+// straight into the field (Mesa ACO aco_assembler.cpp emit_vintrp_instruction; LLVM AMDGPUInstPrinter.cpp
+// printInterpSlot prints 0 as p10, 1 as p20, 2 as p0). The move therefore has no source operand.
 struct VintrpFields {
-    std::uint32_t vsrc = 0;     // word 0 bits 7..0
+    std::uint32_t vsrc = 0;     // word 0 bits 7..0: a vector register number, or the move's selector
     std::uint32_t attrchan = 0; // word 0 bits 9..8
     std::uint32_t attr = 0;     // word 0 bits 15..10
     std::uint32_t vdst = 0;     // word 0 bits 25..18
+    bool vsrc_is_selector = false;  // opcode 2: vsrc is the selector, not a register
 };
 
 // One decoded instruction.
