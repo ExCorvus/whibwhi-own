@@ -9,9 +9,8 @@
 //   - ApuIsVirtualAddressValid checks the range is really committed host memory; ApuMapVirtualAddress /
 //     ApuMapApuAddress are the identity map (valid below 4 GiB by construction of the heap; above it the map
 //     answers 0 and logs, because a truncated identity would be a lie).
-// The audio device itself is a SILENT host (a stated exception ExCorvus granted, 2026-11-26): AcpHalCreate hands
-// out an object whose vtable answers success and does nothing, so the game runs on without sound. The real audio
-// path comes later. This hosts the driver's interface from the outside; it does not produce audio.
+// The one thing a PC cannot provide is the audio device itself: AcpHalCreate still answers E_NOTIMPL and writes
+// no handle, because the image waits on an async status word only the console's driver writes.
 // WHIWHI_ACP_TRACE=1 logs every call, not only the first of each.
 #include "acp_hal.h"
 
@@ -67,39 +66,6 @@ struct ApuHeap {
 ApuHeap g_heap;
 void* g_shape_contexts = nullptr;
 
-// The silent audio device (ExCorvus granted this stated exception, 2026-11-26: host every audio call from the
-// outside so the game runs on, with no sound; the real audio path comes later). The image only ever sees this
-// object through four vtable slots - 0x00 a start, 0x08 a stop, 0x10 the command door, 0x28 a settle - and it
-// tests the start and the command for a negative answer. A PC has no APU to drive, so every slot answers success
-// and does nothing. The image zeroes its async status word before the start and spins while it is negative;
-// nothing here sets it negative, so the spin leaves at once. This is hosting the driver's interface, not sound.
-long device_slot(void* self, unsigned long long a, unsigned long long b, unsigned long long c,
-                 unsigned long long d, unsigned long long e) {
-    (void)self;
-    (void)a;
-    (void)b;
-    (void)c;
-    (void)d;
-    (void)e;
-    return 0;
-}
-
-void* g_device_vtable[] = {
-    reinterpret_cast<void*>(&device_slot),  // 0x00 start
-    reinterpret_cast<void*>(&device_slot),  // 0x08 stop
-    reinterpret_cast<void*>(&device_slot),  // 0x10 command
-    reinterpret_cast<void*>(&device_slot),  // 0x18
-    reinterpret_cast<void*>(&device_slot),  // 0x20
-    reinterpret_cast<void*>(&device_slot),  // 0x28 settle
-    reinterpret_cast<void*>(&device_slot),  // 0x30
-    reinterpret_cast<void*>(&device_slot),  // 0x38
-};
-
-struct DeviceObject {
-    void** vtable;
-};
-DeviceObject g_device{g_device_vtable};
-
 } // namespace
 
 extern "C" {
@@ -131,15 +97,11 @@ long AcpHalAllocateShapeContexts(void* config) {
 
 long AcpHalCreate(void** handle) {
     static long once = 0;
-    if (!handle) {
-        return WHIWHI_ACP_HAL_NOT_PROVIDED;
-    }
-    *handle = &g_device;
     report(once, trace_enabled(),
-           "AcpHalCreate(handle=%p): a silent device object at %p - every vtable slot answers success and does "
-           "nothing (stated exception: no sound; the real audio path comes later)",
-           static_cast<void*>(handle), static_cast<void*>(&g_device));
-    return 0;
+           "AcpHalCreate(handle=%p): the audio device itself is not provided on a PC (the image then waits on an "
+           "async status only the console driver writes); answering E_NOTIMPL, no handle written",
+           static_cast<void*>(handle));
+    return WHIWHI_ACP_HAL_NOT_PROVIDED;
 }
 
 long AcpHalReleaseShapeContexts(void* config) {
