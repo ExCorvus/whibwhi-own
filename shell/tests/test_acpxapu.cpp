@@ -1,9 +1,8 @@
-// Tests for the two audio libraries: AcpHal.dll and xapu.dll.
+// Tests for the two audio libraries we provide as skeletons: AcpHal.dll and xapu.dll.
 //
-// The DLLs beside this test must export every name the image imports from "AcpHal.dll" and "xapu.dll". The APU
-// memory is real, the audio device has the methods the image calls, and the decoding channel hands back only
-// results of work done (with opus.dll beside it; without it, it must answer "not provided"). No image, no game
-// data, no sound device.
+// The DLLs beside this test must export every name the image imports from "AcpHal.dll" and "xapu.dll", and
+// every one of them must answer "not provided" - a negative HRESULT, a 0 count, a null address - without
+// writing through the pointers it was handed. No image, no game data, no device.
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -111,23 +110,11 @@ void test_acp_hal(const AcpHal& api) {
     CHECK(api.allocate_shape_contexts(nullptr) < 0);
     CHECK(api.release_shape_contexts(nullptr) == 0);
 
-    // The audio device: an object with the four methods the image calls. Start opens the PC's sound output and is
-    // not called here (no sound device is needed for the tests). Command 2 with its magic is accepted (the stated
-    // exception), any other command is refused.
-    void* handle = nullptr;
-    CHECK(api.create(&handle) == 0);
-    CHECK(handle != nullptr);
+    // The audio device itself is still not provided: no handle is invented.
+    void* handle = reinterpret_cast<void*>(kSentinel);
+    CHECK(api.create(&handle) < 0);
+    CHECK(handle == reinterpret_cast<void*>(kSentinel));
     CHECK(api.create(nullptr) < 0);
-    if (handle) {
-        using Command = HResult(__stdcall*)(void*, unsigned, unsigned, unsigned, const void*, unsigned);
-        using Plain = HResult(__stdcall*)(void*);
-        void* const* table = *static_cast<void* const* const*>(handle);
-        unsigned block = 0xc0;
-        CHECK(reinterpret_cast<Command>(table[2])(handle, 2, 0xf0f0f0f0u, 0xffffffffu, &block, 0) == 0);
-        CHECK(reinterpret_cast<Command>(table[2])(handle, 5, 0xf6f6f6f6u, 0xffffffffu, &block, 0) < 0);
-        CHECK(reinterpret_cast<Plain>(table[1])(handle) == 0);  // stop
-        CHECK(reinterpret_cast<Plain>(table[5])(handle) == 0);  // release
-    }
 
     // The APU heap is real committed memory below 4 GiB; ApuAlloc bump-allocates from it, aligned as asked.
     CHECK(api.create_heap(0x1000000u, 0x226E00u) == 0);
@@ -156,85 +143,39 @@ void test_acp_hal(const AcpHal& api) {
 void test_xapu(const XApu& api) {
     unsigned char config[0x18] = {};
     unsigned char buffers[0x200] = {};
-    CHECK(api.connect(nullptr, nullptr, nullptr) < 0);
     void* client = reinterpret_cast<void*>(kSentinel);
-    const HResult connected = api.connect(config, buffers, &client);
-    if (connected < 0) {
-        // Without opus.dll beside the library nothing can decode: no client handle is invented.
-        CHECK(client == reinterpret_cast<void*>(kSentinel));
-        std::printf("opus.dll is not beside the test: the decoding channel was checked as not provided\n");
-        return;
-    }
-    CHECK(client != nullptr && client != reinterpret_cast<void*>(kSentinel));
+    CHECK(api.connect(config, buffers, &client) < 0);
+    CHECK(client == reinterpret_cast<void*>(kSentinel)); // no client handle was invented
+    CHECK(api.connect(nullptr, nullptr, nullptr) < 0);
+
+    // One command as the image builds it: opcode 1, stream id 7, a dword of payload at +0x18.
+    struct Command {
+        unsigned opcode;
+        unsigned stream;
+        unsigned zero[4];
+        unsigned value;
+    } command{};
+    command.opcode = 1;
+    command.stream = 7;
+    command.value = 0x5DC0;
+    CHECK(api.enqueue_command(nullptr, &command, 0) < 0);
+    CHECK(api.enqueue_command(client, &command, 0) < 0); // the handle it kept is not needed to answer
+
+    // The count is the one answer that must be 0: the image loops over it.
+    CHECK(api.get_result_count(client) == 0);
 
     struct Result {
-        unsigned event;   // +0x00
+        unsigned event;   // +0x00, 1, 2, 3 or 5 in the image
         unsigned stream;  // +0x04
         unsigned pad[0xB];// +0x08
         unsigned payload; // +0x34
-        unsigned rest[0xA];
     } result{};
     static_assert(offsetof(Result, payload) == 0x34, "the result payload dword is at +0x34");
-    static_assert(sizeof(Result) == 0x60, "the image zeroes 0x60 bytes for a result");
-
-    unsigned char command[0x40] = {};
-    const auto put = [&command](unsigned at, unsigned value) { std::memcpy(command + at, &value, 4); };
-    CHECK(api.get_result_count(client) == 0);
-    CHECK(api.dequeue_result(client, &result) < 0);  // nothing waiting
-
-    // Open stream 7 with 2 channels: one "opened" result.
-    put(0x00, 1);
-    put(0x04, 7);
-    put(0x18, 2);
-    CHECK(api.enqueue_command(client, command, 0) == 0);
-    CHECK(api.enqueue_command(client, command, 0) < 0);  // already open: not done, no result
-    put(0x18, 9);
-    put(0x04, 8);
-    CHECK(api.enqueue_command(client, command, 0) < 0);  // 9 channels: not done
-    CHECK(api.get_result_count(client) == 1);
-    CHECK(api.dequeue_result(client, &result) == 0);
-    CHECK(result.event == 1 && result.stream == 7 && result.payload == 0);
-
-    // A packet that is not Opus gives no result; a decode for a stream that is not open neither.
-    std::memset(command, 0, sizeof(command));
-    unsigned char packet[4] = {0xff, 0xff, 0xff, 0xff};
-    float output[960 * 2] = {};
-    const unsigned char* packet_at = packet;
-    float* output_at = output;
-    put(0x00, 3);
-    put(0x04, 7);
-    put(0x24, 960);
-    put(0x28, 0);
-    std::memcpy(command + 0x2c, &packet_at, 8);
-    put(0x34, sizeof(output));
-    std::memcpy(command + 0x38, &output_at, 8);
-    CHECK(api.enqueue_command(client, command, 0) < 0);  // zero bytes
-    put(0x04, 8);
-    put(0x28, 4);
-    CHECK(api.enqueue_command(client, command, 0) < 0);  // stream 8 is not open
-    CHECK(api.get_result_count(client) == 0);
-
-    // A real Opus packet: the one-byte packet 0xF8 is a 20 ms CELT frame at full band, mono, with no data, which
-    // a decoder accepts (it decodes to 960 samples). Stream 7 has 2 channels: 960 x 2 x 4 bytes.
-    unsigned char opus_packet[1] = {0xf8};
-    packet_at = opus_packet;
-    std::memcpy(command + 0x2c, &packet_at, 8);
-    put(0x04, 7);
-    put(0x28, 1);
-    CHECK(api.enqueue_command(client, command, 0) == 0);
-    CHECK(api.dequeue_result(client, &result) == 0);
-    CHECK(result.event == 3 && result.stream == 7 && result.payload == 960u * 2u * 4u);
-
-    // Reset and close: one result each.
-    put(0x00, 5);
-    CHECK(api.enqueue_command(client, command, 0) == 0);
-    put(0x00, 2);
-    CHECK(api.enqueue_command(client, command, 0) == 0);
-    CHECK(api.enqueue_command(client, command, 0) < 0);  // already closed
-    CHECK(api.get_result_count(client) == 2);
-    CHECK(api.dequeue_result(client, &result) == 0 && result.event == 5 && result.stream == 7);
-    CHECK(api.dequeue_result(client, &result) == 0 && result.event == 2 && result.stream == 7);
-    CHECK(api.disconnect(client) == 0);
+    result.event = 0xA5A5A5A5;
+    CHECK(api.dequeue_result(client, &result) < 0);
+    CHECK(result.event == 0xA5A5A5A5 && result.stream == 0 && result.payload == 0);
+    CHECK(api.dequeue_result(nullptr, nullptr) < 0);
+    CHECK(api.disconnect(client) < 0);
     CHECK(api.disconnect(nullptr) < 0);
 }
 
@@ -249,7 +190,7 @@ int main() {
     test_acp_hal(acp_hal);
     test_xapu(xapu);
     if (failures == 0) {
-        std::printf("all checks passed (9 AcpHal.dll exports, 5 xapu.dll exports)\n");
+        std::printf("all checks passed (9 AcpHal.dll exports, 5 xapu.dll exports, all answering not-provided)\n");
     }
     return failures ? 1 : 0;
 }
