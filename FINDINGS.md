@@ -1103,3 +1103,21 @@ The shell's memory library uses only the low byte (processor access) when it ask
 reachable by the graphics card today. The coherent flag is where the graphics side writes memory the processor
 reads at once: free on the console's shared memory, a property of the memory on a PC (ExCorvus: "a precise flag
 where the pipeline injects into the cpu").
+
+## 2026-11-26 - the processor part of the program's memory flags passed on to Windows (game test 21:00)
+
+The memory library used only the low byte of the protection the program gives (the processor's access). Asked
+directly on the user's PC (VirtualAlloc reserve+commit and MapViewOfFile3 of a page section, 64 KiB each, no
+program involved): Windows accepts PAGE_READWRITE with PAGE_WRITECOMBINE (0x404) and with PAGE_NOCACHE (0x204),
+for committed memory and for mapped pages; it refuses every PAGE_GRAPHICS_* flag the program uses (0x801, 0x1004,
+0x1404, 0x2004, 0x2404, 0x8404, 0x22004, 0x42404) with error 50, not supported. The memory library now passes
+write-combined and no-cache on as the program asked; the graphics bits stay in the region record only. The
+sample test that expected write-combined memory to come back as plain read-write was changed to expect it
+write-combined.
+
+Game test 2026-11-26 21:00: PASS, alive after 60 s, the copy's folder unchanged, no new missing answers, no
+fault and no watchdog stop. The last frame token was 1,610, against about 120 in every run before (about 29
+frames a second instead of about 2). Pipelines made in the run: 4,096 against 16,384. Why fewer pipelines are
+made in the same time is not known (open). ExCorvus: the watchdog checks the loop's pace (measured in the map:
+one-second passes, 30 ticks re-armed by progress, so about 30 seconds without progress stops it), and a program
+that runs slower than it should skews boot results - earlier frame counts are not comparable with this one.
