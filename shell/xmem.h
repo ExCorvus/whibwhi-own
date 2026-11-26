@@ -64,6 +64,13 @@ WHIWHI_XMEM_API void XMemFree(void* pointer, unsigned long long attributes);
 WHIWHI_XMEM_API void* XMemAllocDefault(unsigned long long size, unsigned long long attributes);
 WHIWHI_XMEM_API void XMemFreeDefault(void* pointer, unsigned long long attributes);
 
+// Answered with the PC's own numbers: a PC has no reserved "tools" memory slice, so tools memory is available,
+// and the working set is the machine's (GlobalMemoryStatusEx). Each call is logged; the field meanings of the
+// statistics block are not known, so it is filled with the machine's totals and the rest zeroed.
+WHIWHI_XMEM_API int XMemGetWorkingSetStatistics(unsigned long kind, void* statistics);
+WHIWHI_XMEM_API int XMemIsToolsMemAvailable(void);
+WHIWHI_XMEM_API int XMemTransferMemory(unsigned long kind, unsigned long long bytes);
+
 // ---- For the shell ----------------------------------------------------------------------------------------
 
 // Stands in for the image's VirtualFree import: an image frees what XMemVirtualAlloc gave it with VirtualFree.
@@ -100,6 +107,9 @@ typedef struct WhiwhiXmemStatistics {
     unsigned long long views;           // 64 KiB mappings in place
     unsigned long long regions;
     unsigned long long bytes_committed; // committed regions and XMemAlloc allocations
+    unsigned long long calls_working_set_statistics;
+    unsigned long long calls_tools_mem_available;
+    unsigned long long calls_transfer_memory;
 } WhiwhiXmemStatistics;
 
 WHIWHI_XMEM_API void whiwhi_xmem_statistics(WhiwhiXmemStatistics* out);
