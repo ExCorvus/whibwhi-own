@@ -203,9 +203,12 @@ What the slots are, as far as it is known (boots b74-b80):
 - Slots 32 to 52 are the public methods four places up. Seen in runs with matching arguments and carried out on
   the PC list: 32 (SetDescriptorHeaps with two heaps), 34 (graphics root signature), 36 (graphics root
   descriptor table), 50 (OMSetRenderTargets), 52 (ClearRenderTargetView). Written by the same rule and not yet
-  seen: 33, 35, 37-40, 51. Not answered yet although the shapes match: 41-48 (root buffer addresses, the index
-  buffer, vertex buffers), because they carry addresses in the image's memory that the shell cannot yet turn
-  into PC buffer addresses.
+  seen: 33, 35, 37-40, 51. Slots 41-48 (root buffer addresses, the index buffer, vertex buffers) carry
+  addresses in the image's memory; the shell turns each into the address of a PC buffer over the same memory.
+  Seen in boot b88 and carried out: 44 (graphics root shader-resource address), 47 (no index buffer), 48 (one
+  vertex buffer, 4,080 bytes, stride 24). The root signature current at the slot 44 call has a
+  shader-resource address at that parameter (read from its serialized form), which confirms the slot beyond
+  its argument shape.
 - ExecuteIndirect is slot 61 (at 0x248cdef and in fn 0x94360); the public list has it at 59. So two public
   methods are missing somewhere between slots 53 and 60.
 - Slot 139 starts recording on an allocator: (list, allocator, 0, 0), a failure is fatal (fn 0x2474cc0). The
