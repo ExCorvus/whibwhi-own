@@ -1286,3 +1286,24 @@ same calls into it from the program, with the same counts in the summary. The lo
 measurement that was switched on at 23:13 and not at 23:50, apart from the boot tool's own code offsets, which moved
 with its changed texts. The rename was one commit (735), by ExCorvus's exception to one file per commit and to the
 game-test gate; the docs followed one file per commit (736-753).
+## 2026-11-27 - how many lanes the builder's shaders were made for, and what the PC side does with it (measured, no run)
+
+Read from the installation's XboxBvhBuilder.dll (read-only; numbers only, tools in the agent's temp folder):
+- All 52 shaders are compute shaders. Their PSV0 part leaves the lane count open (minimum 0, maximum any); none
+  declares a WaveSize the PC way.
+- Every shader carries one named metadata entry a PC shader does not have, `xbox.compiler.options`: the options
+  the console's shader compiler (`dxcxbox 2504.2509.11601.10011`) was given. In 42 of the 52 it holds the switch
+  `__XBOX_ENABLE_WAVE32`. All 35 shaders with thread groups of 32 have it, among them the one the PC device refused
+  at 23:13 (5,136 bytes); so do six of the seven with groups of 1,024 and the one with a group of 1. The ten without
+  it have groups of 64 (4), 256 (1), 512 (4) and 1,024 (1).
+- So the "64" in names such as `xbox.Ballot64` is the width of the answer (a 64-bit lane mask), not the lane
+  count. Which lane count a shader without the switch runs with on the console is not written in it; that it is
+  64 follows only from the switch's name (inferred).
+- Her card (vulkaninfo): subgroup size 64 by default, 32 to 64 possible, and a compute shader can require one
+  (subgroupSizeControl, computeFullSubgroups, requiredSubgroupSizeStages includes compute).
+- vkd3d-proton (libs/vkd3d/state.c, the stage setup for a shader that uses lane operations): with no WaveSize in
+  the shader it allows a varying lane count and leaves the choice to the driver. Nothing reads the console's
+  switch, so whether a shader made for 32 lanes runs with 32 is not decided by anything that knows what it was
+  made for.
+- Not changed: nothing. The step this points to, taking the console compiler's switch as the lane count the
+  shader requires, is for ExCorvus to decide.
