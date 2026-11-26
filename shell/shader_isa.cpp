@@ -113,6 +113,76 @@ const char* shader_stage_name(ShaderStage stage) {
 
 const char* isa_format_name(WalkFormat format) { return walk_format_name(format); }
 
+namespace {
+
+struct OpcodeRange {
+    std::uint16_t first, last;
+};
+
+template <std::size_t N>
+bool in_ranges(std::uint32_t value, const OpcodeRange (&ranges)[N]) {
+    for (const OpcodeRange& r : ranges) {
+        if (value >= r.first && value <= r.last) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Opcode numbers the public table (Mesa ACO aco_opcodes.py, gfx10 column) lists, per one-word format, and the
+// VOP3-only instructions by the number of operands the table gives them. Numbers only; no code was copied.
+const OpcodeRange kCompares[] = {{0, 63}, {128, 174}, {176, 190}, {192, 255}};
+const OpcodeRange kTwoSource[] = {{1, 13}, {15, 20}, {22, 22}, {24, 24}, {26, 33}, {37, 45}, {47, 47}, {50, 60}};
+const OpcodeRange kOneSource[] = {{0, 8},   {10, 27}, {32, 37}, {39, 39}, {42, 43}, {46, 47},
+                                  {49, 49}, {51, 68}, {72, 72}, {80, 101}, {104, 104}};
+const OpcodeRange kOwnTwo[] = {{356, 364}, {372, 372}, {767, 769}, {771, 773}, {775, 788}, {793, 793},
+                               {834, 834}, {864, 864}, {866, 870}, {872, 875}, {886, 886}, {895, 895}};
+const OpcodeRange kOwnThree[] = {{320, 352}, {365, 371}, {373, 376}, {832, 832}, {835, 839},
+                                 {843, 843}, {849, 858}, {862, 863}, {865, 865}, {877, 877},
+                                 {879, 879}, {881, 883}, {885, 885}, {887, 888}};
+
+} // namespace
+
+bool vop3_is_compare(std::uint32_t opcode) {
+    return opcode < 0x100 && in_ranges(opcode, kCompares);
+}
+
+int vop3_source_count(std::uint32_t opcode) {
+    if (opcode < 0x100) {
+        return in_ranges(opcode, kCompares) ? 2 : -1;
+    }
+    if (opcode < 0x140) {
+        const std::uint32_t two = opcode - 0x100;
+        if (!in_ranges(two, kTwoSource)) {
+            return -1;
+        }
+        // v_cndmask_b32 (1) and the carry-in adds and subtracts (40..42) take a lane mask in the third field.
+        return (two == 1 || (two >= 40 && two <= 42)) ? 3 : 2;
+    }
+    if (opcode >= 0x180 && opcode < 0x200) {
+        const std::uint32_t one = opcode - 0x180;
+        if (!in_ranges(one, kOneSource)) {
+            return -1;
+        }
+        // v_nop (0), v_pipeflush (27) and v_clrexcp (65) take nothing.
+        return (one == 0 || one == 27 || one == 65) ? 0 : 1;
+    }
+    if (in_ranges(opcode, kOwnTwo)) {
+        return 2;
+    }
+    if (in_ranges(opcode, kOwnThree)) {
+        return 3;
+    }
+    return -1;
+}
+
+bool vop3_has_scalar_result(std::uint32_t opcode) {
+    // The carry-out forms (two-source 40..42 re-encoded; 783, 784, 793), v_div_scale (365, 366) and the
+    // 64-bit multiply-adds (374, 375): the public table gives each two results.
+    return (opcode >= 0x128 && opcode <= 0x12A) || opcode == 365 || opcode == 366 || opcode == 374 ||
+           opcode == 375 || opcode == 783 || opcode == 784 || opcode == 793;
+}
+
 bool inline_constant(std::uint32_t code, std::uint32_t* value) {
     // Integer constants 0..64 (codes 128..192) and -1..-16 (codes 193..208), then the float constants
     // (codes 240..248); LLVM AMDGPUDisassembler.cpp decodeIntImmed/getInlineImmVal32 and
@@ -294,12 +364,32 @@ void decode_fields(Instruction* ins) {
         }
         case WalkFormat::kVop3:
         case WalkFormat::kVop3p: {
-            // Two words. vdst in word 0 [7:0]; three 9-bit sources in word 1 [8:0], [17:9], [26:18]; the
-            // modifiers as documented in Vop3Fields (LLVM VOP3a_gfx10 / VOP3Pe_gfx10).
-            set_destination(ins, source_field(w0 & 0xFFu, true));
-            add_source(ins, 0, source_field(w1 & 0x1FFu, false));
-            add_source(ins, 1, source_field((w1 >> 9) & 0x1FFu, false));
-            add_source(ins, 2, source_field((w1 >> 18) & 0x1FFu, false));
+            // Two words. The destination field in word 0 [7:0]; three 9-bit sources in word 1 [8:0], [17:9],
+            // [26:18]; the modifiers as documented in Vop3Fields (LLVM VOP3a_gfx10 / VOP3Pe_gfx10).
+            // For VOP3 the public table says how many source fields an opcode uses and whether the
+            // destination is a vector register or (a compare) a scalar mask; the fields it does not use are
+            // decoded but left out of source_count, so that a zero in an unused field is not read as "s0".
+            const bool plain = ins->format == WalkFormat::kVop3;
+            const int used = plain ? vop3_source_count(ins->opcode) : 3;
+            const bool compare = plain && vop3_is_compare(ins->opcode);
+            if (compare) {
+                set_destination(ins, scalar_field(w0 & 0xFFu));
+            } else if (!(plain && used == 0)) {
+                set_destination(ins, source_field(w0 & 0xFFu, true));
+            }
+            const Operand fields[3] = {source_field(w1 & 0x1FFu, false), source_field((w1 >> 9) & 0x1FFu, false),
+                                       source_field((w1 >> 18) & 0x1FFu, false)};
+            const int counted = used < 0 ? 3 : used;
+            for (int i = 0; i < 3; ++i) {
+                ins->src[i] = fields[i];
+            }
+            ins->source_count = static_cast<std::uint8_t>(counted);
+            ins->vop3.sources_used = static_cast<std::uint8_t>(counted);
+            ins->vop3.sources_established = !plain || used >= 0;
+            if (plain && vop3_has_scalar_result(ins->opcode)) {
+                ins->vop3.has_scalar_result = true;
+                ins->vop3.scalar_result = static_cast<std::uint8_t>((w0 >> 8) & 0x7Fu);
+            }
             ins->vop3.vdst = w0 & 0xFFu;
             ins->vop3.clamp = ((w0 >> 15) & 1u) != 0;
             ins->vop3.abs_or_neg_hi = static_cast<std::uint8_t>((w0 >> 8) & 0x7u);
