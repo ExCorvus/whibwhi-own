@@ -76,7 +76,14 @@ enum class ShaderType : std::uint32_t {
 };
 
 // The subset of instructions this writer covers. Values are the D3D10_SB_OPCODE_TYPE numbers.
+// The numbers of the second group below (derivatives to swapc) were read in the opcode list of the PC graphics
+// library's own shader reader (dxbc-spirv, dxbc_types.h) and are checked by the system disassembler in the test.
 enum class Opcode : std::uint32_t {
+    kDerivRtx = 0x0B, kDerivRty = 0x0C, kLdMs = 0x2E, kNop = 0x3A, kResinfo = 0x3D,
+    kSampleC = 0x46, kSampleCLz = 0x47, kSampleD = 0x49, kSincos = 0x4D, kLod = 0x6C, kGather4 = 0x6D,
+    kRcp = 0x81, kF32toF16 = 0x82, kF16toF32 = 0x83, kUaddc = 0x84, kUsubb = 0x85, kCountbits = 0x86,
+    kFirstbitHi = 0x87, kFirstbitLo = 0x88, kFirstbitShi = 0x89, kUbfe = 0x8A, kIbfe = 0x8B, kBfi = 0x8C,
+    kBfrev = 0x8D, kSwapc = 0x8E,
     kAdd = 0x00, kAnd = 0x01, kBreak = 0x02, kBreakc = 0x03, kContinue = 0x07,
     kDiscard = 0x0D, kDiv = 0x0E, kDp2 = 0x0F, kDp3 = 0x10, kDp4 = 0x11, kElse = 0x12,
     kEndif = 0x15, kEndloop = 0x16, kEq = 0x18, kExp = 0x19, kFrc = 0x1A, kFtoi = 0x1B,
@@ -217,6 +224,11 @@ struct Operand {
     bool select_one = false;
     std::uint8_t select_component = 0;
     Immediate32 immediate{};
+    // A resource or sampler source may take its array index at run time: the index is then `index1` plus one
+    // component of a temporary register (the "number plus relative" index form, written s0[r5.x + 0]).
+    bool relative_index = false;
+    std::uint32_t relative_temp = 0;
+    std::uint8_t relative_component = 0;
 };
 
 // Source operands (swizzle form).
@@ -241,6 +253,15 @@ Operand resource_source(std::uint32_t id, std::uint32_t array_index = 0);
 Operand sampler_source(std::uint32_t id, std::uint32_t array_index = 0);
 // A constant buffer source: the logical buffer id, its register, and the 16-byte element within it.
 Operand constant_buffer_source(std::uint32_t id, std::uint32_t reg, std::uint32_t element);
+// One component (0 = x .. 3 = w) of a constant buffer element.
+Operand constant_buffer_scalar(std::uint32_t id, std::uint32_t reg, std::uint32_t element,
+                               std::uint8_t component);
+// A sampler or a resource taken from its declared range at run time: element `array_index` plus the value of
+// one component of temporary register `temp`.
+Operand sampler_source_indexed(std::uint32_t id, std::uint32_t array_index, std::uint32_t temp,
+                               std::uint8_t component);
+Operand resource_source_indexed(std::uint32_t id, std::uint32_t array_index, std::uint32_t temp,
+                                std::uint8_t component);
 
 Operand null_operand();
 
@@ -325,6 +346,8 @@ public:
     // format expects; the builder does not check that an opcode accepts a particular operand list.
     void emit(Opcode opcode, std::initializer_list<Operand> operands);
     void emit(Opcode opcode, const InstructionFlags& flags, std::initializer_list<Operand> operands);
+    // The same from a stored list of operands.
+    void emit(Opcode opcode, const InstructionFlags& flags, const Operand* operands, std::size_t count);
 
     // The finished container. Recomputes the checksum each call.
     std::vector<std::uint8_t> build() const;
