@@ -1,8 +1,11 @@
 # MAP of game_scarlett_master.exe (retail 1.0.2.1) — our own reading
 
 Every statement is marked: **V** = verified (read in the listing named), **I** = inferred from it,
-**U** = unknown. RVAs are image-relative (image base 0x140000000). Listings: `funcs\<rva>.txt`.
-Tool: `tools\exe_map.py` (function bounds from the image's own exception table).
+**U** = unknown. RVAs are image-relative (image base 0x140000000).
+
+The file names in backticks below (`funcs\<rva>.txt`, `index-summary.txt`, `xmem-by-function.txt`, `refs-*.txt`)
+and the tool `exe_map.py` are private working files: they contain disassembly of the game, so they are not in this
+repository and never will be. They are named only to say where each statement was read.
 
 ## 0. The image (V, `index-summary.txt`)
 - 120,181,760 bytes on disk. `.text` 0x1000..0x5f40966, `.rdata` 0x5f41000, `.data` 0x67e2000 (virtual 0x43ec398, only
