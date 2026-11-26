@@ -53,6 +53,9 @@ unchanged afterwards), and records what the game did:
   it (the loader puts a small counting stub in each import slot; `WHIWHI_CALL_LEDGER` names the file);
 - every distinct "not provided" answer the shell gave, with the address in the game it was called from;
 - whether the game was still alive at the end, the last frame number and how many pipelines were made.
+- where each call of the run is named in the map the project already has of the executable (docs/exe-map,
+  docs/console-libs), or that it is not in the map yet (against-the-map.txt). Being named there is not proof the
+  entry is right: parts of the map were written in stretches that later proved wrong.
 
 It compares that with the last run you accepted (`-Accept` makes a passing run the baseline) and says PASS or
 FAIL: FAIL when the game folder changed, when the baseline was alive at its end and this run is not, or when an
