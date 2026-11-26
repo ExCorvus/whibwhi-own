@@ -208,8 +208,16 @@ static void test_placeholder_pieces(bool split_through_library) {
         whole[i * kPage + 5] = static_cast<char>(i + 1);
     }
     CHECK(whole[5 * kPage + 5] == 6);
-    // A run may not cross from one piece into the next.
-    CHECK(XMemMapPhysicalPages(piece[0] + kPage, 2, entries) == nullptr);
+    // A run may cross from one piece into the piece directly behind it (an image maps one run over two
+    // neighbouring pieces); the same page is then the same memory at both of its addresses.
+    CHECK(XMemMapPhysicalPages(piece[0] + kPage, 2, entries) == piece[0] + kPage);
+    // (volatile: the compiler cannot know that two different addresses are the same memory)
+    volatile char* second_piece = whole + 2 * kPage + 9;  // first step of the second piece now shows entries[1]
+    volatile char* first_piece = whole + 9;               // which the first step of the first piece shows as well
+    *second_piece = 42;
+    CHECK(*first_piece == 42);
+    // A run that leaves the last piece is refused, and nothing changes.
+    CHECK(XMemMapPhysicalPages(piece[2], 2, entries) == nullptr);
 
     // Teardown as an image does it: unmap, free the pages, release each piece.
     CHECK(XMemMapPhysicalPages(piece[0], 2, nullptr) == piece[0]);
