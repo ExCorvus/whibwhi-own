@@ -88,7 +88,10 @@ $endLine = ($text | Select-String -Pattern 'still running after|exception 0x|ent
 $frame = 0
 foreach ($m in ($text | Select-String -Pattern 'frame token (\d+)')) { $frame = [Math]::Max($frame, [int]$m.Matches[0].Groups[1].Value) }
 $made = 0
-foreach ($m in ($text | Select-String -Pattern 'device slot 86 #\d+:.*?; (\d+) made')) { $made = [Math]::Max($made, [int]$m.Matches[0].Groups[1].Value) }
+foreach ($m in ($text | Select-String -Pattern 'device slot 86 #\d+:.*?; (\d+) made|pipelines built by the shell.*?: (\d+) built')) {
+    $g = $m.Matches[0].Groups; $v = if ($g[1].Success) { $g[1].Value } else { $g[2].Value }
+    $made = [Math]::Max($made, [int]$v)
+}
 # One line per distinct answer: what was asked and where from (the return address stays: the image sits at its
 # preferred base), without the argument values, which differ from run to run.
 $normalise = { param($l) ($l -replace ';? ?arguments [^)]*', '' -replace 'called with \([^)]*\)', 'called with (...)' -replace '0x[0-9A-Fa-f]{9,}', '#').Trim() }
