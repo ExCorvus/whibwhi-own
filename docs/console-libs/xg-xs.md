@@ -58,6 +58,11 @@ three formats), then larger ones through the device (docs/exe-map/GRAPHICS-CALLS
 
 ---
 
+**Added 2026-11-26 (boot b152):** the library also remembers which memory it copied texture rows into, by
+start address, with the description and a number that grows with each copy (`whiwhi_xg_written_at`). The
+graphics library uses it to make and fill a PC texture when a view names such memory (FINDINGS.md, entry of that
+date).
+
 ## 1. The two imports
 
 | import | import thunk | call sites (image RVA) |
