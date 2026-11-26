@@ -348,6 +348,10 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
   initial data so every thread Windows starts afterwards gets it; the calling thread's block is filled directly.
   The old whiwhi_tls.dll + entry-0 redirect is removed (redirecting slot 0 to the real block heap-corrupted the
   PC-side slot-0 owner, boot b25; the zeroed-mirror variant left the game's slot-0 reads seeing zeros).
+- With the exe-seat, boots b26/b27 get through memory start-up AND into DStorage queue creation, then stop at an
+  int3 at image+0x2237178: the storage set-up (fn 0x2236e00) calls fn 0x6170 (returns [rsi+0xc] != 0) and asserts
+  because [rsi+0xc] is 0 - a field our DStorage answers leave zero. test_thread_storage rewritten for the exe-seat
+  (index 0, claim fills the block + rewrites the template, new threads get the template); 13/13 tests pass.
 
 ## 2026-11-26 - booting the image in the shell; what the runs showed (measured)
 
