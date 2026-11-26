@@ -4,13 +4,12 @@ project(whiwhi_shell LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Per-thread storage block the loader lends to a loaded image. Built without the C runtime so that its
-# thread-local section holds only that block.
-add_library(whiwhi_tls SHARED thread_block.cpp)
-target_compile_definitions(whiwhi_tls PRIVATE WHIWHI_THREAD_BLOCK_BUILD)
-target_compile_options(whiwhi_tls PRIVATE /GS-)
-target_link_options(whiwhi_tls PRIVATE /NODEFAULTLIB /ENTRY:whiwhi_thread_block_entry)
-target_link_libraries(whiwhi_tls PRIVATE kernel32)
+# Per-thread storage block the loader lends to a loaded image, living in the EXE's own thread-local section
+# (index 0 - the same slot the console gives the game, so the game's hardcoded slot-0 reads and its
+# index-variable reads hit the same block).
+add_library(whiwhi_seat STATIC tls_seat.cpp)
+target_compile_definitions(whiwhi_seat PUBLIC WHIWHI_THREAD_BLOCK_STATIC)
+target_include_directories(whiwhi_seat PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # The console's memory library, answered on a PC. An image imports it by this file name.
 add_library(xmem SHARED xmem.cpp)
@@ -58,7 +57,7 @@ target_link_libraries(xcrdapi PRIVATE onecore)
 add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp loader.cpp
                                shader_isa.cpp shader_translate.cpp spirv.cpp)
 target_include_directories(whiwhi_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(whiwhi_shell PUBLIC whiwhi_tls)
+target_link_libraries(whiwhi_shell PUBLIC whiwhi_seat)
 
 add_executable(list_imports tools/list_imports.cpp)
 target_link_libraries(list_imports PRIVATE whiwhi_shell)
