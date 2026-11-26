@@ -337,6 +337,10 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
   which the shipped XboxBvhBuilder.dll needs to even load. test_gfx_stubs covers all of it; 13/13 tests pass.
 - Boot with these: 68 libraries, **587 of 587 functions connected**. The boot boundary is unchanged (start-up
   stops at the console-patched pool stub, see above).
+- Host-memory import into the GPU proven on this machine (RX 9070 XT): shell/tools/vkhost_probe.cpp opens the
+  Vulkan device, imports a host buffer with VK_EXT_external_memory_host, and the GPU reads it back with zero
+  mismatches (64 MiB tested). So "what has to be mapped into VRAM" is: nothing is copied - the game's own RAM is
+  imported as device memory and the GPU reads it directly (the flat-out zero-copy model).
 
 ## 2026-11-26 - booting the image in the shell; what the runs showed (measured)
 
