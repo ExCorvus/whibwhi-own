@@ -8,9 +8,11 @@ repository contains no game data, keys or executable, and nothing here decrypts 
 
 ## Status
 
-The shell loads the unmodified game file, connects its imports and starts it. The game gets through part of its
-own start-up and then stops. **Nothing is drawn on screen yet**: graphics, shader translation and audio are not
-built. The exact state is the "Current state" block at the top of [FINDINGS.md](FINDINGS.md).
+The shell loads the unmodified game file, connects its imports and starts it. The game runs its own start-up:
+it sets up its memory, opens its package files and creates a graphics device (Direct3D 12 on Vulkan). It then
+stops at the first console-only graphics function the shell does not provide yet. **Nothing is drawn on screen
+yet**: most of the graphics interface, shader translation and audio are not built. The exact state is the
+"Current state" block at the top of [FINDINGS.md](FINDINGS.md).
 
 ## Files
 
