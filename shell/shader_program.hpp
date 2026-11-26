@@ -27,8 +27,36 @@
 // the program up to its end-of-program word, then filler words (0xBF9F0000) to the code's end. In all 581 a
 // walk with shader_walk.* from the code's first word lands exactly on that end word.
 //
-// Everything else in the module (the record's other words, the tables before the code, what follows the code)
-// is not established and is not read here.
+// After the code the module holds two tables and a name, all named by the same record (offsets again counted
+// from +0x10): record+0x28 and +0x30 the two tables' offsets, +0x38 and +0x3C their entry counts, +0x60 the
+// name record's offset and +0x6C its size. Entries are five 32-bit words; the first table ends where the
+// second starts and the second ends where the name record starts. A shader that declares no resources has no
+// second table: its count is zero and its offset holds the padding value. The name record is the words
+// { 0, 0, 0xFFFFFFFF, 0, length << 16 } followed by the shader's name.
+//
+// What the entries mean was read on five modules (two vertex, one pixel, two compute shaders, boot b96) by
+// comparing them with what each program does (shader_shape.*) and with the resources its container declares:
+//
+//   first table - how the pipeline's root parameters reach the program: { kind, offset, count, register, last }
+//     kind 3  a resource descriptor in a table; `last` is the scalar register holding the table's address and
+//             `offset` counts 32-bit words from it (eight words to a 32-byte descriptor)
+//     kind 6  the same for a sampler descriptor
+//     kind 1  a buffer whose address arrives directly in scalar registers, the first one in `last`
+//     kind 0  constants that arrive in scalar registers, the first one in the low byte of `last`
+//     kind 4  a sampler fixed by the pipeline; its index is the second byte of `last`
+//     kind 5  seen in 10 pixel modules of boot b98, with a scalar register in `last`; those programs load
+//             descriptors through that register at offsets no kind 3 entry names. What it is has not been
+//             established, so `understood` is false for a module that has one.
+//   second table - one entry for each resource the shader itself declares:
+//     word 0: low byte the class (0 read-only resource, 1 sampler, 2 constant buffer, 3 writable resource),
+//             second byte how it arrives (the first table's kind: 0, 1, 3 or 4)
+//     word 1: offset in words inside the table;  word 2: the shader register number
+//     word 4: low byte the descriptor's size in words, second byte the scalar register, third byte the fixed
+//             sampler's index
+//
+// Not established: the count word of the first table (it reads as the number of scalar registers taken),
+// word 3 of the second table, bit 0x100 seen in `last` for constants, the record's other words, the tables
+// before the code, and what follows the name. A count over every module of a run is in FINDINGS.md.
 //
 // Nothing is written to disk: the block is unpacked into a vector the caller owns.
 #ifndef WHIWHI_SHELL_SHADER_PROGRAM_HPP
@@ -99,6 +127,69 @@ constexpr std::uint32_t kModuleFillerWord = 0xBF9F0000u;  // the word that fills
 // Finds the program in an unpacked module of `size` bytes. Refuses, with a reason, a block that is not laid
 // out as described above; it never guesses a place. Nothing is copied: the offsets are into `block`.
 ModuleProgram find_module_program(const std::uint8_t* block, std::size_t size);
+
+// An entry of the module's first table: how one root parameter reaches the program.
+struct ModuleLayoutEntry {
+    std::uint32_t kind = 0;             // 0 constants, 1 buffer address, 3 descriptor, 4 fixed sampler, 6 sampler
+    std::uint32_t offset_words = 0;     // inside a descriptor table, in 32-bit words
+    std::uint32_t count = 0;            // meaning not established
+    std::uint32_t shader_register = 0;  // the register number the shader's source gave the resource
+    std::uint32_t last = 0;             // the word the next two fields are taken from
+    std::uint8_t scalar_register = 0;   // low byte of `last`
+    std::uint8_t fixed_index = 0;       // second byte of `last`
+};
+
+// An entry of the module's second table: one resource the shader declares.
+struct ModuleResourceEntry {
+    std::uint8_t resource_class = 0;    // 0 read-only resource, 1 sampler, 2 constant buffer, 3 writable resource
+    std::uint8_t arrival = 0;           // 0 constants, 1 buffer address, 3 in a descriptor table, 4 fixed sampler
+    std::uint32_t first = 0;            // word 0 as stored
+    std::uint32_t offset_words = 0;
+    std::uint32_t shader_register = 0;
+    std::uint32_t word3 = 0;            // meaning not established
+    std::uint32_t last = 0;             // word 4 as stored
+    std::uint8_t descriptor_words = 0;  // low byte of `last`
+    std::uint8_t scalar_register = 0;   // second byte of `last`
+    std::uint8_t fixed_index = 0;       // third byte of `last`
+};
+
+struct ModuleTables {
+    bool found = false;        // the tables and the name are laid out as described
+    std::string reason;        // filled unless found
+    std::vector<ModuleLayoutEntry> layout;
+    std::vector<ModuleResourceEntry> resources;
+    std::string name;
+    bool understood = false;   // every entry has a kind, class and arrival listed above
+    std::string not_understood;  // the first entry that does not, when understood is false
+};
+
+constexpr std::uint32_t kMostTableEntries = 4096;
+
+// Reads the two tables and the name of a module whose program find_module_program found. `found` says the
+// layout held; `understood` says every entry is of a kind listed above. A caller that acts on the entries
+// must check both.
+ModuleTables read_module_tables(const std::uint8_t* block, std::size_t size, const ModuleProgram& program);
+
+// A resource as the container's 'PSV0' part declares it (the public layout of that part).
+struct DeclaredResource {
+    std::uint32_t type = 0;   // 1 sampler, 2 constant buffer, 3-5 read-only resource, 6-9 writable resource
+    std::uint32_t space = 0;
+    std::uint32_t lower = 0;  // first register
+    std::uint32_t upper = 0;  // last register
+};
+
+struct DeclaredResources {
+    bool found = false;
+    std::string reason;
+    std::vector<DeclaredResource> resources;
+};
+
+// Reads the resource list of a 'PSV0' part's payload: the size of the first block, that block, the resource
+// count and, when it is not zero, the record size (16 or 24 bytes) and the records.
+DeclaredResources read_declared_resources(const std::uint8_t* part, std::size_t size);
+
+// The class the second table uses for a declared resource type; 0xFF for a type not listed above.
+std::uint8_t declared_resource_class(std::uint32_t type);
 
 } // namespace whiwhi::shell
 
