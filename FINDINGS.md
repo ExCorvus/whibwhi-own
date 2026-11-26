@@ -6,7 +6,7 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 
 ## Current state (2026-11-26)
 
-- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 23 tests pass.
+- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 25 tests pass.
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
@@ -1186,3 +1186,39 @@ programs use). The game folder was unchanged after the run. 23 tests pass.
   then copies each into its shader-visible sampler heap through the public copy call, which the shell already
   passes on. (That the modes come out as the pairs wrap / clamp one would expect fits the public numbering.)
 - Not checked yet: that a shader sees these samplers - no shader of the game runs yet.
+
+## 2026-11-26 - inputs and outputs tied to the container's lists; flow written as runnable items; a writer for the PC shader container (boots b111-b114; measured)
+
+Three pieces of the shader translator, two of them built by helper agents and reviewed, rebuilt and tested by
+the coordinating agent before they were taken in. No picture is drawn by any of this yet.
+
+- **Inputs and outputs (measured over the 505 pixel and 227 vertex programs of a run).** A container's public parts 'ISG1' and 'OSG1'
+  list what the shader declares; `shell/shader_program.*` now reads them. For every program the run counted
+  whether its instructions agree with those lists by a simple rule, and they do: a pixel program's
+  interpolation attribute n is the n-th declared input that is not a system value (500 of 500), its colour
+  export targets are the declared render targets (505 of 505); a vertex program reads input element r from the
+  four vector registers v(4 + 4r) on (227 of 227) and exports its k-th ordinary output to parameter target
+  32 + k (224 of 227; the other 3 declare only the position and export one parameter all the same). The full
+  counts are in docs/SHADER-TRANSLATOR.md section 23 and docs/exe-map/SHADER-PATH.md section 13.
+- **Samplers by place.** Pixel programs load every sampler descriptor from offset 0 of the register that the
+  root signature flag says is the sampler heap (989 uses); compute programs from 16-byte places 64 and 82. The
+  image made samplers at places 0 to 10 in the same run. Not established: whether that register really holds
+  the heap's start (the compute programs' places held nothing yet when the run ended).
+- **Control flow as runnable items** (`shell/shader_emit_flow.*`, a helper's work): any graph the flow
+  analysis accepts is written as a flat list of nested items (if / else, loop, break, continue), with one loop
+  around a choice of the next block for the part the nested form does not reach. Proved by running the items
+  against the graph: 12 hand-built shapes and 2,000 random graphs, no difference. On the game's programs
+  (boot b114): all 700 programs analysed in that run are written, 537 nested (401 pixel, 135 compute, 1
+  vertex) and 163 with the choice loop (104 pixel, 59 compute); docs/SHADER-TRANSLATOR.md section 22.
+- **A writer for the PC's shader container** (`shell/shader_dxbc.*`, a helper's work; namespace
+  `whiwhi::shell::dxbc`): signature parts, a shader-model-5.1 program and the container checksum, written from
+  the public token format. Its test builds eight shaders by hand and has the system's shader disassembler read
+  them back; the checksum is checked against one the system compiler made. Not done: nothing it writes has been
+  given to the graphics device.
+- Review notes: the writer's types were moved into their own namespace by the coordinating agent, because it
+  declared `Operand` and `SignatureElement` beside two existing different types of those names; its test now
+  finds the system folder by asking Windows.
+- What is still missing between these pieces is the pass that writes PC instructions for a console program
+  (docs/SHADER-TRANSLATOR.md section 24).
+
+The game folder was unchanged after every run. 25 tests pass.
