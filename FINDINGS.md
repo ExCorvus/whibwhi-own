@@ -279,6 +279,18 @@ All 12 tests pass on the folded master (126 commits). Nothing pushed (ExCorvus's
   the queue. Not yet measured on the real image: which paths reach OpenFile and whether RPF member offsets
   arrive as file offsets - that needs a boot.
 
+## 2026-11-26 - install path and the Game Runtime (measured, boots b28/b29)
+
+- **Install path.** The game derives its install directory from GetModuleFileNameW(NULL) (fn 0x55e2910) and
+  appends a subdir; in our process that returned the tool's path, so no storage device registered and the
+  storage set-up asserted ([rsi+0xc]==0 at image+0x2237178). Fix: boot_image points the PEB main-module
+  FullDllName/BaseDllName and the process ImagePathName at the game exe (the environment the console gives the
+  game). After that the storage assert is gone and the game runs on to the next dependency.
+- **xgameruntime.dll.** The game LoadLibraryExW's "xgameruntime.dll" (fn 0x55e29dc) and resolves
+  InitializeApiImpl / InitializeApiImplEx / InitializeApiImplEx2 / QueryApiImpl / UninitializeApiImpl. It is not
+  on PC. Our skeleton (shell/xgameruntime.*) answers initialize/uninitialize with success (local-only runtime)
+  and QueryApiImpl with E_NOTIMPL; covered in test_gfx_stubs.
+
 ## 2026-11-26 - boots b12-b18: how far the image gets in our shell, and the current boundary (measured)
 
 - Boot b16/b17/b18 (boot_image, game folder as library folder): 578/587 imports connected (only xg_xs 2 and
