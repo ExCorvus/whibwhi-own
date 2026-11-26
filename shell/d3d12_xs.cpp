@@ -34,6 +34,7 @@
 #include "d3d12_xs.h"
 #include "shader_container.hpp"  // names and sizes of the chunks of a shader container
 #include "shader_isa.hpp"        // the console instruction reader, used to say what a shader's code part holds
+#include "shader_walk.hpp"       // instruction lengths, to walk a whole program and count its instructions
 #include "xg_xs.h"  // the texture description; the library's functions are looked up by name at run time
 
 #define WIN32_LEAN_AND_MEAN
@@ -51,6 +52,7 @@
 #include <dxgi1_2.h>  // the swap chain description the PC library takes
 #include <intrin.h>
 
+#include <algorithm>
 #include <atomic>
 #include <string>
 #include <cstdarg>
@@ -1914,12 +1916,199 @@ void probe_blocks_in(const char* where, const void* description, std::size_t byt
     }
 }
 
+// ---- the programs in the precompiled descriptions: a count of their instructions -------------------------------
+//
+// A block of a slot 57 or slot 67 description that holds the end-of-program word is a program of the console's
+// instruction set. Each such block is walked once, in memory, from its first word with the length reader in
+// shader_walk.*; a walk that lands exactly on the block's first end-of-program word read every length correctly
+// and shows that the program starts at the block's first byte. What is kept is numbers only: how many programs,
+// how many walks landed, how often each (format, opcode) occurs, and what kind of word follows the end.
+
+struct ProgramCensus {
+    SRWLOCK lock = SRWLOCK_INIT;
+    std::unordered_set<std::uintptr_t> seen;               // blocks already counted
+    unsigned long long programs = 0;                       // blocks with an end-of-program word
+    unsigned long long landed = 0;                         // walks from the first word that end exactly there
+    unsigned long long ended_elsewhere = 0;                // walks that reach an end at another word
+    unsigned long long stopped_short = 0;                  // walks that run out of words
+    std::map<unsigned, unsigned long long> stopped_on;     // top six bits of a word of no known format -> walks
+    std::map<unsigned, unsigned long long> opcodes;        // format << 16 | opcode -> occurrences (landed walks)
+    unsigned long long instructions = 0;                   // in landed walks
+    unsigned long long longest = 0;                        // most instructions in one program
+    unsigned long long bytes = 0;                          // bytes of all program blocks
+    unsigned long long tail_code_end = 0;                  // words after the end that are the "code end" filler
+    unsigned long long tail_zero = 0;
+    unsigned long long tail_other = 0;
+};
+ProgramCensus g_programs;
+
+void log_program_census(const char* when) {
+    AcquireSRWLockShared(&g_programs.lock);
+    const ProgramCensus& c = g_programs;
+    const unsigned long long programs = c.programs, landed = c.landed, elsewhere = c.ended_elsewhere,
+                             cut = c.stopped_short, instructions = c.instructions, longest = c.longest,
+                             bytes = c.bytes, code_end = c.tail_code_end, zero = c.tail_zero, other = c.tail_other;
+    std::vector<std::pair<unsigned long long, unsigned>> ordered;
+    for (const auto& item : c.opcodes) {
+        ordered.emplace_back(item.second, item.first);
+    }
+    const std::map<unsigned, unsigned long long> stops = c.stopped_on;
+    ReleaseSRWLockShared(&g_programs.lock);
+    if (!programs) {
+        return;
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    unsigned long long unknown = 0;
+    std::string stop_text;
+    for (const auto& item : stops) {
+        unknown += item.second;
+        char text[40];
+        std::snprintf(text, sizeof(text), " 0x%02x: %llu", item.first, item.second);
+        stop_text += text;
+    }
+    logf("programs in pipeline descriptions (%s): %llu distinct block(s), %llu bytes; a walk from the first word "
+         "lands exactly on the end-of-program word in %llu, reaches an end elsewhere in %llu, runs out of words in "
+         "%llu, meets a word of no known format in %llu%s%s; %llu instruction(s) in the landed walks (longest "
+         "program %llu), %zu distinct (format, opcode); after the end: %llu filler word(s), %llu zero, %llu other\n",
+         when, programs, bytes, landed, elsewhere, cut, unknown, unknown ? " (top six bits:" : "",
+         unknown ? (stop_text + ")").c_str() : "", instructions, longest, ordered.size(), code_end, zero, other);
+    std::string line;
+    int shown = 0;
+    for (const auto& item : ordered) {
+        char text[48];
+        std::snprintf(text, sizeof(text), "  %s %u: %llu",
+                      whiwhi::shell::walk_format_name(static_cast<whiwhi::shell::WalkFormat>(item.second >> 16)),
+                      item.second & 0xFFFF, item.first);
+        line += text;
+        if (++shown % 8 == 0) {
+            logf("programs, instruction counts:%s\n", line.c_str());
+            line.clear();
+        }
+        if (shown >= 160) {
+            break;
+        }
+    }
+    if (!line.empty()) {
+        logf("programs, instruction counts:%s\n", line.c_str());
+    }
+}
+
+void census_program(const std::uint8_t* block, std::size_t block_bytes) {
+    const std::size_t count = block_bytes / 4;
+    const std::uint32_t* words = reinterpret_cast<const std::uint32_t*>(block);
+    std::size_t first_end = count;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (words[i] == whiwhi::shell::kEndOfProgramWord) {
+            first_end = i;
+            break;
+        }
+    }
+    if (first_end == count) {
+        return;  // no program in this block
+    }
+    AcquireSRWLockExclusive(&g_programs.lock);
+    const bool fresh = g_programs.seen.insert(reinterpret_cast<std::uintptr_t>(block)).second;
+    ReleaseSRWLockExclusive(&g_programs.lock);
+    if (!fresh) {
+        return;
+    }
+    std::vector<whiwhi::shell::WalkStep> steps;
+    const whiwhi::shell::WalkResult walk = whiwhi::shell::walk_program(words, count, &steps);
+    const bool landed = walk.reached_end && walk.end_word_index == first_end;
+    unsigned long long code_end = 0, zero = 0, other = 0;
+    if (landed) {
+        for (std::size_t i = first_end + 1; i < count; ++i) {
+            if (words[i] == 0xBF9F0000u) {
+                ++code_end;
+            } else if (words[i] == 0) {
+                ++zero;
+            } else {
+                ++other;
+            }
+        }
+    }
+    AcquireSRWLockExclusive(&g_programs.lock);
+    const unsigned long long number = ++g_programs.programs;
+    g_programs.bytes += block_bytes;
+    if (landed) {
+        ++g_programs.landed;
+        g_programs.instructions += steps.size();
+        if (steps.size() > g_programs.longest) {
+            g_programs.longest = steps.size();
+        }
+        for (const whiwhi::shell::WalkStep& step : steps) {
+            ++g_programs.opcodes[(static_cast<unsigned>(step.format) << 16) | step.opcode];
+        }
+        g_programs.tail_code_end += code_end;
+        g_programs.tail_zero += zero;
+        g_programs.tail_other += other;
+    } else if (walk.reached_end) {
+        ++g_programs.ended_elsewhere;
+    } else if (walk.stopped_unknown) {
+        ++g_programs.stopped_on[walk.stopped_top_bits];
+    } else {
+        ++g_programs.stopped_short;
+    }
+    ReleaseSRWLockExclusive(&g_programs.lock);
+    if (!landed) {
+        // Where a walk that did not land stopped, for the first few: positions and format numbers, no content.
+        static std::atomic<int> shown{0};
+        if (shown.fetch_add(1) < 12) {
+            const whiwhi::shell::WalkStep* before = steps.empty() ? nullptr : &steps.back();
+            const whiwhi::shell::WalkStep* earlier = steps.size() >= 2 ? &steps[steps.size() - 2] : nullptr;
+            // How many words from the stop until a walk started there lands on the end (a way to see whether
+            // the unknown word is a single word or stands before more that are not instructions).
+            std::size_t resumes_after = 0;
+            for (std::size_t skip = 1; skip <= 64 && walk.stopped_word_index + skip <= first_end; ++skip) {
+                const whiwhi::shell::WalkResult rest = whiwhi::shell::walk_program(
+                    words + walk.stopped_word_index + skip, count - walk.stopped_word_index - skip);
+                if (rest.reached_end && rest.end_word_index + walk.stopped_word_index + skip == first_end) {
+                    resumes_after = skip;
+                    break;
+                }
+            }
+            logf("program walk did not land: block of %zu words, end-of-program word at word %zu; stopped at word "
+                 "%zu after %zu instruction(s) (%s); the instruction before: %s opcode %u, the one before that: %s "
+                 "opcode %u; top six bits of the word there 0x%02x; a walk started %zu word(s) later lands on the "
+                 "end (0 = none within 64)\n",
+                 count, first_end, walk.stopped_word_index, walk.instructions,
+                 walk.reached_end ? "reached another end" : walk.stopped_unknown ? "no known format" : "ran out",
+                 before ? whiwhi::shell::walk_format_name(before->format) : "-", before ? before->opcode : 0u,
+                 earlier ? whiwhi::shell::walk_format_name(earlier->format) : "-", earlier ? earlier->opcode : 0u,
+                 walk.stopped_top_bits, resumes_after);
+        }
+    }
+    if (number >= 64 && (number & (number - 1)) == 0) {
+        log_program_census("so far");
+    }
+}
+
+void census_programs_in(const void* description, std::size_t bytes) {
+    for (std::size_t at = 0; at + 16 <= bytes; at += 8) {
+        if (!can_read(static_cast<const std::uint8_t*>(description) + at, 16)) {
+            break;
+        }
+        std::uintptr_t pointer = 0;
+        unsigned long long size = 0;
+        std::memcpy(&pointer, static_cast<const std::uint8_t*>(description) + at, 8);
+        std::memcpy(&size, static_cast<const std::uint8_t*>(description) + at + 8, 8);
+        if (pointer > 0x10000 && pointer < 0x7FFFFFFF0000ull && (pointer & 3) == 0 && size >= 8 &&
+            size <= 0x1000000 && (size & 3) == 0 &&
+            can_read(reinterpret_cast<const void*>(pointer), static_cast<std::size_t>(size))) {
+            census_program(reinterpret_cast<const std::uint8_t*>(pointer), static_cast<std::size_t>(size));
+        }
+    }
+}
+
 void show_pipeline_request(int index, const char* where, const void* description, std::size_t bytes,
                            const void* caller) {
     const unsigned long long number = ++g_pipeline_requests[index];
     const int found = description ? show_containers_in(where, description, bytes) : 0;
     if (number <= 3 && description) {
         probe_blocks_in(where, description, bytes);
+    }
+    if ((index == 1 || index == 3) && description) {
+        census_programs_in(description, bytes);  // slots 57 and 67: the precompiled descriptions
     }
     if (number <= 2 || (number & (number - 1)) == 0) {
         unsigned long long words[8] = {};
@@ -3992,6 +4181,7 @@ unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
         }
     }
     ReleaseSRWLockShared(&g_containers.lock);
+    log_program_census("whole run");
     return written;
 }
 
