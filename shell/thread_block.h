@@ -13,6 +13,8 @@
 
 #ifdef WHIWHI_THREAD_BLOCK_BUILD
 #define WHIWHI_THREAD_BLOCK_API __declspec(dllexport)
+#elif defined(WHIWHI_THREAD_BLOCK_STATIC)
+#define WHIWHI_THREAD_BLOCK_API
 #else
 #define WHIWHI_THREAD_BLOCK_API __declspec(dllimport)
 #endif
