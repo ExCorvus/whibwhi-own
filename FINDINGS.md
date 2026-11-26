@@ -1272,3 +1272,17 @@ Follow-up, game tests 22:47 and 22:48 (both stop about 5 s in; the copy's folder
   `insertvalue`. Loads, stores and atomics take a 64-bit GPU address; the two "cache" inputs of every load and
   store are left undefined at every call, so no cache setting is passed. Where these functions' code lives on the
   console (the console's own graphics library) is not in any file of the installation that may be opened.
+## 2026-11-26 - the shell is called the weave (game test 23:50)
+
+ExCorvus's find (ATTRIBUTION.md item 14): by its code the shell is a shell, but it is not wrapped around the
+executable, it is woven all through it. The project now calls it a shell-based weave. The folder `shell/` is now
+`weave/` (build: `weave\build.cmd`), the code's namespace is `whiwhi::weave`, and the word is changed in the code,
+its comments and log texts, the scripts and the docs. Windows' own word PowerShell is unchanged. ExCorvus's own
+words keep the word she used, and so do the dated entries below this one: there, `shell/...` paths mean `weave/...`.
+
+Check (visible game test 23:50 on the renamed build, the copy's folder unchanged): the run stops at the same place
+as the run of 23:13 - the same throw inside the installation's XboxBvhBuilder.dll after device slot 62, through the
+same calls into it from the program, with the same counts in the summary. The log differs in one line only, a
+measurement that was switched on at 23:13 and not at 23:50, apart from the boot tool's own code offsets, which moved
+with its changed texts. The rename was one commit (735), by ExCorvus's exception to one file per commit and to the
+game-test gate; the docs followed one file per commit (736-753).
