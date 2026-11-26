@@ -54,6 +54,22 @@ int main() {
     void* tick = resolve_console_import(host, "KERNEL32.dll", named("GetTickCount"));
     CHECK(tick != nullptr && tick == in_library("kernel32.dll", "GetTickCount"));
 
+    // The export reader, on real libraries of this process: it finds what the Windows loader finds, and answers
+    // nothing for a name that is not there, for a missing base, and for memory that is not an image.
+    {
+        const HMODULE xmem = GetModuleHandleA("xmem.dll");
+        CHECK(find_image_export(xmem, "XMemAlloc") == in_library("xmem.dll", "XMemAlloc"));
+        CHECK(find_image_export(xmem, "whiwhi_xmem_virtual_free") == ours);
+        CHECK(find_image_export(xmem, "XMemAllo") == nullptr);
+        CHECK(find_image_export(xmem, "__XMemAllocationHooks__") == nullptr);
+        CHECK(find_image_export(nullptr, "XMemAlloc") == nullptr);
+        static const char not_an_image[0x400] = {};
+        CHECK(find_image_export(const_cast<char*>(not_an_image), "XMemAlloc") == nullptr);
+        // With no image hosted, connecting the allocation routines changes nothing.
+        connect_allocation_hooks();
+        disconnect_allocation_hooks();
+    }
+
     // The same name in a library that is not Windows' memory library is not touched.
     CHECK(resolve_console_import(host, "whiwhi-no-such-library.dll", named("VirtualFree")) == nullptr);
 
