@@ -4,7 +4,7 @@ Every statement below was read from the image's own code. RVAs are image-relativ
 name functions, never bytes. No game data is reproduced here.
 
 Tooling: the private map (`exe_map.py func`, `callers`, `jmpref`, `ptrref`, `dataref`) for the call sites and the
-thunk chains. Nothing here comes from a boot: the module has not been run in the shell.
+thunk chains. Nothing here comes from a boot: the module has not been run in the weave.
 
 ## 1. What chad is, as far as the image shows
 
@@ -108,7 +108,7 @@ The function returns `eax == 0` as a boolean. Fn 0x5b52510 stores that boolean a
 and returns 0. A failing channel is therefore a visible stop in audio bring-up, not a silent downgrade. Our
 skeleton produces exactly that, which is the honest outcome while the channel does not exist.
 
-**Proposed PC behaviour:** a PC has no co-processor, so the channel is the shell's own audio worker:
+**Proposed PC behaviour:** a PC has no co-processor, so the channel is the weave's own audio worker:
 
 - validate the arguments (ring non-null, ring size at least one page, stream limit in range, out pointer non-null);
 - create a channel object that owns its own lock, queue and worker thread, and remember the ring's address, size
@@ -153,7 +153,7 @@ id, which the next call compares against the value it submitted with (fn 0x4e5ac
 
 **Proposed PC behaviour:** the block is the unit of work. On success, the 4096 input bytes have been taken, the
 4096 output bytes have been written, and the out slot carries the id the game will wait for. A PC answer is a
-software stage behind the shell's audio worker, but a successful return has to mean the answer page is already
+software stage behind the weave's audio worker, but a successful return has to mean the answer page is already
 complete: fn 0x43b2a40 and fn 0x43b3980 copy out of it immediately after the call returns. Whatever holds the work
 (the worker or the call itself) must therefore finish before the call answers 0, or the design needs a different
 answer than "success".
@@ -181,16 +181,16 @@ handed the buffer would normally answer into it, which is why §4 records this a
 
 ## 6. Our skeleton (what exists today)
 
-`shell/chad.h`, `shell/chad.cpp`, `shell/tests/test_chad.cpp` build `chad.dll` with the five exports. Each export
+`weave/chad.h`, `weave/chad.cpp`, `weave/tests/test_chad.cpp` build `chad.dll` with the five exports. Each export
 logs its name and arguments **once** to stderr with the `[chad]` prefix and returns 0. Nothing allocates, nothing
 writes the caller's memory, and no result is faked: the failure is the truth while there is no channel.
 
-Verification: `shell\build.cmd` builds it and runs the `chad` test, which loads the built DLL, checks that all five
+Verification: `weave\build.cmd` builds it and runs the `chad` test, which loads the built DLL, checks that all five
 names resolve, and checks that each one answers 0 and that the out parameters stay untouched (twice, so the
 "once" logging is exercised too).
 
 The host-library resolver loads a library by the file name the image imports, so no table change is needed: the
-built `chad.dll` beside the shell is what the image will bind to.
+built `chad.dll` beside the weave is what the image will bind to.
 
 ## 7. What is left
 
