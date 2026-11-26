@@ -258,12 +258,13 @@ static void test_committed() {
     CHECK(record.attributes == 0x183);
     CHECK(stats().bytes_committed == before.bytes_committed + 0x400000);
 
-    // Write-combining is a caching hint: the memory is ordinary read-write memory.
+    // Write-combining says how the processor writes the memory: Windows is given it as the image asked; the graphics
+    // bits are not (desktop Windows refuses them).
     char* combined = static_cast<char*>(XMemVirtualAlloc(nullptr, 0x10000, MEM_64K_PAGES | MEM_COMMIT, 0x283, 0x42404));
     CHECK(combined != nullptr);
     combined[0xFFFF] = 1;
     MEMORY_BASIC_INFORMATION info{};
-    CHECK(VirtualQuery(combined, &info, sizeof(info)) && info.Protect == PAGE_READWRITE);
+    CHECK(VirtualQuery(combined, &info, sizeof(info)) && info.Protect == (PAGE_READWRITE | PAGE_WRITECOMBINE));
     // An image releases this one with its size instead of 0.
     CHECK(whiwhi_xmem_virtual_free(combined, 0x10000, MEM_RELEASE) == 1);
     CHECK(state_of(combined) == MEM_FREE);
