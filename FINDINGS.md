@@ -845,3 +845,23 @@ Direct3D 12: where the two are the same, the shell is the normal one; where they
 from the executable (how the game calls it, what it reads back, when it waits) and the shell is what the game
 expects there. A first case to read: before it asks for a pipeline, the game checks a pipeline store of its own
 (fn 0x2479f40 on the store at image+0x75ddb90, called from fn 0x2479760 before device slot 86).
+
+## 2026-11-26 - the game's pipelines handed to the normal call unchanged: all refused (measured, boots b170-b171)
+
+The comparison of the game's Direct3D 12 with the normal one (docs/exe-map/GRAPHICS-CALLS.md section 2.2c) shows
+device slots 86 and 67 with the same three arguments as the normal CreatePipelineState: a {size, stream}
+description, the pipeline identifier and the place for the result. So the shell now answers them as the normal
+call: the stream is passed to the PC device's CreatePipelineState unchanged, except that a root signature of the
+shell's own is replaced by the PC object behind it (`w_device_stream_pipeline` in shell/d3d12_xs.cpp).
+
+Boot b170 (40 s, game folder unchanged): every stream walks by the public subobject layout (688 bytes, types
+0 1 2 3 4 5 8 9 10 21 17 12 14 15 16: root signature, five shader stages, blend, sample mask, rasterizer, depth
+stencil 1, sample description, input layout, topology, render-target formats, depth-stencil format). The PC
+device refused all of them: 32,768 of 32,768 with 0x80004005 (E_FAIL), none made. The game takes the refusal
+and goes on; the run ends where b169 ends, at the audio device (AcpHalCreate) and the game's breakpoint at
+image+0x43ad94e. Boot b171 with vkd3d-proton's error log switched on (VKD3D_DEBUG=err, VKD3D_SHADER_DEBUG=err)
+printed no reason.
+
+So the normal call does not take the game's shaders as they are: the stream is the normal one, its shader stages
+are not. That is where the game's Direct3D 12 differs from the normal one for pipelines. What the console device
+does with these shader containers is to be read from the executable and the containers next.
