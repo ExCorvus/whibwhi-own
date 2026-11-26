@@ -64,8 +64,8 @@ target_link_libraries(xgameruntime PRIVATE onecore)
 add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp inflate.cpp
                                loader.cpp offline.cpp shader_access.cpp shader_container.cpp shader_dxbc.cpp
                                shader_emit_flow.cpp shader_flow.cpp shader_isa.cpp shader_meaning.cpp
-                               shader_names.cpp shader_pc.cpp shader_program.cpp shader_shape.cpp
-                               shader_translate.cpp shader_walk.cpp spirv.cpp)
+                               shader_names.cpp shader_pc.cpp shader_program.cpp shader_root.cpp
+                               shader_shape.cpp shader_translate.cpp shader_walk.cpp spirv.cpp)
 target_include_directories(whiwhi_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(whiwhi_shell PUBLIC whiwhi_seat)
 
@@ -179,6 +179,12 @@ add_test(NAME shader_emit_flow COMMAND test_shader_emit_flow)
 add_executable(test_shader_pc tests/test_shader_pc.cpp)
 target_link_libraries(test_shader_pc PRIVATE whiwhi_shell)
 add_test(NAME shader_pc COMMAND test_shader_pc)
+
+# The PC root signature built for a pipeline from the game's parameter order and the shaders' bindings, on
+# hand-made shapes and bindings; the description is read back by the system's own serializer (no GPU).
+add_executable(test_shader_root tests/test_shader_root.cpp)
+target_link_libraries(test_shader_root PRIVATE whiwhi_shell)
+add_test(NAME shader_root COMMAND test_shader_root)
 
 # What the memory, image, interpolation, export and whole-wave instructions touch, on hand-built words.
 add_executable(test_shader_access tests/test_shader_access.cpp)
