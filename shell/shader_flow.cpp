@@ -92,7 +92,7 @@ struct Control {
 
 // The six conditional branches and the unconditional branch of this generation, by the public numbers cited in
 // the header. Every other program-control word is either not control flow or refused here by name.
-Control classify_control(const Instruction& ins) {
+Control classify_control(const Instruction& ins, const FlowOptions& options) {
     Control out;
     if (ins.format == WalkFormat::kSopp) {
         switch (ins.opcode) {
@@ -143,6 +143,9 @@ Control classify_control(const Instruction& ins) {
                 "the instruction at pc 0x%x is s_setpc_b64, a branch to an address held in a register; this "
                 "analysis does not follow register targets", ins.pc);
         } else if (ins.opcode == 0x21) {  // s_swappc_b64
+            if (options.call_through_register_returns) {
+                return out;  // the caller's choice: an instruction that comes back, not a branch
+            }
             out.refused = true;
             out.why = format_text(
                 "the instruction at pc 0x%x is s_swappc_b64, a subroutine call to an address held in a register; "
@@ -288,6 +291,10 @@ bool dominates(const std::vector<std::int32_t>& idom, std::int32_t a, std::int32
 } // namespace
 
 FlowGraph flow_of(const DecodedShader& shader) {
+    return flow_of(shader, FlowOptions{});
+}
+
+FlowGraph flow_of(const DecodedShader& shader, const FlowOptions& options) {
     FlowGraph graph;
     if (!shader.ok) {
         graph.reason = "the shader body was not decoded, so its control flow is not analysed";
@@ -319,7 +326,7 @@ FlowGraph flow_of(const DecodedShader& shader) {
     // is refused before any block is built.
     std::vector<Control> control(instruction_count);
     for (std::size_t k = 0; k < instruction_count; ++k) {
-        control[k] = classify_control(ins[k]);
+        control[k] = classify_control(ins[k], options);
         if (control[k].refused) {
             graph.reason = control[k].why;
             return graph;
