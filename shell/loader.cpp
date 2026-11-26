@@ -324,6 +324,22 @@ static std::size_t nop_loader_stubs(const Image& image, std::uint8_t* base, std:
             }
         }
     }
+    // Inline int3 traps directly after an indirect call (ff /2): the console loader overwrites those too, and
+    // the code after the trap is the normal continuation (the call's result is consumed by the caller). NOP them
+    // as well, logged the same way.
+    for (const auto& e : execs) {
+        for (std::uint32_t rva = e.first + 3; rva + 1 < e.second && rva < size; ++rva) {
+            if (base[rva] == 0xCC && base[rva - 3] == 0xFF && (base[rva - 2] & 0x38) == 0x10 &&
+                (base[rva - 2] >> 6) != 3) {
+                base[rva] = 0x90;
+                if (patched < 64) {
+                    std::fprintf(stderr, "[loader] inline trap at image+0x%x after indirect call: int3 -> nop\n", rva);
+                    std::fflush(stderr);
+                }
+                ++patched;
+            }
+        }
+    }
     if (patched) {
         std::fprintf(stderr, "[loader] loader stubs patched in memory: %zu\n", patched);
         std::fflush(stderr);
