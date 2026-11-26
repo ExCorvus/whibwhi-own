@@ -164,6 +164,12 @@ struct Wrap {
     // Whether the last primitive topology the image set on the list is one the PC library has. Draws are held
     // while it is not: the PC library would draw them as something else.
     std::atomic<bool> topology_known{true};
+    // For a command list: the root signatures set on it since it started (objects of this library).
+    std::atomic<const Wrap*> compute_signature{nullptr};
+    std::atomic<const Wrap*> graphics_signature{nullptr};
+    // For a buffer whose PC address the image asked for: where that range of PC addresses starts (0 = it
+    // did not ask).
+    unsigned long long pc_range_start = 0;
 
     Wrap(void* pc_object, int kind_number, const char* kind_name)
         : vt(nullptr), image_area{}, pc(pc_object), refs(1), kind_id(kind_number), kind(kind_name) {}
@@ -326,6 +332,8 @@ ULONG __stdcall w_addref(Wrap* self) {
 void forget_descriptor_heap(Wrap* heap);
 void give_back_requested_block(Wrap* surface);
 void forget_console_signature(const Wrap* signature);
+void forget_resource_addresses(Wrap* resource);
+void forget_root_layout(const Wrap* signature);
 
 ULONG __stdcall w_release(Wrap* self) {
     const long r = self->refs.fetch_sub(1) - 1;
@@ -333,6 +341,12 @@ ULONG __stdcall w_release(Wrap* self) {
         unregister_wrap(self);
         if (self->kind_id == kHeap) {
             forget_descriptor_heap(self);
+        }
+        if (self->kind_id == kResource) {
+            forget_resource_addresses(self);
+        }
+        if (self->kind_id == kRootSignature) {
+            forget_root_layout(self);
         }
         if (self->requested_block) {
             give_back_requested_block(self);
@@ -734,8 +748,10 @@ void __stdcall w_device_copy_descriptors(Wrap* self, unsigned int dest_count, co
 // the public methods four lower. It is still an identification by shape, so every method here checks what it is
 // given, passes on only what has that shape, and shows its first calls; anything else is said and not passed on.
 //
-// Slots 41 to 48 (root buffer addresses, index and vertex buffers) take addresses in the image's own memory and
-// are not answered until those addresses can be turned into addresses of PC buffers.
+// Slots 41 to 48 (root buffer addresses, index and vertex buffers) take addresses in the image's own memory;
+// each is turned into the address of a PC buffer over the same memory (see "the image's memory as PC
+// buffers") or the call is not passed on. A root argument is passed on only when the list's current root
+// signature has that parameter and it is of the kind the call sets (see "root signatures").
 
 int kind_of(void* object) {
     return is_wrap(object) ? static_cast<Wrap*>(object)->kind_id : 0;
@@ -791,6 +807,115 @@ void __stdcall w_list_set_heaps(Wrap* self, unsigned int count, void* const* hea
     static_cast<ID3D12GraphicsCommandList*>(self->pc)->SetDescriptorHeaps(count, pc);
 }
 
+// ---- root signatures: what each parameter is ------------------------------------------------------------------
+//
+// The PC library looks a root parameter up by its number without checking that the root signature has that
+// parameter, or that it is of the kind the call sets. So the shell reads every root signature the image creates
+// (the serialized form the image hands to device slot 16, read with the PC's own deserializer) and passes a root
+// argument on only when the list's current root signature has that parameter and it is of that kind. It is also
+// the check on which list slot is which method: a call that sets a kind the parameter is not, is said.
+struct RootLayout {
+    std::vector<unsigned char> type;  // D3D12_ROOT_PARAMETER_TYPE of each parameter
+    std::vector<unsigned> constants;  // for a parameter that is a run of constants: how many 32-bit values
+};
+SRWLOCK g_root_layouts_lock = SRWLOCK_INIT;
+std::map<const Wrap*, RootLayout> g_root_layouts;
+
+const char* root_parameter_text(unsigned type) {
+    switch (type) {
+    case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
+        return "a descriptor table";
+    case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
+        return "a run of constants";
+    case D3D12_ROOT_PARAMETER_TYPE_CBV:
+        return "a constant buffer address";
+    case D3D12_ROOT_PARAMETER_TYPE_SRV:
+        return "a shader resource address";
+    case D3D12_ROOT_PARAMETER_TYPE_UAV:
+        return "an unordered access address";
+    default:
+        return "of a kind the shell does not know";
+    }
+}
+
+bool read_root_layout(const void* blob, std::size_t bytes, RootLayout& layout) {
+    using Create = HRESULT(__stdcall*)(const void*, SIZE_T, const GUID*, void**);
+    static const Create create = reinterpret_cast<Create>(
+        GetProcAddress(LoadLibraryA("d3d12.dll"), "D3D12CreateVersionedRootSignatureDeserializer"));
+    if (!create || bytes == 0 || !can_read(blob, bytes)) {
+        return false;
+    }
+    ID3D12VersionedRootSignatureDeserializer* reader = nullptr;
+    if (create(blob, bytes, &__uuidof(ID3D12VersionedRootSignatureDeserializer),
+               reinterpret_cast<void**>(&reader)) != 0 ||
+        !reader) {
+        return false;
+    }
+    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* desc = nullptr;
+    const bool ok = reader->GetRootSignatureDescAtVersion(D3D_ROOT_SIGNATURE_VERSION_1_1, &desc) == 0 && desc &&
+                    (desc->Desc_1_1.NumParameters == 0 || desc->Desc_1_1.pParameters);
+    if (ok) {
+        for (unsigned i = 0; i < desc->Desc_1_1.NumParameters; ++i) {
+            const D3D12_ROOT_PARAMETER1& parameter = desc->Desc_1_1.pParameters[i];
+            layout.type.push_back(static_cast<unsigned char>(parameter.ParameterType));
+            layout.constants.push_back(parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS
+                                           ? parameter.Constants.Num32BitValues
+                                           : 0);
+        }
+    }
+    reader->Release();
+    return ok;
+}
+
+void note_root_layout(const Wrap* signature, const void* blob, std::size_t bytes) {
+    static std::atomic<int> shown{0};
+    RootLayout layout;
+    if (!read_root_layout(blob, bytes, layout)) {
+        logf("root signature %p: its parameters could not be read from the %zu bytes it was made of; root "
+             "arguments set while it is current are not passed on\n",
+             static_cast<const void*>(signature), bytes);
+        return;
+    }
+    if (few(shown, 8)) {
+        std::string text;
+        for (std::size_t i = 0; i < layout.type.size(); ++i) {
+            char one[48];
+            switch (layout.type[i]) {
+            case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
+                std::snprintf(one, sizeof(one), " table");
+                break;
+            case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
+                std::snprintf(one, sizeof(one), " constants(%u)", layout.constants[i]);
+                break;
+            case D3D12_ROOT_PARAMETER_TYPE_CBV:
+                std::snprintf(one, sizeof(one), " constant-buffer-address");
+                break;
+            case D3D12_ROOT_PARAMETER_TYPE_SRV:
+                std::snprintf(one, sizeof(one), " shader-resource-address");
+                break;
+            case D3D12_ROOT_PARAMETER_TYPE_UAV:
+                std::snprintf(one, sizeof(one), " unordered-access-address");
+                break;
+            default:
+                std::snprintf(one, sizeof(one), " kind-%u", static_cast<unsigned>(layout.type[i]));
+                break;
+            }
+            text += one;
+        }
+        logf("root signature %p: %zu parameter(s):%s\n", static_cast<const void*>(signature), layout.type.size(),
+             text.c_str());
+    }
+    AcquireSRWLockExclusive(&g_root_layouts_lock);
+    g_root_layouts[signature] = std::move(layout);
+    ReleaseSRWLockExclusive(&g_root_layouts_lock);
+}
+
+void forget_root_layout(const Wrap* signature) {
+    AcquireSRWLockExclusive(&g_root_layouts_lock);
+    g_root_layouts.erase(signature);
+    ReleaseSRWLockExclusive(&g_root_layouts_lock);
+}
+
 // Console list slots 33 and 34: Set{Compute,Graphics}RootSignature(root signature).
 template <int Graphics>
 void __stdcall w_list_root_signature(Wrap* self, void* signature) {
@@ -807,9 +932,11 @@ void __stdcall w_list_root_signature(Wrap* self, void* signature) {
     if (Graphics) {
         list->SetGraphicsRootSignature(pc);
         self->graphics_root.store(true);
+        self->graphics_signature.store(static_cast<const Wrap*>(signature));
     } else {
         list->SetComputeRootSignature(pc);
         self->compute_root.store(true);
+        self->compute_signature.store(static_cast<const Wrap*>(signature));
     }
     if (few(shown)) {
         logf("command list slot %d: %s root signature set on the PC list\n", 33 + Graphics,
@@ -829,15 +956,63 @@ bool root_ready(Wrap* self, int graphics, int slot, std::atomic<int>& refused) {
     return false;
 }
 
+// Whether parameter `index` of the list's current root signature is of kind `type`. For a run of constants,
+// `values` gets how many values the parameter has. Says so (a few times) when it is not.
+bool root_parameter_is(Wrap* self, int graphics, unsigned int index, unsigned type, int slot,
+                       std::atomic<int>& refused, unsigned* values = nullptr) {
+    if (!root_ready(self, graphics, slot, refused)) {
+        return false;
+    }
+    const Wrap* signature = graphics ? self->graphics_signature.load() : self->compute_signature.load();
+    bool known = false;
+    std::size_t count = 0;
+    unsigned has = 0xFF;
+    unsigned constants = 0;
+    AcquireSRWLockShared(&g_root_layouts_lock);
+    const auto found = g_root_layouts.find(signature);
+    if (found != g_root_layouts.end()) {
+        known = true;
+        count = found->second.type.size();
+        if (index < count) {
+            has = found->second.type[index];
+            constants = found->second.constants[index];
+        }
+    }
+    ReleaseSRWLockShared(&g_root_layouts_lock);
+    if (known && index < count && has == type) {
+        if (values) {
+            *values = constants;
+        }
+        return true;
+    }
+    if (few(refused, 8)) {
+        if (!known) {
+            logf("command list slot %d: the parameters of the current %s root signature are not known to the shell - "
+                 "parameter %u not passed on\n",
+                 slot, graphics ? "graphics" : "compute", index);
+        } else if (index >= count) {
+            logf("command list slot %d: parameter %u, but the current %s root signature has %zu parameter(s) - not "
+                 "passed on\n",
+                 slot, index, graphics ? "graphics" : "compute", count);
+        } else {
+            logf("command list slot %d: this call sets %s, but parameter %u of the current %s root signature is %s "
+                 "- not passed on\n",
+                 slot, root_parameter_text(type), index, graphics ? "graphics" : "compute", root_parameter_text(has));
+        }
+    }
+    return false;
+}
+
 // Console list slots 35 and 36: Set{Compute,Graphics}RootDescriptorTable(parameter, handle).
 template <int Graphics>
 void __stdcall w_list_root_table(Wrap* self, unsigned int index, unsigned long long handle) {
     static std::atomic<int> shown{0}, refused{0};
-    if (!root_ready(self, Graphics, 35 + Graphics, refused)) {
+    if (!root_parameter_is(self, Graphics, index, D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, 35 + Graphics,
+                           refused)) {
         return;
     }
     unsigned long long pc = 0;
-    if (index >= 64 || !gpu_handle_in_heap(handle, pc)) {
+    if (!gpu_handle_in_heap(handle, pc)) {
         if (few(refused)) {
             logf("command list slot %d: (parameter %u, handle 0x%llx) does not name a position in a descriptor heap "
                  "shaders can see - not passed on\n",
@@ -863,14 +1038,16 @@ void __stdcall w_list_root_table(Wrap* self, unsigned int index, unsigned long l
 template <int Graphics>
 void __stdcall w_list_root_constant(Wrap* self, unsigned int index, unsigned int value, unsigned int position) {
     static std::atomic<int> shown{0}, refused{0};
-    if (!root_ready(self, Graphics, 37 + Graphics, refused)) {
+    unsigned values = 0;
+    if (!root_parameter_is(self, Graphics, index, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS, 37 + Graphics, refused,
+                           &values)) {
         return;
     }
-    if (index >= 64 || position >= 64) {
+    if (position >= values) {
         if (few(refused)) {
-            logf("command list slot %d: (parameter %u, value 0x%x, position %u) is not a root constant - not passed "
-                 "on\n",
-                 37 + Graphics, index, value, position);
+            logf("command list slot %d: (parameter %u, value 0x%x, position %u) is past the %u constants the "
+                 "parameter has - not passed on\n",
+                 37 + Graphics, index, value, position, values);
         }
         return;
     }
@@ -891,14 +1068,16 @@ template <int Graphics>
 void __stdcall w_list_root_constants(Wrap* self, unsigned int index, unsigned int count, const void* values,
                                      unsigned int position) {
     static std::atomic<int> shown{0}, refused{0};
-    if (!root_ready(self, Graphics, 39 + Graphics, refused)) {
+    unsigned has = 0;
+    if (!root_parameter_is(self, Graphics, index, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS, 39 + Graphics, refused,
+                           &has)) {
         return;
     }
-    if (index >= 64 || count == 0 || count > 64 || position >= 64 || !can_read(values, count * 4u)) {
+    if (count == 0 || position >= has || count > has - position || !can_read(values, count * 4u)) {
         if (few(refused)) {
-            logf("command list slot %d: (parameter %u, count %u, values %p, position %u) is not a run of root "
-                 "constants - not passed on\n",
-                 39 + Graphics, index, count, values, position);
+            logf("command list slot %d: (parameter %u, count %u, values %p, position %u) does not fit the %u "
+                 "constants the parameter has - not passed on\n",
+                 39 + Graphics, index, count, values, position, has);
         }
         return;
     }
@@ -912,6 +1091,145 @@ void __stdcall w_list_root_constants(Wrap* self, unsigned int index, unsigned in
         logf("command list slot %d: %u %s root constants set (parameter %u, position %u)\n", 39 + Graphics, count,
              Graphics ? "graphics" : "compute", index, position);
     }
+}
+
+// An address of the image's own memory as the address of a PC buffer that lies over the same memory (see "the
+// image's memory as PC buffers" below). `outcome` says where the address was found, or why it was not.
+bool pc_buffer_address(unsigned long long address, unsigned long long bytes, unsigned long long& pc, int& outcome);
+const char* address_outcome_text(int outcome);
+
+// Console list slots 41 to 46: Set{Compute,Graphics}Root{ConstantBuffer,ShaderResource,UnorderedAccess}View
+// (parameter, address). Kind 0 = constant buffer, 1 = shader resource, 2 = unordered access. The address is an
+// address of the image's own memory (or of a PC buffer the image asked the address of).
+template <int Kind, int Graphics>
+void __stdcall w_list_root_address(Wrap* self, unsigned int index, unsigned long long address) {
+    static std::atomic<int> shown{0}, refused{0};
+    const int slot = 41 + Kind * 2 + Graphics;
+    if (!root_parameter_is(self, Graphics, index, D3D12_ROOT_PARAMETER_TYPE_CBV + Kind, slot, refused)) {
+        return;
+    }
+    unsigned long long pc = 0;
+    int outcome = 0;
+    if (address != 0 && !pc_buffer_address(address, 0, pc, outcome)) {
+        if (few(refused, 8)) {
+            logf("command list slot %d: (parameter %u, address 0x%llx): %s - not passed on\n", slot, index, address,
+                 address_outcome_text(outcome));
+        }
+        return;
+    }
+    auto* list = static_cast<ID3D12GraphicsCommandList*>(self->pc);
+    switch (Kind * 2 + Graphics) {
+    case 0:
+        list->SetComputeRootConstantBufferView(index, pc);
+        break;
+    case 1:
+        list->SetGraphicsRootConstantBufferView(index, pc);
+        break;
+    case 2:
+        list->SetComputeRootShaderResourceView(index, pc);
+        break;
+    case 3:
+        list->SetGraphicsRootShaderResourceView(index, pc);
+        break;
+    case 4:
+        list->SetComputeRootUnorderedAccessView(index, pc);
+        break;
+    default:
+        list->SetGraphicsRootUnorderedAccessView(index, pc);
+        break;
+    }
+    if (few(shown, 6)) {
+        logf("command list slot %d: %s root %s address set (parameter %u, address 0x%llx as the image has it: %s)\n",
+             slot, Graphics ? "graphics" : "compute",
+             Kind == 0 ? "constant buffer" : Kind == 1 ? "shader resource" : "unordered access", index, address,
+             address ? address_outcome_text(outcome) : "none");
+    }
+}
+
+// Console list slot 47: IASetIndexBuffer(view), the view being the public 16 bytes {address, size, format}, or
+// null for no index buffer.
+void __stdcall w_list_index_buffer(Wrap* self, const D3D12_INDEX_BUFFER_VIEW* view) {
+    static std::atomic<int> shown{0}, refused{0};
+    auto* list = static_cast<ID3D12GraphicsCommandList*>(self->pc);
+    if (!view) {
+        list->IASetIndexBuffer(nullptr);
+        return;
+    }
+    D3D12_INDEX_BUFFER_VIEW pc_view{};
+    unsigned long long pc = 0;
+    int outcome = 0;
+    const bool readable = can_read(view, sizeof(*view));
+    if (readable) {
+        pc_view = *view;
+    }
+    const bool shape = readable && (pc_view.Format == DXGI_FORMAT_R16_UINT || pc_view.Format == DXGI_FORMAT_R32_UINT) &&
+                       pc_view.BufferLocation != 0 && pc_view.SizeInBytes != 0;
+    if (!shape || !pc_buffer_address(pc_view.BufferLocation, pc_view.SizeInBytes, pc, outcome)) {
+        if (few(refused, 8)) {
+            if (!readable) {
+                logf("command list slot 47: %p is not a readable index buffer view - not passed on\n",
+                     static_cast<const void*>(view));
+            } else {
+                logf("command list slot 47: (address 0x%llx, %u bytes, format %d): %s - not passed on\n",
+                     pc_view.BufferLocation, pc_view.SizeInBytes, static_cast<int>(pc_view.Format),
+                     shape ? address_outcome_text(outcome) : "not the shape of an index buffer view");
+            }
+        }
+        return;
+    }
+    if (few(shown, 6)) {
+        logf("command list slot 47: index buffer set (address 0x%llx as the image has it, %u bytes, %s indices: "
+             "%s)\n",
+             pc_view.BufferLocation, pc_view.SizeInBytes, pc_view.Format == DXGI_FORMAT_R16_UINT ? "16-bit" : "32-bit",
+             address_outcome_text(outcome));
+    }
+    pc_view.BufferLocation = pc;
+    list->IASetIndexBuffer(&pc_view);
+}
+
+// Console list slot 48: IASetVertexBuffers(first, count, views), each view the public 16 bytes {address, size,
+// stride}. A view with no address stays a view with no buffer. If one view of the call cannot be answered, the
+// whole call is not passed on.
+void __stdcall w_list_vertex_buffers(Wrap* self, unsigned int first, unsigned int count,
+                                     const D3D12_VERTEX_BUFFER_VIEW* views) {
+    static std::atomic<int> shown{0}, refused{0};
+    constexpr unsigned kSlots = 32;  // D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT
+    D3D12_VERTEX_BUFFER_VIEW pc_views[kSlots] = {};
+    if (first >= kSlots || count == 0 || count > kSlots - first || !can_read(views, count * sizeof(*views))) {
+        if (few(refused, 8)) {
+            logf("command list slot 48: (first %u, count %u, views %p) is not a run of vertex buffer views - not "
+                 "passed on\n",
+                 first, count, static_cast<const void*>(views));
+        }
+        return;
+    }
+    int outcome = 0;
+    for (unsigned int i = 0; i < count; ++i) {
+        pc_views[i] = views[i];
+        if (views[i].BufferLocation == 0) {
+            pc_views[i].SizeInBytes = 0;
+            continue;
+        }
+        unsigned long long pc = 0;
+        const bool shape = views[i].SizeInBytes != 0 && views[i].StrideInBytes <= 4096;
+        if (!shape || !pc_buffer_address(views[i].BufferLocation, views[i].SizeInBytes, pc, outcome)) {
+            if (few(refused, 8)) {
+                logf("command list slot 48: view %u of %u (address 0x%llx, %u bytes, stride %u): %s - the call is not "
+                     "passed on\n",
+                     i, count, views[i].BufferLocation, views[i].SizeInBytes, views[i].StrideInBytes,
+                     shape ? address_outcome_text(outcome) : "not the shape of a vertex buffer view");
+            }
+            return;
+        }
+        pc_views[i].BufferLocation = pc;
+    }
+    if (few(shown, 6)) {
+        logf("command list slot 48: %u vertex buffer(s) set from slot %u (the first: address 0x%llx as the image has "
+             "it, %u bytes, stride %u: %s)\n",
+             count, first, views[0].BufferLocation, views[0].SizeInBytes, views[0].StrideInBytes,
+             views[0].BufferLocation ? address_outcome_text(outcome) : "none");
+    }
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)->IASetVertexBuffers(first, count, pc_views);
 }
 
 // A render-target or depth handle as the image has it -> the PC handle, if a view was made there.
@@ -1308,6 +1626,8 @@ HRESULT __stdcall w_list_begin(Wrap* self, void* allocator, void* third, void* f
         self->recording.store(true);
         self->compute_root.store(false);
         self->graphics_root.store(false);
+        self->compute_signature.store(nullptr);
+        self->graphics_signature.store(nullptr);
         self->pipeline_set.store(false);
     }
     const int n = shown.fetch_add(1);
@@ -1542,6 +1862,14 @@ Wrap* wrap_kind(void* pc, int kind) {
                  {38, reinterpret_cast<void*>(&w_list_root_constant<1>)},
                  {39, reinterpret_cast<void*>(&w_list_root_constants<0>)},
                  {40, reinterpret_cast<void*>(&w_list_root_constants<1>)},
+                 {41, reinterpret_cast<void*>(&w_list_root_address<0, 0>)},
+                 {42, reinterpret_cast<void*>(&w_list_root_address<0, 1>)},
+                 {43, reinterpret_cast<void*>(&w_list_root_address<1, 0>)},
+                 {44, reinterpret_cast<void*>(&w_list_root_address<1, 1>)},
+                 {45, reinterpret_cast<void*>(&w_list_root_address<2, 0>)},
+                 {46, reinterpret_cast<void*>(&w_list_root_address<2, 1>)},
+                 {47, reinterpret_cast<void*>(&w_list_index_buffer)},
+                 {48, reinterpret_cast<void*>(&w_list_vertex_buffers)},
                  {50, reinterpret_cast<void*>(&w_list_set_render_targets)},
                  {51, reinterpret_cast<void*>(&w_list_clear_depth)},
                  {52, reinterpret_cast<void*>(&w_list_clear_target)},
@@ -1637,6 +1965,19 @@ HRESULT __stdcall create_thunk(Wrap* self, void* a1, void* a2, void* a3, void* a
     } else if (hr != 0) {
         logf("device slot %d: the PC device could not create the %s (0x%lx)\n", Slot, kind_name(Kind),
              static_cast<unsigned long>(hr));
+    }
+    return hr;
+}
+
+// Device slot 16, CreateRootSignature(node mask, serialized root signature, its length, identifier, place):
+// made on the PC device like the other objects; what each of its parameters is, is read from the serialized
+// form and kept (see "root signatures: what each parameter is").
+HRESULT __stdcall w_device_slot16(Wrap* self, void* a1, void* a2, void* a3, void* a4, void* a5, void* a6, void* a7,
+                                  void* a8) {
+    const HRESULT hr = create_thunk<16, 4, 5, kRootSignature>(self, a1, a2, a3, a4, a5, a6, a7, a8);
+    void** const out = static_cast<void**>(a5);
+    if (hr == 0 && out && is_wrap(*out)) {
+        note_root_layout(static_cast<const Wrap*>(*out), a2, reinterpret_cast<std::uintptr_t>(a3));
     }
     return hr;
 }
@@ -2962,6 +3303,7 @@ ID3D12Heap* span_heap(Wrap* device, unsigned long long address, unsigned long lo
 
 Wrap* wrap_kind(void* pc, int kind);
 unsigned public_resource_flags(unsigned flags, const char* where);
+void note_placed_buffer(Wrap* buffer);
 
 // The image writes console tiling numbers (0x100 and up; 0x105 for a volume) where the public description has
 // its texture layout. A PC device chooses the layout of its own textures, so such a number is replaced by the
@@ -3115,6 +3457,7 @@ HRESULT __stdcall w_device_slot133(Wrap* self, void* address_arg, const D3D12_RE
     wrapped->title_bytes = desc->Width;
     wrapped->over_image_memory = true;
     wrapped->placed_delta = delta;
+    note_placed_buffer(wrapped);
     *out = wrapped;
     if (show) {
         logf("device slot 133: a PC buffer of %llu bytes now lies over the image's memory at 0x%llx (no copy; it "
@@ -3474,11 +3817,15 @@ void* __stdcall w_resource_desc(void* first, void* second) {
 
 // Resource slot 11 (GetGPUVirtualAddress): on the console a resource placed at an address of the image's memory
 // has that address as its GPU address, so that is what the image is told. Other resources answer the PC address.
+void note_pc_range(Wrap* resource, unsigned long long start);
+
 unsigned long long __stdcall w_resource_gpu_address(Wrap* self) {
     if (self->title_address) {
         return self->title_address;
     }
-    return static_cast<ID3D12Resource*>(self->pc)->GetGPUVirtualAddress();
+    const unsigned long long pc = static_cast<ID3D12Resource*>(self->pc)->GetGPUVirtualAddress();
+    note_pc_range(self, pc);  // so the address is recognised when the image hands it back
+    return pc;
 }
 
 // ---- queue slot 31 (CopyPageMappingsBatchX): which pool page each page of the GPU-only view shows ------------
@@ -3609,6 +3956,582 @@ HRESULT __stdcall w_queue_slot31(Wrap*, void* batch_count, void* batches, void* 
              g_pool_heap ? "" : " (the pool is NOT open on the PC device, so the record has nothing behind it)");
     }
     return hr;
+}
+
+// ---- the image's memory as PC buffers ------------------------------------------------------------------------
+//
+// Where a PC program gives the address of a GPU buffer (a root buffer address, an index buffer, a vertex
+// buffer), the image gives an address of its own memory: on the console the graphics processor reads the
+// program's memory by the program's addresses. A PC graphics device has addresses of its own, so the address is
+// turned into the address of a PC buffer that lies over the same memory (a host-memory import; nothing is
+// copied). In the order they are tried:
+//
+//   1. a PC buffer the image asked the address of (resource slot 11 answered a PC address): passed as it is;
+//   2. a buffer the image placed over its own memory (device slot 133): the PC buffer behind it;
+//   3. an address in the GPU-only view: through the page-mapping record (queue slot 31) to the pool page it
+//      shows, when the pages of the range are neighbours in the pool;
+//   4. the pool's own memory, and other committed read-write memory that belongs to the process alone: a
+//      "window" - that stretch of memory opened on the PC device, with one PC buffer over all of it. Windows lie
+//      on a 64 MiB grid, are opened when first needed and kept; a range that crosses a grid line gets a window of
+//      its own.
+//
+// Not answered, each with its own count in the report at the end of a run: memory that is not committed; mapped
+// memory outside the pool (the image remaps such pages, and a PC buffer over them would go on showing the old
+// page); memory of a loaded module; memory that is not plain read-write; a range of the GPU-only view whose pages
+// are not shown, or not neighbours in the pool; ranges over 1 GiB; and anything past the limits below.
+//
+// A window is only used after the PC device was seen to read the bytes that are in the memory: the PC library
+// quietly falls back to memory of its own when an import fails, and the shell would then hand out the address of
+// a buffer that does not hold the image's data. The check copies 64 bytes through the PC device and compares.
+//
+// What is not covered: memory that goes away without the memory library hearing of it (see
+// whiwhi_xmem_set_change_routine) keeps its window; a later use reads whatever the PC device still holds there.
+enum AddressOutcome : int {
+    kAddressNone = 0,
+    kAddressPcBuffer,
+    kAddressPlacedBuffer,
+    kAddressViewPage,
+    kAddressPoolWindow,
+    kAddressWindow,
+    kAddressFirstRefusal,
+    kAddressNotCommitted = kAddressFirstRefusal,
+    kAddressRemappable,
+    kAddressModule,
+    kAddressProtection,
+    kAddressViewSplit,
+    kAddressTooLarge,
+    kAddressLimit,
+    kAddressDeviceRefused,
+    kAddressNotSameBytes,
+    kAddressNoDevice,
+    kAddressOutcomes
+};
+
+std::atomic<unsigned long long> g_address_outcomes[kAddressOutcomes];
+
+const char* address_outcome_text(int outcome) {
+    switch (outcome) {
+    case kAddressPcBuffer:
+        return "a PC buffer the image asked the address of";
+    case kAddressPlacedBuffer:
+        return "a buffer the image placed over its own memory";
+    case kAddressViewPage:
+        return "the GPU-only view, through the page record to the pool";
+    case kAddressPoolWindow:
+        return "the pool's memory, open on the PC device";
+    case kAddressWindow:
+        return "the image's own memory, open on the PC device";
+    case kAddressNotCommitted:
+        return "not committed memory (in the GPU-only view: no page is shown there)";
+    case kAddressRemappable:
+        return "mapped memory outside the pool, which the image can remap under a PC buffer";
+    case kAddressModule:
+        return "memory of a loaded module";
+    case kAddressProtection:
+        return "memory that is not plain read-write";
+    case kAddressViewSplit:
+        return "a range of the GPU-only view whose pages are not neighbours in the pool";
+    case kAddressTooLarge:
+        return "a range larger than the shell opens";
+    case kAddressLimit:
+        return "past the amount of memory the shell opens on the PC device";
+    case kAddressDeviceRefused:
+        return "the PC device did not open that memory";
+    case kAddressNotSameBytes:
+        return "the PC device did not read the bytes that are in that memory";
+    case kAddressNoDevice:
+        return "there is no device yet";
+    default:
+        return "not looked up";
+    }
+}
+
+// 1. PC buffers the image asked the address of: [start, end) of PC addresses.
+SRWLOCK g_pc_ranges_lock = SRWLOCK_INIT;
+std::map<unsigned long long, unsigned long long> g_pc_ranges;
+
+// 2. Buffers the image placed over its own memory, by the image's address.
+SRWLOCK g_placed_lock = SRWLOCK_INIT;
+std::map<unsigned long long, Wrap*> g_placed_buffers;
+
+void note_placed_buffer(Wrap* buffer) {
+    AcquireSRWLockExclusive(&g_placed_lock);
+    g_placed_buffers[buffer->title_address] = buffer;
+    ReleaseSRWLockExclusive(&g_placed_lock);
+}
+
+void note_pc_range(Wrap* resource, unsigned long long start) {
+    if (!start || resource->pc_range_start) {
+        return;
+    }
+    const D3D12_RESOURCE_DESC desc = static_cast<ID3D12Resource*>(resource->pc)->GetDesc();
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || desc.Width == 0) {
+        return;
+    }
+    AcquireSRWLockExclusive(&g_pc_ranges_lock);
+    if (!resource->pc_range_start) {
+        resource->pc_range_start = start;
+        g_pc_ranges[start] = start + desc.Width;
+    }
+    ReleaseSRWLockExclusive(&g_pc_ranges_lock);
+}
+
+void forget_resource_addresses(Wrap* resource) {
+    if (resource->pc_range_start) {
+        AcquireSRWLockExclusive(&g_pc_ranges_lock);
+        g_pc_ranges.erase(resource->pc_range_start);
+        ReleaseSRWLockExclusive(&g_pc_ranges_lock);
+    }
+    if (resource->over_image_memory) {
+        AcquireSRWLockExclusive(&g_placed_lock);
+        const auto found = g_placed_buffers.find(resource->title_address);
+        if (found != g_placed_buffers.end() && found->second == resource) {
+            g_placed_buffers.erase(found);
+        }
+        ReleaseSRWLockExclusive(&g_placed_lock);
+    }
+}
+
+// 4. Windows.
+constexpr unsigned long long kWindowGrid = 64ull << 20;
+constexpr unsigned long long kWindowLargest = 1ull << 30;
+constexpr unsigned long long kWindowsMost = 512;
+constexpr unsigned long long kWindowBytesMost = 16ull << 30;
+
+struct Window {
+    unsigned long long base = 0;
+    unsigned long long bytes = 0;
+    ID3D12Heap* heap = nullptr;
+    ID3D12Resource* buffer = nullptr;
+    unsigned long long pc = 0;  // the PC address of the buffer's first byte
+    bool in_pool = false;
+};
+SRWLOCK g_windows_lock = SRWLOCK_INIT;
+std::map<unsigned long long, Window> g_windows;  // by base
+std::vector<Window> g_windows_retired;           // their memory changed; kept, since recorded lists may name them
+std::atomic<unsigned long long> g_window_count{0};
+unsigned long long g_window_bytes = 0;  // under the lock
+std::atomic<unsigned long long> g_windows_checked{0};
+std::atomic<bool> g_change_routine_set{false};
+
+// A window that holds [address, address + bytes), if there is one. Called with the lock held.
+const Window* window_holding(unsigned long long address, unsigned long long bytes) {
+    auto it = g_windows.upper_bound(address);
+    for (int looked = 0; it != g_windows.begin() && looked < 8; ++looked) {
+        --it;
+        if (address >= it->second.base && address + bytes <= it->second.base + it->second.bytes) {
+            return &it->second;
+        }
+    }
+    return nullptr;
+}
+
+// The memory library says memory is about to stop being what it was (called with that library's lock held; it
+// must not be called back from here): windows over it are set aside, so a later use opens the memory anew.
+void image_memory_changes(void* base, unsigned long long bytes) {
+    if (g_window_count.load() == 0) {
+        return;
+    }
+    const unsigned long long start = reinterpret_cast<std::uintptr_t>(base);
+    const unsigned long long end = start + bytes;
+    AcquireSRWLockExclusive(&g_windows_lock);
+    for (auto it = g_windows.begin(); it != g_windows.end();) {
+        if (it->second.base < end && start < it->second.base + it->second.bytes) {
+            g_window_bytes -= it->second.bytes;
+            g_windows_retired.push_back(it->second);
+            it = g_windows.erase(it);
+            g_window_count.fetch_sub(1);
+        } else {
+            ++it;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_windows_lock);
+}
+
+bool plain_private_memory(const MEMORY_BASIC_INFORMATION& info) {
+    return info.State == MEM_COMMIT && info.Type == MEM_PRIVATE && (info.Protect & 0xFF) == PAGE_READWRITE &&
+           !(info.Protect & PAGE_GUARD);
+}
+
+// How far plain private memory runs from `from` (inside such memory) towards `limit`, and back towards `floor`.
+unsigned long long plain_memory_until(unsigned long long from, unsigned long long limit) {
+    unsigned long long end = from;
+    MEMORY_BASIC_INFORMATION info{};
+    while (end < limit && VirtualQuery(reinterpret_cast<void*>(end), &info, sizeof(info)) == sizeof(info) &&
+           info.RegionSize != 0 && plain_private_memory(info)) {
+        end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+    }
+    return end < limit ? end : limit;
+}
+
+unsigned long long plain_memory_from(unsigned long long from, unsigned long long floor) {
+    unsigned long long start = from;
+    MEMORY_BASIC_INFORMATION info{};
+    while (start > floor && VirtualQuery(reinterpret_cast<void*>(start - 1), &info, sizeof(info)) == sizeof(info) &&
+           info.RegionSize != 0 && plain_private_memory(info)) {
+        start = reinterpret_cast<std::uintptr_t>(info.BaseAddress);
+    }
+    return start > floor ? start : floor;
+}
+
+// The PC objects one check needs; made once.
+struct WindowCheck {
+    std::mutex lock;
+    bool tried = false;
+    ID3D12CommandQueue* queue = nullptr;
+    ID3D12CommandAllocator* allocator = nullptr;
+    ID3D12GraphicsCommandList* list = nullptr;
+    ID3D12Fence* fence = nullptr;
+    ID3D12Resource* readback = nullptr;
+    HANDLE reached = nullptr;
+    unsigned long long value = 0;
+} g_window_check;
+
+constexpr unsigned kCheckBytes = 64;
+
+bool window_check_ready(ID3D12Device* device) {
+    WindowCheck& c = g_window_check;
+    if (c.tried) {
+        return c.readback != nullptr;
+    }
+    c.tried = true;
+    D3D12_COMMAND_QUEUE_DESC queue_desc{};
+    queue_desc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = 0x10000;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const bool made =
+        device->CreateCommandQueue(&queue_desc, __uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&c.queue)) ==
+            0 &&
+        device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, __uuidof(ID3D12CommandAllocator),
+                                       reinterpret_cast<void**>(&c.allocator)) == 0 &&
+        device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, c.allocator, nullptr,
+                                  __uuidof(ID3D12GraphicsCommandList), reinterpret_cast<void**>(&c.list)) == 0 &&
+        c.list->Close() == 0 &&
+        device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), reinterpret_cast<void**>(&c.fence)) ==
+            0 &&
+        device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        __uuidof(ID3D12Resource), reinterpret_cast<void**>(&c.readback)) == 0 &&
+        (c.reached = CreateEventA(nullptr, FALSE, FALSE, nullptr)) != nullptr;
+    if (!made) {
+        logf("image memory windows: the PC objects for checking a window could not be made; no window is used\n");
+        if (c.readback) {
+            c.readback->Release();
+            c.readback = nullptr;
+        }
+    }
+    return made;
+}
+
+// Whether the PC device reads, through the window's buffer, the bytes that are in the image's memory at
+// `address`. The image may be writing there at the same time, so a difference is looked at up to three times
+// and the bytes are compared with the memory both before and after the copy.
+bool window_shows_memory(ID3D12Device* device, const Window& window, unsigned long long address) {
+    WindowCheck& c = g_window_check;
+    std::lock_guard<std::mutex> guard(c.lock);
+    if (!window_check_ready(device)) {
+        return false;
+    }
+    unsigned long long offset = address - window.base;
+    if (offset + kCheckBytes > window.bytes) {
+        offset = window.bytes - kCheckBytes;
+    }
+    const unsigned char* memory = reinterpret_cast<const unsigned char*>(window.base + offset);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        unsigned char before[kCheckBytes];
+        std::memcpy(before, memory, kCheckBytes);
+        if (c.allocator->Reset() != 0 || c.list->Reset(c.allocator, nullptr) != 0) {
+            return false;
+        }
+        c.list->CopyBufferRegion(c.readback, 0, window.buffer, offset, kCheckBytes);
+        if (c.list->Close() != 0) {
+            return false;
+        }
+        ID3D12CommandList* lists[1] = {c.list};
+        c.queue->ExecuteCommandLists(1, lists);
+        ++c.value;
+        if (c.queue->Signal(c.fence, c.value) != 0 || c.fence->SetEventOnCompletion(c.value, c.reached) != 0 ||
+            WaitForSingleObject(c.reached, 5000) != WAIT_OBJECT_0) {
+            return false;
+        }
+        const D3D12_RANGE read{0, kCheckBytes};
+        void* copied = nullptr;
+        if (c.readback->Map(0, &read, &copied) != 0 || !copied) {
+            return false;
+        }
+        unsigned char got[kCheckBytes];
+        std::memcpy(got, copied, kCheckBytes);
+        const D3D12_RANGE none{0, 0};
+        c.readback->Unmap(0, &none);
+        if (std::memcmp(got, before, kCheckBytes) == 0 || std::memcmp(got, memory, kCheckBytes) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Opens [base, base + bytes) on the PC device with one buffer over it. Called with the windows lock held.
+const Window* open_window(unsigned long long base, unsigned long long bytes, bool in_pool,
+                          unsigned long long address, int& outcome) {
+    if (g_window_count.load() >= kWindowsMost || g_window_bytes + bytes > kWindowBytesMost) {
+        outcome = kAddressLimit;
+        return nullptr;
+    }
+    ID3D12Device13* device13 = g_device ? pc_device13(g_device) : nullptr;
+    if (!device13) {
+        outcome = kAddressNoDevice;
+        return nullptr;
+    }
+    if (!g_change_routine_set.exchange(true)) {
+        using Set = void (*)(void (*)(void*, unsigned long long));
+        if (const Set set = reinterpret_cast<Set>(xmem_function("whiwhi_xmem_set_change_routine"))) {
+            set(&image_memory_changes);
+        } else {
+            logf("image memory windows: the memory library has no change notice; a window stays in use after its "
+                 "memory was released or remapped\n");
+        }
+    }
+    Window window;
+    window.base = base;
+    window.bytes = bytes;
+    window.in_pool = in_pool;
+    HRESULT hr = device13->OpenExistingHeapFromAddress1(reinterpret_cast<void*>(base), bytes, __uuidof(ID3D12Heap),
+                                                        reinterpret_cast<void**>(&window.heap));
+    if (hr == 0 && window.heap) {
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        desc.Width = bytes;
+        desc.Height = 1;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        // The PC library asks for the cross-adapter flag on anything placed in memory opened this way; unordered
+        // access lets the image name the memory as something the GPU writes.
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        hr = device13->CreatePlacedResource(window.heap, 0, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                            __uuidof(ID3D12Resource), reinterpret_cast<void**>(&window.buffer));
+    }
+    if (hr != 0 || !window.heap || !window.buffer) {
+        static std::atomic<int> shown{0};
+        if (few(shown, 6)) {
+            logf("image memory windows: the PC device did not open 0x%llx (%llu KiB, %s): 0x%lx\n", base, bytes >> 10,
+                 in_pool ? "pool" : "the image's own memory", static_cast<unsigned long>(hr));
+        }
+        if (window.buffer) {
+            window.buffer->Release();
+        }
+        if (window.heap) {
+            window.heap->Release();
+        }
+        outcome = kAddressDeviceRefused;
+        return nullptr;
+    }
+    window.pc = window.buffer->GetGPUVirtualAddress();
+    const bool same = window.pc != 0 && window_shows_memory(device13, window, address);
+    const unsigned long long number = g_windows_checked.fetch_add(1) + 1;
+    if (!same) {
+        logf("image memory windows: window #%llu at 0x%llx (%llu KiB, %s) is NOT used - the PC device did not read "
+             "the bytes that are in that memory\n",
+             number, base, bytes >> 10, in_pool ? "pool" : "the image's own memory");
+        window.buffer->Release();
+        window.heap->Release();
+        outcome = kAddressNotSameBytes;
+        return nullptr;
+    }
+    if (number <= 12) {
+        logf("image memory windows: window #%llu: 0x%llx, %llu KiB of %s is open on the PC device at PC address "
+             "0x%llx (no copy; checked: the PC device reads the bytes that are there)\n",
+             number, base, bytes >> 10, in_pool ? "the pool" : "the image's own memory", window.pc);
+    }
+    g_window_bytes += bytes;
+    g_window_count.fetch_add(1);
+    return &(g_windows[base] = window);
+}
+
+// The address in a window, opening one if there is none. `in_pool`: the address lies in the registered pool
+// (mapped memory that the image maps once and keeps).
+bool window_address(unsigned long long address, unsigned long long bytes, bool in_pool, unsigned long long& pc,
+                    int& outcome) {
+    if (bytes > kWindowLargest) {
+        outcome = kAddressTooLarge;
+        return false;
+    }
+    AcquireSRWLockShared(&g_windows_lock);
+    const Window* found = window_holding(address, bytes);
+    if (found) {
+        pc = found->pc + (address - found->base);
+    }
+    ReleaseSRWLockShared(&g_windows_lock);
+    if (found) {
+        outcome = in_pool ? kAddressPoolWindow : kAddressWindow;
+        return true;
+    }
+    // Where the window would lie: the grid cell around the address, as far as the memory there is of the right
+    // kind; a range that does not fit in that gets a window of its own.
+    unsigned long long base = 0, end = 0;
+    if (in_pool) {
+        const unsigned long long pool = reinterpret_cast<std::uintptr_t>(g_pool_address);
+        base = pool + ((address - pool) & ~(kWindowGrid - 1));
+        end = base + kWindowGrid < pool + g_pool_bytes ? base + kWindowGrid : pool + g_pool_bytes;
+        if (address + bytes > end) {
+            base = address & ~0xFFFFull;
+            end = (address + bytes + 0xFFFFull) & ~0xFFFFull;
+            if (end > pool + g_pool_bytes) {
+                outcome = kAddressNotCommitted;
+                return false;
+            }
+        }
+    } else {
+        const unsigned long long cell = address & ~(kWindowGrid - 1);
+        base = plain_memory_from(address & ~0xFFFull, cell);
+        end = plain_memory_until(address & ~0xFFFull, cell + kWindowGrid);
+        if (address + bytes > end) {
+            base = address & ~0xFFFull;
+            const unsigned long long wanted = (address + bytes + 0xFFFull) & ~0xFFFull;
+            end = plain_memory_until(base, wanted);
+            if (end < wanted) {
+                outcome = kAddressNotCommitted;
+                return false;
+            }
+        }
+    }
+    AcquireSRWLockExclusive(&g_windows_lock);
+    found = window_holding(address, bytes);  // another thread may have opened it meanwhile
+    if (!found) {
+        found = open_window(base, end - base, in_pool, address, outcome);
+    }
+    if (found) {
+        pc = found->pc + (address - found->base);
+    }
+    ReleaseSRWLockExclusive(&g_windows_lock);
+    if (found) {
+        outcome = in_pool ? kAddressPoolWindow : kAddressWindow;
+    }
+    return found != nullptr;
+}
+
+bool resolve_image_address(unsigned long long address, unsigned long long bytes, unsigned long long& pc,
+                           int& outcome) {
+    // 1. A PC buffer the image asked the address of.
+    AcquireSRWLockShared(&g_pc_ranges_lock);
+    auto range = g_pc_ranges.upper_bound(address);
+    const bool is_pc = range != g_pc_ranges.begin() && address + bytes <= (--range)->second;
+    ReleaseSRWLockShared(&g_pc_ranges_lock);
+    if (is_pc) {
+        pc = address;
+        outcome = kAddressPcBuffer;
+        return true;
+    }
+    // 2. A buffer the image placed over its own memory.
+    bool placed = false;
+    AcquireSRWLockShared(&g_placed_lock);
+    auto buffer = g_placed_buffers.upper_bound(address);
+    if (buffer != g_placed_buffers.begin()) {
+        const Wrap* w = (--buffer)->second;
+        if (address + bytes <= w->title_address + w->title_bytes) {
+            pc = static_cast<ID3D12Resource*>(w->pc)->GetGPUVirtualAddress() + w->placed_delta +
+                 (address - w->title_address);
+            placed = true;
+        }
+    }
+    ReleaseSRWLockShared(&g_placed_lock);
+    if (placed) {
+        outcome = kAddressPlacedBuffer;
+        return true;
+    }
+    // 3. The GPU-only view: the pool page the first page shows, and whether the rest of the range follows it.
+    unsigned long long memory = address;
+    bool through_view = false;
+    const unsigned long long first_page = address >> 16, last_page = (address + bytes - 1) >> 16;
+    AcquireSRWLockShared(&g_view_pages_lock);
+    const auto shown = g_view_pages.find(first_page);
+    if (shown != g_view_pages.end()) {
+        through_view = true;
+        bool neighbours = true;
+        for (unsigned long long page = first_page + 1; page <= last_page && neighbours; ++page) {
+            const auto next = g_view_pages.find(page);
+            neighbours = next != g_view_pages.end() && next->second == shown->second + (page - first_page);
+        }
+        memory = neighbours ? reinterpret_cast<std::uintptr_t>(g_pool_address) +
+                                  (static_cast<unsigned long long>(shown->second) << 16) + (address & 0xFFFFull)
+                            : 0;
+    }
+    ReleaseSRWLockShared(&g_view_pages_lock);
+    if (through_view && (!memory || !g_pool_address)) {
+        outcome = kAddressViewSplit;
+        return false;
+    }
+    // 4. The pool, or other memory of the image.
+    const unsigned long long pool = reinterpret_cast<std::uintptr_t>(g_pool_address);
+    if (g_pool_address && memory >= pool && memory + bytes <= pool + g_pool_bytes) {
+        const bool ok = window_address(memory, bytes, true, pc, outcome);
+        if (ok && through_view) {
+            outcome = kAddressViewPage;
+        }
+        return ok;
+    }
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<void*>(memory), &info, sizeof(info)) != sizeof(info) ||
+        info.State != MEM_COMMIT) {
+        outcome = kAddressNotCommitted;
+        return false;
+    }
+    if (info.Type == MEM_IMAGE) {
+        outcome = kAddressModule;
+        return false;
+    }
+    if (info.Type != MEM_PRIVATE) {
+        outcome = kAddressRemappable;
+        return false;
+    }
+    if (!plain_private_memory(info)) {
+        outcome = kAddressProtection;
+        return false;
+    }
+    return window_address(memory, bytes, false, pc, outcome);
+}
+
+bool pc_buffer_address(unsigned long long address, unsigned long long bytes, unsigned long long& pc, int& outcome) {
+    outcome = kAddressNone;
+    pc = 0;
+    if (bytes == 0) {
+        bytes = 1;
+    }
+    const bool ok = address + bytes > address && resolve_image_address(address, bytes, pc, outcome);
+    if (outcome > kAddressNone && outcome < kAddressOutcomes) {
+        g_address_outcomes[outcome].fetch_add(1);
+    }
+    return ok;
+}
+
+// What the run asked of this section, for the report at its end.
+void log_address_outcomes() {
+    unsigned long long asked = 0;
+    for (int i = 1; i < kAddressOutcomes; ++i) {
+        asked += g_address_outcomes[i].load();
+    }
+    if (!asked) {
+        return;
+    }
+    logf("addresses of the image's memory given where a GPU buffer address belongs: %llu\n", asked);
+    for (int i = 1; i < kAddressOutcomes; ++i) {
+        if (const unsigned long long n = g_address_outcomes[i].load()) {
+            logf("  %llu x  %s%s\n", n, i >= kAddressFirstRefusal ? "NOT answered: " : "", address_outcome_text(i));
+        }
+    }
+    AcquireSRWLockShared(&g_windows_lock);
+    logf("image memory windows: %llu open (%llu MiB), %zu set aside because their memory changed, %llu opened in "
+         "all\n",
+         g_window_count.load(), g_window_bytes >> 20, g_windows_retired.size(), g_windows_checked.load());
+    ReleaseSRWLockShared(&g_windows_lock);
 }
 
 // ---- presentation -------------------------------------------------------------------------------------------
@@ -4040,7 +4963,7 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {11, reinterpret_cast<void*>(&w_device_pipeline)},
          {12, reinterpret_cast<void*>(&create_thunk<12, 5, 6, kList>)},
          {14, reinterpret_cast<void*>(&w_device_slot14)},
-         {16, reinterpret_cast<void*>(&create_thunk<16, 4, 5, kRootSignature>)},
+         {16, reinterpret_cast<void*>(&w_device_slot16)},
          {17, reinterpret_cast<void*>(&cpu_handle_thunk<17, 2, 0>)},  // constant buffer view (description, handle)
          {18, reinterpret_cast<void*>(&cpu_handle_thunk<18, 3, 0>)},  // shader resource view (resource, description, handle)
          {19, reinterpret_cast<void*>(&cpu_handle_thunk<19, 4, 0>)},  // unordered access view (resource, counter, description, handle)
@@ -4182,6 +5105,7 @@ unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
     }
     ReleaseSRWLockShared(&g_containers.lock);
     log_program_census("whole run");
+    log_address_outcomes();
     return written;
 }
 
