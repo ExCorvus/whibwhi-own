@@ -142,6 +142,15 @@ struct Wrap {
     unsigned long long requested_block = 0;
     unsigned long long requested_bytes = 0;
     unsigned long long requested_attributes = 0;
+    // For a fence: the completed value, at an address the image reads by itself (see "fences" below).
+    volatile long long live_value = 0;
+    // For a command list: whether the PC list behind it is recording (between its start and its Close), and
+    // what has been set on it since it started: the PC library reads the root signature and the pipeline state
+    // without checking that there is one, so calls that depend on them are not passed on before they are set.
+    std::atomic<bool> recording{false};
+    std::atomic<bool> compute_root{false};
+    std::atomic<bool> graphics_root{false};
+    std::atomic<bool> pipeline_set{false};
 
     Wrap(void* pc_object, int kind_number, const char* kind_name)
         : vt(nullptr), image_area{}, pc(pc_object), refs(1), kind_id(kind_number), kind(kind_name) {}
@@ -411,21 +420,6 @@ void __stdcall w_list_barrier(Wrap* self, unsigned int count, const D3D12_RESOUR
     reinterpret_cast<Fn>(pc_vt[26])(self->pc, count, pc.data());
 }
 
-// List slot 28, SetDescriptorHeaps(count, heaps).
-void __stdcall w_list_set_heaps(Wrap* self, unsigned int count, void* const* heaps) {
-    using Fn = void(__stdcall*)(void*, unsigned int, void* const*);
-    void** pc_vt = reinterpret_cast<void***>(self->pc)[0];
-    if (!heaps || count == 0) {
-        reinterpret_cast<Fn>(pc_vt[28])(self->pc, count, heaps);
-        return;
-    }
-    std::vector<void*> pc(count);
-    for (unsigned int i = 0; i < count; ++i) {
-        pc[i] = to_pc(heaps[i]);
-    }
-    reinterpret_cast<Fn>(pc_vt[28])(self->pc, count, pc.data());
-}
-
 // List slot 16, CopyTextureRegion(destination, x, y, z, source, box): both locations name a resource.
 void __stdcall w_list_copy_texture(Wrap* self, const D3D12_TEXTURE_COPY_LOCATION* destination, unsigned int x,
                                    unsigned int y, unsigned int z, const D3D12_TEXTURE_COPY_LOCATION* source,
@@ -576,6 +570,77 @@ unsigned long long* __stdcall w_heap_start(void* a1, void* a2) {
     return reinterpret_cast<unsigned long long*>(value);  // a structure of 8 bytes comes back in the register
 }
 
+// A handle as the image has it -> the PC heap's handle, when it names a position inside a descriptor heap this
+// library made (as the image sees the heap, or as the PC library does). False for anything else.
+bool cpu_handle_in_heap(unsigned long long handle, unsigned long long& pc) {
+    bool found = false;
+    AcquireSRWLockShared(&g_heaps_lock);
+    for (const HeapRange& r : g_heaps) {
+        if (r.title && handle >= r.title && handle < r.title + r.bytes) {
+            pc = r.pc_cpu + (handle - r.title);
+            found = true;
+            break;
+        }
+        if (r.pc_cpu && handle >= r.pc_cpu && handle < r.pc_cpu + r.bytes) {
+            pc = handle;
+            found = true;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_heaps_lock);
+    return found;
+}
+
+// The same for a handle shaders use; only heaps that are visible to shaders have such handles.
+bool gpu_handle_in_heap(unsigned long long handle, unsigned long long& pc) {
+    bool found = false;
+    AcquireSRWLockShared(&g_heaps_lock);
+    for (const HeapRange& r : g_heaps) {
+        if (!r.pc_gpu) {
+            continue;
+        }
+        if (r.title && handle >= r.title && handle < r.title + r.bytes) {
+            pc = r.pc_gpu + (handle - r.title);
+            found = true;
+            break;
+        }
+        if (handle >= r.pc_gpu && handle < r.pc_gpu + r.bytes) {
+            pc = handle;
+            found = true;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_heaps_lock);
+    return found;
+}
+
+// Which positions of the PC heaps hold a render-target or depth view that was made through a call this library
+// answered. The PC library reads a view's record without checking that one was ever written there, so a clear
+// or a render-target binding that names any other position is not passed on (see the command-list methods).
+SRWLOCK g_views_lock = SRWLOCK_INIT;
+std::unordered_set<unsigned long long> g_target_views;  // PC handles
+
+void note_target_view(unsigned long long pc_handle, bool present) {
+    AcquireSRWLockExclusive(&g_views_lock);
+    if (present) {
+        g_target_views.insert(pc_handle);
+    } else {
+        g_target_views.erase(pc_handle);
+    }
+    ReleaseSRWLockExclusive(&g_views_lock);
+}
+
+bool is_target_view(unsigned long long pc_handle) {
+    AcquireSRWLockShared(&g_views_lock);
+    const bool found = g_target_views.find(pc_handle) != g_target_views.end();
+    ReleaseSRWLockShared(&g_views_lock);
+    return found;
+}
+
+bool is_target_heap_type(unsigned int type) {
+    return type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV || type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+}
+
 // Device methods that take descriptor handles by value (one 8-byte value each). First and Second are the
 // positions of the handle arguments after the object (Second 0 = none).
 template <int Slot, int First, int Second>
@@ -587,6 +652,25 @@ void __stdcall cpu_handle_thunk(Wrap* self, void* a1, void* a2, void* a3, void* 
     }
     using Fn = void(__stdcall*)(void*, void*, void*, void*, void*, void*, void*);
     reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][Slot])(self->pc, a[1], a[2], a[3], a[4], a[5], a[6]);
+    if (Slot == 20 || Slot == 21) {
+        // A render-target or depth view (resource, description, handle): a view of no resource is not one a
+        // clear or a binding can use.
+        note_target_view(reinterpret_cast<unsigned long long>(a[First]), a[1] != nullptr);
+    } else if (Slot == 24) {
+        // The simple copy (count, to, from, heap type): a copied view is a view where it lands.
+        const unsigned type = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(a[4]));
+        if (is_target_heap_type(type)) {
+            const unsigned count = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(a[1]));
+            const unsigned step = static_cast<ID3D12Device*>(self->pc)->GetDescriptorHandleIncrementSize(
+                static_cast<D3D12_DESCRIPTOR_HEAP_TYPE>(type));
+            const unsigned long long to = reinterpret_cast<unsigned long long>(a[2]);
+            const unsigned long long from = reinterpret_cast<unsigned long long>(a[3]);
+            for (unsigned i = 0; i < count && i < 65536u; ++i) {
+                note_target_view(to + static_cast<unsigned long long>(i) * step,
+                                 is_target_view(from + static_cast<unsigned long long>(i) * step));
+            }
+        }
+    }
 }
 
 // Device slot 23, CopyDescriptors: the handles arrive in two arrays.
@@ -604,52 +688,362 @@ void __stdcall w_device_copy_descriptors(Wrap* self, unsigned int dest_count, co
     static_cast<ID3D12Device*>(self->pc)->CopyDescriptors(dest_count, dest_starts ? dest.data() : nullptr, dest_sizes,
                                                           source_count, source_starts ? source.data() : nullptr,
                                                           source_sizes, static_cast<D3D12_DESCRIPTOR_HEAP_TYPE>(type));
-}
-
-// The five functions below are written for public list methods whose slot on the console's list is not measured
-// yet; they are not installed (see wrap_kind). Slot is the PC list's slot the call goes to.
-//
-// Set{Compute,Graphics}RootDescriptorTable(index, GPU handle): PC slots 31 and 32.
-template <int Slot>
-void __stdcall w_list_root_table(Wrap* self, unsigned int index, unsigned long long handle) {
-    using Fn = void(__stdcall*)(void*, unsigned int, unsigned long long);
-    reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][Slot])(self->pc, index, handle_to_pc(handle, true));
-}
-
-// OMSetRenderTargets(count, handles, one range?, depth handle).
-void __stdcall w_list_set_render_targets(Wrap* self, unsigned int count, const unsigned long long* targets,
-                                         int single_range, const unsigned long long* depth) {
-    std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> pc_targets;
-    if (targets) {
-        pc_targets.resize(single_range ? (count ? 1u : 0u) : count);
-        for (std::size_t i = 0; i < pc_targets.size(); ++i) {
-            pc_targets[i].ptr = static_cast<SIZE_T>(handle_to_pc(targets[i], false));
+    if (is_target_heap_type(type)) {
+        // A copied render-target or depth view is a view where it lands: walk both lists of ranges in step.
+        const unsigned step = static_cast<ID3D12Device*>(self->pc)->GetDescriptorHandleIncrementSize(
+            static_cast<D3D12_DESCRIPTOR_HEAP_TYPE>(type));
+        const auto flatten = [step](const std::vector<D3D12_CPU_DESCRIPTOR_HANDLE>& starts, const unsigned int* sizes) {
+            std::vector<unsigned long long> positions;
+            for (std::size_t i = 0; i < starts.size(); ++i) {
+                const unsigned n = sizes ? sizes[i] : 1u;
+                for (unsigned j = 0; j < n && positions.size() < 65536u; ++j) {
+                    positions.push_back(starts[i].ptr + static_cast<unsigned long long>(j) * step);
+                }
+            }
+            return positions;
+        };
+        const std::vector<unsigned long long> to = flatten(dest, dest_sizes);
+        const std::vector<unsigned long long> from = flatten(source, source_sizes);
+        for (std::size_t i = 0; i < to.size() && i < from.size(); ++i) {
+            note_target_view(to[i], is_target_view(from[i]));
         }
     }
-    D3D12_CPU_DESCRIPTOR_HANDLE pc_depth{};
-    if (depth) {
-        pc_depth.ptr = static_cast<SIZE_T>(handle_to_pc(*depth, false));
-    }
-    static_cast<ID3D12GraphicsCommandList*>(self->pc)->OMSetRenderTargets(
-        count, targets ? pc_targets.data() : nullptr, single_range, depth ? &pc_depth : nullptr);
 }
 
-// ClearDepthStencilView(handle, flags, depth, stencil, rect count, rects). Written out because the
-// depth is a floating-point argument, which the general forwarding does not carry.
+// ---- command-list methods above the part of the order that was measured directly -----------------------------
+//
+// The console list's methods from slot 32 to slot 52 are answered as the public methods four slots lower
+// (public 28 to 48). What that rests on: two calls seen in a run with all their arguments - slot 32 with a count
+// of 2 and an array of two descriptor heaps (SetDescriptorHeaps, public 28) and slot 52 with a descriptor handle
+// and a pointer to numbers (ClearRenderTargetView, public 48) - and the argument shapes read at the image's call
+// sites of 33/34, 35/36, 39/40, 43 to 46, 47 and 48 (docs/exe-map/COMMAND-LIST-ORDER.md), which are the shapes of
+// the public methods four lower. It is still an identification by shape, so every method here checks what it is
+// given, passes on only what has that shape, and shows its first calls; anything else is said and not passed on.
+//
+// Slots 41 to 48 (root buffer addresses, index and vertex buffers) take addresses in the image's own memory and
+// are not answered until those addresses can be turned into addresses of PC buffers.
+
+int kind_of(void* object) {
+    return is_wrap(object) ? static_cast<Wrap*>(object)->kind_id : 0;
+}
+
+// Whether `bytes` bytes at `address` can be read (they lie in committed, readable memory).
+bool can_read(const void* address, std::size_t bytes) {
+    if (!address) {
+        return false;
+    }
+    const auto begin = reinterpret_cast<std::uintptr_t>(address);
+    std::uintptr_t at = begin;
+    const std::uintptr_t end = begin + bytes;
+    while (at < end) {
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<const void*>(at), &info, sizeof(info)) != sizeof(info) ||
+            info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+            return false;
+        }
+        at = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+    }
+    return true;
+}
+
+// True for the first few calls: used to show a method's first calls, and to keep refusals from filling the log.
+bool few(std::atomic<int>& counter, int limit = 4) {
+    return counter.fetch_add(1) < limit;
+}
+
+// Console list slot 32: SetDescriptorHeaps(count, heaps). A PC list takes at most one heap of each of the two
+// kinds shaders see.
+void __stdcall w_list_set_heaps(Wrap* self, unsigned int count, void* const* heaps) {
+    static std::atomic<int> shown{0}, refused{0};
+    ID3D12DescriptorHeap* pc[2] = {};
+    bool ok = count >= 1 && count <= 2 && can_read(heaps, count * sizeof(void*));
+    for (unsigned int i = 0; ok && i < count; ++i) {
+        ok = kind_of(heaps[i]) == kHeap;
+        if (ok) {
+            pc[i] = static_cast<ID3D12DescriptorHeap*>(to_pc(heaps[i]));
+        }
+    }
+    if (!ok) {
+        if (few(refused)) {
+            logf("command list slot 32: (%u, %p) is not a count of one or two descriptor heaps of this library - "
+                 "not passed on\n",
+                 count, static_cast<const void*>(heaps));
+        }
+        return;
+    }
+    if (few(shown)) {
+        logf("command list slot 32: %u descriptor heap(s) set on the PC list\n", count);
+    }
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)->SetDescriptorHeaps(count, pc);
+}
+
+// Console list slots 33 and 34: Set{Compute,Graphics}RootSignature(root signature).
+template <int Graphics>
+void __stdcall w_list_root_signature(Wrap* self, void* signature) {
+    static std::atomic<int> shown{0}, refused{0};
+    if (kind_of(signature) != kRootSignature) {
+        if (few(refused)) {
+            logf("command list slot %d: %p is not a root signature of this library - not passed on\n", 33 + Graphics,
+                 signature);
+        }
+        return;
+    }
+    auto* list = static_cast<ID3D12GraphicsCommandList*>(self->pc);
+    auto* pc = static_cast<ID3D12RootSignature*>(to_pc(signature));
+    if (Graphics) {
+        list->SetGraphicsRootSignature(pc);
+        self->graphics_root.store(true);
+    } else {
+        list->SetComputeRootSignature(pc);
+        self->compute_root.store(true);
+    }
+    if (few(shown)) {
+        logf("command list slot %d: %s root signature set on the PC list\n", 33 + Graphics,
+             Graphics ? "graphics" : "compute");
+    }
+}
+
+// Whether the list has the root signature a root argument belongs to; says so (a few times) when it has not.
+bool root_ready(Wrap* self, int graphics, int slot, std::atomic<int>& refused) {
+    if (graphics ? self->graphics_root.load() : self->compute_root.load()) {
+        return true;
+    }
+    if (few(refused)) {
+        logf("command list slot %d: a %s root argument was set before any %s root signature - not passed on\n", slot,
+             graphics ? "graphics" : "compute", graphics ? "graphics" : "compute");
+    }
+    return false;
+}
+
+// Console list slots 35 and 36: Set{Compute,Graphics}RootDescriptorTable(parameter, handle).
+template <int Graphics>
+void __stdcall w_list_root_table(Wrap* self, unsigned int index, unsigned long long handle) {
+    static std::atomic<int> shown{0}, refused{0};
+    if (!root_ready(self, Graphics, 35 + Graphics, refused)) {
+        return;
+    }
+    unsigned long long pc = 0;
+    if (index >= 64 || !gpu_handle_in_heap(handle, pc)) {
+        if (few(refused)) {
+            logf("command list slot %d: (parameter %u, handle 0x%llx) does not name a position in a descriptor heap "
+                 "shaders can see - not passed on\n",
+                 35 + Graphics, index, handle);
+        }
+        return;
+    }
+    D3D12_GPU_DESCRIPTOR_HANDLE base{};
+    base.ptr = pc;
+    auto* list = static_cast<ID3D12GraphicsCommandList*>(self->pc);
+    if (Graphics) {
+        list->SetGraphicsRootDescriptorTable(index, base);
+    } else {
+        list->SetComputeRootDescriptorTable(index, base);
+    }
+    if (few(shown)) {
+        logf("command list slot %d: %s root descriptor table %u set (handle 0x%llx as the image has it)\n",
+             35 + Graphics, Graphics ? "graphics" : "compute", index, handle);
+    }
+}
+
+// Console list slots 37 and 38: Set{Compute,Graphics}Root32BitConstant(parameter, value, position).
+template <int Graphics>
+void __stdcall w_list_root_constant(Wrap* self, unsigned int index, unsigned int value, unsigned int position) {
+    static std::atomic<int> shown{0}, refused{0};
+    if (!root_ready(self, Graphics, 37 + Graphics, refused)) {
+        return;
+    }
+    if (index >= 64 || position >= 64) {
+        if (few(refused)) {
+            logf("command list slot %d: (parameter %u, value 0x%x, position %u) is not a root constant - not passed "
+                 "on\n",
+                 37 + Graphics, index, value, position);
+        }
+        return;
+    }
+    auto* list = static_cast<ID3D12GraphicsCommandList*>(self->pc);
+    if (Graphics) {
+        list->SetGraphicsRoot32BitConstant(index, value, position);
+    } else {
+        list->SetComputeRoot32BitConstant(index, value, position);
+    }
+    if (few(shown)) {
+        logf("command list slot %d: %s root constant set (parameter %u, position %u)\n", 37 + Graphics,
+             Graphics ? "graphics" : "compute", index, position);
+    }
+}
+
+// Console list slots 39 and 40: Set{Compute,Graphics}Root32BitConstants(parameter, count, values, position).
+template <int Graphics>
+void __stdcall w_list_root_constants(Wrap* self, unsigned int index, unsigned int count, const void* values,
+                                     unsigned int position) {
+    static std::atomic<int> shown{0}, refused{0};
+    if (!root_ready(self, Graphics, 39 + Graphics, refused)) {
+        return;
+    }
+    if (index >= 64 || count == 0 || count > 64 || position >= 64 || !can_read(values, count * 4u)) {
+        if (few(refused)) {
+            logf("command list slot %d: (parameter %u, count %u, values %p, position %u) is not a run of root "
+                 "constants - not passed on\n",
+                 39 + Graphics, index, count, values, position);
+        }
+        return;
+    }
+    auto* list = static_cast<ID3D12GraphicsCommandList*>(self->pc);
+    if (Graphics) {
+        list->SetGraphicsRoot32BitConstants(index, count, values, position);
+    } else {
+        list->SetComputeRoot32BitConstants(index, count, values, position);
+    }
+    if (few(shown)) {
+        logf("command list slot %d: %u %s root constants set (parameter %u, position %u)\n", 39 + Graphics, count,
+             Graphics ? "graphics" : "compute", index, position);
+    }
+}
+
+// A render-target or depth handle as the image has it -> the PC handle, if a view was made there.
+bool target_view_to_pc(unsigned long long handle, D3D12_CPU_DESCRIPTOR_HANDLE& pc) {
+    unsigned long long position = 0;
+    if (!cpu_handle_in_heap(handle, position) || !is_target_view(position)) {
+        return false;
+    }
+    pc.ptr = static_cast<SIZE_T>(position);
+    return true;
+}
+
+// Console list slot 50: OMSetRenderTargets(count, handles, one range?, depth handle).
+void __stdcall w_list_set_render_targets(Wrap* self, unsigned int count, const unsigned long long* targets,
+                                         int single_range, const unsigned long long* depth) {
+    static std::atomic<int> shown{0}, refused{0};
+    D3D12_CPU_DESCRIPTOR_HANDLE pc_targets[8] = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE pc_depth{};
+    const unsigned int given = single_range ? (count ? 1u : 0u) : count;
+    bool ok = count <= 8 && (single_range == 0 || single_range == 1) &&
+              (given == 0 || can_read(targets, given * sizeof(unsigned long long))) &&
+              (!depth || can_read(depth, sizeof(unsigned long long)));
+    for (unsigned int i = 0; ok && i < given; ++i) {
+        ok = target_view_to_pc(targets[i], pc_targets[i]);
+    }
+    if (ok && single_range && count > 1) {
+        // One handle names a run of consecutive views: every one of them has to be a view.
+        ok = g_device != nullptr;
+        const unsigned step = ok ? static_cast<ID3D12Device*>(g_device->pc)->GetDescriptorHandleIncrementSize(
+                                       D3D12_DESCRIPTOR_HEAP_TYPE_RTV)
+                                 : 0u;
+        for (unsigned int i = 1; ok && i < count; ++i) {
+            ok = is_target_view(pc_targets[0].ptr + static_cast<unsigned long long>(i) * step);
+        }
+    }
+    if (ok && depth) {
+        ok = target_view_to_pc(*depth, pc_depth);
+    }
+    if (!ok) {
+        if (few(refused)) {
+            logf("command list slot 50: (count %u, handles %p, one range %d, depth %p) does not name render-target "
+                 "views made through this library - not passed on\n",
+                 count, static_cast<const void*>(targets), single_range, static_cast<const void*>(depth));
+        }
+        return;
+    }
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)->OMSetRenderTargets(count, count ? pc_targets : nullptr,
+                                                                          single_range, depth ? &pc_depth : nullptr);
+    if (few(shown)) {
+        logf("command list slot 50: %u render target(s)%s set on the PC list\n", count, depth ? " and a depth target" : "");
+    }
+}
+
+// Rectangles of a clear: none, or a readable run of at most 64.
+bool rects_ok(unsigned int count, const D3D12_RECT* rects) {
+    return count == 0 || (count <= 64 && can_read(rects, count * sizeof(D3D12_RECT)));
+}
+
+// Console list slot 51: ClearDepthStencilView(handle, flags, depth, stencil, rectangle count, rectangles). The
+// depth is a floating-point argument.
 void __stdcall w_list_clear_depth(Wrap* self, unsigned long long handle, unsigned int flags, float depth,
                                   unsigned char stencil, unsigned int rect_count, const D3D12_RECT* rects) {
+    static std::atomic<int> shown{0}, refused{0};
     D3D12_CPU_DESCRIPTOR_HANDLE pc{};
-    pc.ptr = static_cast<SIZE_T>(handle_to_pc(handle, false));
+    if (!target_view_to_pc(handle, pc) || flags == 0 || flags > 3 || !(depth >= 0.0f && depth <= 1.0f) ||
+        !rects_ok(rect_count, rects)) {
+        if (few(refused)) {
+            logf("command list slot 51: (handle 0x%llx, flags %u, depth %g, stencil %u, %u rectangles) is not a "
+                 "clear of a depth view made through this library - not passed on\n",
+                 handle, flags, static_cast<double>(depth), static_cast<unsigned>(stencil), rect_count);
+        }
+        return;
+    }
     static_cast<ID3D12GraphicsCommandList*>(self->pc)->ClearDepthStencilView(
-        pc, static_cast<D3D12_CLEAR_FLAGS>(flags), depth, stencil, rect_count, rects);
+        pc, static_cast<D3D12_CLEAR_FLAGS>(flags), depth, stencil, rect_count, rect_count ? rects : nullptr);
+    if (few(shown)) {
+        logf("command list slot 51: depth view cleared on the PC list (flags %u, depth %g, stencil %u)\n", flags,
+             static_cast<double>(depth), static_cast<unsigned>(stencil));
+    }
 }
 
-// ClearRenderTargetView(handle, colour, rect count, rects).
+// Console list slot 52: ClearRenderTargetView(handle, four colour numbers, rectangle count, rectangles).
 void __stdcall w_list_clear_target(Wrap* self, unsigned long long handle, const float* colour, unsigned int rect_count,
                                    const D3D12_RECT* rects) {
+    static std::atomic<int> shown{0}, refused{0};
     D3D12_CPU_DESCRIPTOR_HANDLE pc{};
-    pc.ptr = static_cast<SIZE_T>(handle_to_pc(handle, false));
-    static_cast<ID3D12GraphicsCommandList*>(self->pc)->ClearRenderTargetView(pc, colour, rect_count, rects);
+    if (!target_view_to_pc(handle, pc) || !can_read(colour, 4 * sizeof(float)) || !rects_ok(rect_count, rects)) {
+        if (few(refused)) {
+            logf("command list slot 52: (handle 0x%llx, colour %p, %u rectangles) is not a clear of a render-target "
+                 "view made through this library - not passed on\n",
+                 handle, static_cast<const void*>(colour), rect_count);
+        }
+        return;
+    }
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)->ClearRenderTargetView(pc, colour, rect_count,
+                                                                             rect_count ? rects : nullptr);
+    if (few(shown)) {
+        logf("command list slot 52: render target cleared on the PC list to (%g, %g, %g, %g)\n",
+             static_cast<double>(colour[0]), static_cast<double>(colour[1]), static_cast<double>(colour[2]),
+             static_cast<double>(colour[3]));
+    }
+}
+
+// List slot 25, SetPipelineState(pipeline state), in the part of the order shared with the public list. Kept
+// track of because the PC library draws with whatever is set without checking that anything is.
+void __stdcall w_list_set_pipeline(Wrap* self, void* state) {
+    static std::atomic<int> shown{0}, refused{0};
+    if (kind_of(state) != kPipeline) {
+        self->pipeline_set.store(false);
+        if (few(refused)) {
+            logf("command list slot 25: %p is not a pipeline state of this library - not passed on; draws on this "
+                 "list are not carried out until one is set\n",
+                 state);
+        }
+        return;
+    }
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)->SetPipelineState(static_cast<ID3D12PipelineState*>(to_pc(state)));
+    self->pipeline_set.store(true);
+    if (few(shown)) {
+        logf("command list slot 25: pipeline state set on the PC list\n");
+    }
+}
+
+// Draws and dispatches asked while the list has no pipeline state: counted, said at the first and at every power
+// of two, never passed on.
+std::atomic<unsigned long long> g_draws_without_pipeline{0};
+
+bool pipeline_ready(Wrap* self, const char* what) {
+    if (self->pipeline_set.load()) {
+        return true;
+    }
+    const unsigned long long nth = g_draws_without_pipeline.fetch_add(1) + 1;
+    if ((nth & (nth - 1)) == 0) {
+        logf("command list: %s asked with no pipeline state set (time %llu) - NOT DRAWN\n", what, nth);
+    }
+    return false;
+}
+
+// List slots 12, 13 and 14 (DrawInstanced, DrawIndexedInstanced, Dispatch; all arguments are plain numbers).
+template <int Slot>
+void __stdcall w_list_draw(Wrap* self, void* a1, void* a2, void* a3, void* a4, void* a5) {
+    if (!pipeline_ready(self, Slot == 14 ? "a dispatch" : "a draw")) {
+        return;
+    }
+    using Fn = void(__stdcall*)(void*, void*, void*, void*, void*, void*);
+    reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][Slot])(self->pc, a1, a2, a3, a4, a5);
 }
 
 // ---- command signatures and indirect execution ----------------------------------------------------------------
@@ -776,8 +1170,17 @@ void __stdcall w_list_execute_indirect(Wrap* self, void* signature, unsigned int
         }
         return;
     }
-    if (!is_wrap(signature)) {
-        logf("command list: indirect execution with a signature that is not an object of this library; nothing done\n");
+    if (kind_of(signature) != kCommandSignature || kind_of(arguments) != kResource ||
+        (count_buffer && kind_of(count_buffer) != kResource)) {
+        static std::atomic<int> refused{0};
+        if (few(refused)) {
+            logf("command list slot 61: (signature %p, argument buffer %p, count buffer %p) are not objects of this "
+                 "library - not passed on\n",
+                 signature, arguments, count_buffer);
+        }
+        return;
+    }
+    if (!pipeline_ready(self, "an indirect execution")) {
         return;
     }
     static_cast<ID3D12GraphicsCommandList*>(self->pc)->ExecuteIndirect(
@@ -829,15 +1232,31 @@ HRESULT __stdcall w_allocator_memory_function(Wrap* self, void* function, void* 
 // finished the lists recorded with it. Until the shell resets PC allocators at the right moments, the PC
 // device's command memory grows for as long as the image runs.
 HRESULT __stdcall w_list_begin(Wrap* self, void* allocator, void* third, void* fourth) {
-    static std::atomic<int> shown{0};
-    if (third || fourth || !is_wrap(allocator)) {
+    static std::atomic<int> shown{0}, restarted{0};
+    if (third || fourth || kind_of(allocator) != kAllocator) {
         logf("command list slot 139: (allocator %p, %p, %p) - not the call that was measured; answered not "
              "implemented\n",
              allocator, third, fourth);
         return 0x80004001L;
     }
-    const HRESULT hr = static_cast<ID3D12GraphicsCommandList*>(self->pc)->Reset(
-        static_cast<ID3D12CommandAllocator*>(to_pc(allocator)), nullptr);
+    auto* list = static_cast<ID3D12GraphicsCommandList*>(self->pc);
+    if (self->recording.exchange(false)) {
+        // The image starts the list again without having submitted what it recorded. A PC list has to be closed
+        // before it can start again; what it had recorded is then never carried out, and that is said.
+        const HRESULT closed = list->Close();
+        if (few(restarted, 8)) {
+            logf("command list slot 139: list %p is started again while still recording - closed on the PC first "
+                 "(0x%lx); what it had recorded was not submitted and is not carried out\n",
+                 static_cast<void*>(self), static_cast<unsigned long>(closed));
+        }
+    }
+    const HRESULT hr = list->Reset(static_cast<ID3D12CommandAllocator*>(to_pc(allocator)), nullptr);
+    if (hr == 0) {
+        self->recording.store(true);
+        self->compute_root.store(false);
+        self->graphics_root.store(false);
+        self->pipeline_set.store(false);
+    }
     const int n = shown.fetch_add(1);
     if (hr != 0 || n < 3) {
         logf("command list slot 139: list %p starts recording with allocator %p - the PC list's Reset answered "
@@ -845,6 +1264,164 @@ HRESULT __stdcall w_list_begin(Wrap* self, void* allocator, void* third, void* f
              static_cast<void*>(self), allocator, static_cast<unsigned long>(hr));
     }
     return hr;
+}
+
+// List slot 9, Close (no arguments, result checked; in the part of the order shared with the public list).
+HRESULT __stdcall w_list_close(Wrap* self) {
+    const HRESULT hr = static_cast<ID3D12GraphicsCommandList*>(self->pc)->Close();
+    if (hr == 0) {
+        self->recording.store(false);
+    } else {
+        static std::atomic<int> refused{0};
+        if (few(refused)) {
+            logf("command list slot 9: the PC list's Close answered 0x%lx\n", static_cast<unsigned long>(hr));
+        }
+    }
+    return hr;
+}
+
+// ---- fences ---------------------------------------------------------------------------------------------------
+//
+// Fence slot 12 (console-only), measured at the image's one call (+0x4fb0aec): called with the fence alone, and
+// the result is used as the ADDRESS of a 64-bit number. The image then reads that number again and again without
+// calling anything: it waits for a write to the address with the processor's monitor and wait instructions and
+// sleeps between looks, until the number has reached the value it wants (all ones means the device is lost). So
+// it is the fence's completed value, kept somewhere the image can watch, and it has to change by itself.
+//
+// The number lives in the fence's wrapper. It is brought up to date from the PC fence when the address is asked,
+// and each time the PC device reaches a value the image asked the queue to signal (queue slot 16): the PC fence
+// is asked to set an event at that value, and a thread-pool wait on the event copies the PC fence's completed
+// value into the number. A fence signalled some other way is not followed; no such call has been seen.
+//
+// The console fence's other methods are not measured (it has at least 13, the public fence 11), so none of them
+// is passed on by the public order.
+SRWLOCK g_fence_refresh_lock = SRWLOCK_INIT;
+
+void refresh_fence(Wrap* fence) {
+    AcquireSRWLockExclusive(&g_fence_refresh_lock);
+    const unsigned long long value = static_cast<ID3D12Fence*>(fence->pc)->GetCompletedValue();
+    _InterlockedExchange64(&fence->live_value, static_cast<long long>(value));
+    ReleaseSRWLockExclusive(&g_fence_refresh_lock);
+}
+
+struct FenceWatch {
+    Wrap* fence;
+    HANDLE event;
+};
+
+void CALLBACK fence_reached(PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT wait, TP_WAIT_RESULT) {
+    FenceWatch* watch = static_cast<FenceWatch*>(context);
+    refresh_fence(watch->fence);
+    CloseHandle(watch->event);
+    CloseThreadpoolWait(wait);
+    w_release(watch->fence);
+    delete watch;
+}
+
+// The PC device was asked to signal `value` on the fence: bring the number up to date when it gets there.
+void watch_fence(Wrap* fence, unsigned long long value) {
+    const HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    FenceWatch* watch = new FenceWatch{fence, event};
+    const PTP_WAIT wait = event ? CreateThreadpoolWait(&fence_reached, watch, nullptr) : nullptr;
+    if (!wait) {
+        logf("fence %p: no wait could be set up (error %lu); its number is only brought up to date when asked\n",
+             static_cast<void*>(fence), GetLastError());
+        if (event) {
+            CloseHandle(event);
+        }
+        delete watch;
+        return;
+    }
+    fence->refs.fetch_add(1);  // given back in fence_reached
+    SetThreadpoolWait(wait, event, nullptr);
+    const HRESULT hr = static_cast<ID3D12Fence*>(fence->pc)->SetEventOnCompletion(value, event);
+    if (hr != 0) {
+        logf("fence %p: the PC fence refused to set an event at value %llu (0x%lx)\n", static_cast<void*>(fence),
+             value, static_cast<unsigned long>(hr));
+        SetEvent(event);  // the wait then brings the number up to date once and cleans up
+    }
+}
+
+long long* __stdcall w_fence_value_address(Wrap* self) {
+    refresh_fence(self);
+    static std::atomic<int> shown{0};
+    if (few(shown, 3)) {
+        logf("fence slot 12: fence %p asked for the address of its completed value - %p, holding %lld now\n",
+             static_cast<void*>(self), static_cast<void*>(const_cast<long long*>(&self->live_value)),
+             self->live_value);
+    }
+    return const_cast<long long*>(&self->live_value);
+}
+
+// Queue slot 16: (queue, fence, value), result checked (measured, +0x2482608) - the arguments of the public
+// Signal, which the public queue has at slot 14.
+HRESULT __stdcall w_queue_signal(Wrap* self, void* fence, unsigned long long value) {
+    static std::atomic<int> shown{0};
+    if (kind_of(fence) != kFence) {
+        logf("queue slot 16: %p is not a fence of this library; answered invalid argument\n", fence);
+        return 0x80070057L;  // E_INVALIDARG
+    }
+    Wrap* f = static_cast<Wrap*>(fence);
+    const HRESULT hr =
+        static_cast<ID3D12CommandQueue*>(self->pc)->Signal(static_cast<ID3D12Fence*>(f->pc), value);
+    if (hr == 0) {
+        watch_fence(f, value);
+    }
+    if (hr != 0 || few(shown, 3)) {
+        logf("queue slot 16: fence %p to be signalled with %llu - the PC queue answered 0x%lx\n", fence, value,
+             static_cast<unsigned long>(hr));
+    }
+    return hr;
+}
+
+// Queue slot 35 (console-only), measured at the image's call (+0x2482689): (queue, count, array of command
+// lists, the frame token the frame clock handed out, a 32-bit 0); the result is not looked at. It is how the
+// image submits lists: the public ExecuteCommandLists is never called.
+//
+// Answered with the PC queue's ExecuteCommandLists. Two differences from the console are handled here:
+//  - The image never closes a list after recording (its one Close is at creation, and a list starts recording
+//    again through slot 139), while the PC queue only takes closed lists and treats a recording one as a fatal
+//    error of the whole device. So a list that is still recording is closed on the PC here, at submission.
+//  - The frame token is not something a PC queue takes. It is shown in the log and not used.
+// A last argument other than 0 has not been seen and is refused.
+HRESULT __stdcall w_queue_submit(Wrap* self, unsigned int count, void* const* lists, unsigned long long token,
+                                 unsigned int last) {
+    static std::atomic<int> shown{0}, refused{0}, closed_shown{0};
+    bool ok = last == 0 && count >= 1 && count <= 256 && can_read(lists, count * sizeof(void*));
+    for (unsigned int i = 0; ok && i < count; ++i) {
+        ok = kind_of(lists[i]) == kList;
+    }
+    if (!ok) {
+        if (few(refused, 8)) {
+            logf("queue slot 35: (count %u, lists %p, token %llu, last argument %u) is not the submission that was "
+                 "measured - nothing submitted, answered not implemented\n",
+                 count, static_cast<const void*>(lists), token, last);
+        }
+        return 0x80004001L;
+    }
+    std::vector<ID3D12CommandList*> pc(count);
+    unsigned int closed_here = 0;
+    for (unsigned int i = 0; i < count; ++i) {
+        Wrap* list = static_cast<Wrap*>(lists[i]);
+        pc[i] = static_cast<ID3D12CommandList*>(list->pc);
+        if (list->recording.exchange(false)) {
+            const HRESULT hr = static_cast<ID3D12GraphicsCommandList*>(list->pc)->Close();
+            if (hr != 0) {
+                logf("queue slot 35: list %p was still recording and the PC list's Close answered 0x%lx - nothing "
+                     "submitted\n",
+                     lists[i], static_cast<unsigned long>(hr));
+                return hr;
+            }
+            ++closed_here;
+        }
+    }
+    static_cast<ID3D12CommandQueue*>(self->pc)->ExecuteCommandLists(count, pc.data());
+    if (few(shown, 3) || (closed_here && few(closed_shown, 6))) {
+        logf("queue slot 35: %u command list(s) submitted to the PC queue (%u of them closed here first); frame "
+             "token %llu not used\n",
+             count, closed_here, token);
+    }
+    return 0;
 }
 
 // Wraps a PC object of the given kind. The number is the last method slot the kind shares with the PC interface
@@ -862,10 +1439,12 @@ Wrap* wrap_kind(void* pc, int kind) {
         // until then.
         return wrap_object(pc, kQueue, "queue", 7,
                            {{7, get_device},
+                            {16, reinterpret_cast<void*>(&w_queue_signal)},
                             {18, reinterpret_cast<void*>(&w_queue_timestamp_frequency)},
                             {30, reinterpret_cast<void*>(&w_presentx)},
                             {31, reinterpret_cast<void*>(&w_queue_slot31)},
-                            {32, reinterpret_cast<void*>(&w_presentx)}});
+                            {32, reinterpret_cast<void*>(&w_presentx)},
+                            {35, reinterpret_cast<void*>(&w_queue_submit)}});
     case kAllocator:
         return wrap_object(pc, kAllocator, "command allocator", 8,
                            {{7, get_device}, {9, reinterpret_cast<void*>(&w_allocator_memory_function)}});
@@ -875,18 +1454,39 @@ Wrap* wrap_kind(void* pc, int kind) {
         // arguments of CopyBufferRegion) and slot 26 (count and a 16-byte transition record, ResourceBarrier).
         // One does not: the image executes its command signatures through slot 61 with exactly the arguments of
         // ExecuteIndirect, which the public list has at slot 59. So slots 3..26 are forwarded by the public
-        // order, slot 61 is ExecuteIndirect, and every other slot says "not provided" with its arguments until
-        // the image's own calls show what it is. The functions for SetDescriptorHeaps, the root descriptor
-        // tables, the render targets and the two clears (w_list_set_heaps, w_list_root_table,
-        // w_list_set_render_targets, w_list_clear_depth, w_list_clear_target) are written but not installed for
-        // that reason.
-        return wrap_object(pc, kList, "command list", 26,
-                           {{7, get_device},
-                            {15, reinterpret_cast<void*>(&w_list_copy_buffer)},
-                            {16, reinterpret_cast<void*>(&w_list_copy_texture)},
-                            {26, reinterpret_cast<void*>(&w_list_barrier)},
-                            {61, reinterpret_cast<void*>(&w_list_execute_indirect)},
-                            {139, reinterpret_cast<void*>(&w_list_begin)}});
+        // order, slots 32 to 52 are answered as the public methods four lower where their arguments can be
+        // checked (see "command-list methods above the part of the order that was measured directly"), slot 61
+        // is ExecuteIndirect, and every other slot says "not provided" with its arguments until the image's own
+        // calls show what it is.
+        {
+            Wrap* list = wrap_object(
+                pc, kList, "command list", 26,
+                {{7, get_device},
+                 {9, reinterpret_cast<void*>(&w_list_close)},
+                 {12, reinterpret_cast<void*>(&w_list_draw<12>)},
+                 {13, reinterpret_cast<void*>(&w_list_draw<13>)},
+                 {14, reinterpret_cast<void*>(&w_list_draw<14>)},
+                 {15, reinterpret_cast<void*>(&w_list_copy_buffer)},
+                 {16, reinterpret_cast<void*>(&w_list_copy_texture)},
+                 {25, reinterpret_cast<void*>(&w_list_set_pipeline)},
+                 {26, reinterpret_cast<void*>(&w_list_barrier)},
+                 {32, reinterpret_cast<void*>(&w_list_set_heaps)},
+                 {33, reinterpret_cast<void*>(&w_list_root_signature<0>)},
+                 {34, reinterpret_cast<void*>(&w_list_root_signature<1>)},
+                 {35, reinterpret_cast<void*>(&w_list_root_table<0>)},
+                 {36, reinterpret_cast<void*>(&w_list_root_table<1>)},
+                 {37, reinterpret_cast<void*>(&w_list_root_constant<0>)},
+                 {38, reinterpret_cast<void*>(&w_list_root_constant<1>)},
+                 {39, reinterpret_cast<void*>(&w_list_root_constants<0>)},
+                 {40, reinterpret_cast<void*>(&w_list_root_constants<1>)},
+                 {50, reinterpret_cast<void*>(&w_list_set_render_targets)},
+                 {51, reinterpret_cast<void*>(&w_list_clear_depth)},
+                 {52, reinterpret_cast<void*>(&w_list_clear_target)},
+                 {61, reinterpret_cast<void*>(&w_list_execute_indirect)},
+                 {139, reinterpret_cast<void*>(&w_list_begin)}});
+            list->recording.store(true);  // a PC list is recording when it is created
+            return list;
+        }
     case kHeap:
         return wrap_object(pc, kHeap, "descriptor heap", 10,
                            {{7, get_device},
@@ -908,7 +1508,8 @@ Wrap* wrap_kind(void* pc, int kind) {
     case kRootSignature:
         return wrap_object(pc, kRootSignature, "root signature", 7, {{7, get_device}});
     case kFence:
-        return wrap_object(pc, kFence, "fence", 10, {{7, get_device}});
+        return wrap_object(pc, kFence, "fence", 7,
+                           {{7, get_device}, {12, reinterpret_cast<void*>(&w_fence_value_address)}});
     case kQueryHeap:
         return wrap_object(pc, kQueryHeap, "query heap", 7, {{7, get_device}});
     default:
