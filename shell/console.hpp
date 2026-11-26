@@ -24,6 +24,16 @@ void* resolve_console_import(HostLibraries& host, const std::string& library, co
 // Records the hosted image's base so GetModuleHandleA/W(NULL) answers with the game, not the shell tool.
 void set_hosted_image_base(void* base);
 
+// The address of a symbol that the image placed at `base` exports by name, or nullptr if it has none.
+void* find_image_export(void* base, const char* name);
+
+// A console image exports its two allocation routines as the data symbol __XMemAllocationHooks__. This hands
+// them to the memory library (xmem.dll, when it is loaded), so XMemAlloc and XMemFree go through the image's
+// own routines as the image expects. Does nothing for an image without that export. `disconnect` takes them
+// away again before the image is removed.
+void connect_allocation_hooks();
+void disconnect_allocation_hooks();
+
 // The folder that answers the console's package drive (G:\). Until this is set, G:\ paths go to Windows as they
 // are. WHIWHI_FILE_TRACE=1 in the environment makes every file call of the image say its path and its answer.
 void set_package_root(const std::wstring& folder);
