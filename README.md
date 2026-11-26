@@ -1,20 +1,52 @@
 # whiwhi
 
-A shell that hosts the original GTA VI executable (Xbox Series 1.0.2.1) on a PC GPU. Original work by ExCorvus
-([ExCorvus](https://github.com/ExCorvus)).
-
-The original game files are the source; the runtime here is our own code. You need your own copy of the game — this
+Original work by [ExCorvus](https://github.com/ExCorvus). You need your own copy of the game; this
 repository contains no game data, keys or executable, and nothing here decrypts or bypasses any protection.
 
-## Status
+## Why a shell, and what it does
 
-The shell loads the unmodified game file, connects its imports and starts it. The game runs its own start-up:
-it sets up its memory, opens its package files, creates a graphics device (Direct3D 12 on Vulkan), reads its
-shader package, creates its textures and render targets, records and submits command lists, and presents
-frames to its own window. **The window shows a black picture**: that is the game's cleared display surface.
-None of the game's picture is drawn yet, because its shaders are not translated and every draw is held. A run
-ends after about 13 seconds, when the game starts its audio and the shell has no audio device to give it. The
-exact state is the "Current state" block at the top of [FINDINGS.md](FINDINGS.md).
+The Xbox Series build of GTA VI (1.0.2.1) is one 120 MB program file in the ordinary 64-bit Windows format, made
+for the same kind of processor a PC has. A PC can execute its code directly: nothing has to be emulated and
+nothing recompiled. What stops it from starting on a PC is everything the program expects to find *around*
+itself. This is what was measured, and what the shell does about each:
+
+1. **System libraries.** The program imports 587 functions from libraries that exist only on the console:
+   memory, graphics, texture layout, file reading, audio, game runtime. The shell provides its own libraries
+   under those names; 586 of the 587 are connected.
+2. **Memory.** At start-up the game reserves two 24 GiB ranges through the console's memory library, one for
+   the processor and one that only the graphics chip reads, plus nine fixed pools. On the console both chips
+   share that memory. A PC graphics card has its own. The shell keeps the game's memory as normal PC memory and
+   shows it to the graphics card whenever a graphics call names an address inside it.
+3. **Graphics calls.** Only three graphics functions are imported; everything else goes through the objects
+   they return. Those objects are the console's variant of Direct3D 12: the methods sit in a different order,
+   some exist only on the console, the game reads and writes fields inside the objects itself, and it names
+   buffers and textures by address in its own memory. The shell hands the game objects in the console's layout,
+   wrapped around a real PC Direct3D 12 device (on Vulkan), and translates each call.
+4. **Shaders.** A shader arrives in a container that looks like a PC one, but the part that should hold portable
+   shader code holds none. In its place is a packed block with the program already compiled into machine code
+   for the console's graphics chip. No PC driver accepts that. The shell unpacks the block in memory, reads
+   every instruction, and writes an equivalent PC shader. The block also says which register carries which
+   resource; the game's own binding description gives only the order and kind, so the shell has to build the
+   PC-side binding for each shader itself.
+5. **Files.** The game reads its packages through the console's storage library, whose objects are laid out
+   differently from the PC's. The shell answers with its own objects in the console layout and reads, read-only,
+   from your game folder.
+6. **Audio.** The game asks for the console's audio processor and has no path for "there is none". A run
+   currently ends there.
+
+So the shell is neither an emulator (no console hardware is recreated) nor a port (the game's code is not
+changed or rebuilt). It is the console's surroundings, rewritten for a PC, with the unmodified game placed
+inside.
+
+The measurements behind each point are in [FINDINGS.md](FINDINGS.md) and [docs/exe-map/](docs/exe-map/).
+
+## Where it stands
+
+Points 1, 2, 3 and 5 work far enough that the game starts, sets itself up, opens all its packages, creates its
+window and presents frames. **The window is black**: that is the game's cleared surface, because point 4 is
+unfinished. The shell reads 927 of the first 1,024 shaders of a run and can write a PC shader for 281 of 505
+pixel and 129 of 227 vertex shaders, but none has been given to the graphics card yet, so every draw is held.
+The exact state is the "Current state" block at the top of [FINDINGS.md](FINDINGS.md).
 
 ## Files
 
