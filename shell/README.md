@@ -99,10 +99,12 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
   `XCRDAPI.dll`.
 - `xgameruntime.h` / `xgameruntime.cpp` → `xgameruntime.dll`. The runtime library the game loads at start:
   initialise and uninitialise answer success, interface queries are logged and answered "no such interface".
-- `acp_hal.h` / `acp_hal.cpp` → `AcpHal.dll`. Console audio hardware library: the memory functions are real, the
-  audio device answers "not implemented".
-- `xapu.h` / `xapu.cpp` → `xapu.dll`, `chad.h` / `chad.cpp` → `chad.dll`. Console audio command libraries:
-  skeletons that log and answer failure.
+- `acp_hal.h` / `acp_hal.cpp` → `AcpHal.dll`. Console audio hardware library: the memory functions are real; the
+  audio device opens the PC's sound output; one start-up command is accepted under a stated exception, the others
+  are refused.
+- `xapu.h` / `xapu.cpp` → `xapu.dll`. The console's Opus decoding channel: packets are decoded by libopus
+  (`opus.dll`, built separately; NOTICE.md) and only results of work done are handed back.
+- `chad.h` / `chad.cpp` → `chad.dll`. Console audio command library: a skeleton that logs and answers failure.
 - `xg_xs.h` / `xg_xs.cpp` → `xg_xs.dll`. The texture layout library: answers with the shell's own untiled layout
   for formats in the public format list, copies rows in and out, refuses everything else.
 - `xbox_bvh_builder.h` / `xbox_bvh_builder.cpp` → `XboxBvhBuilder.dll`. Ray-tracing builder: a skeleton that
