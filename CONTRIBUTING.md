@@ -19,8 +19,8 @@ required when the work is reused.
 
 ## Code
 
-- The runtime is in `shell/` (C++17, MSVC). Build and test with `shell\build.cmd`.
-- A new module comes with a test in `shell/tests/`. Tests use made-up inputs built by hand, never game files.
+- The runtime is in `weave/` (C++17, MSVC). Build and test with `weave\build.cmd`.
+- A new module comes with a test in `weave/tests/`. Tests use made-up inputs built by hand, never game files.
 - `scripts/check_no_game_data.py` uses only the Python standard library.
 
 ## Commits
