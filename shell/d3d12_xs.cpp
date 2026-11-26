@@ -1735,6 +1735,73 @@ HRESULT __stdcall w_device_pipeline(Wrap*, void*, void*, void** out, void*, void
     return 0x80004001L;  // E_NOTIMPL
 }
 
+// Device slot 62: (device, description, 0, 0, identifier, out), measured at the image's call (+0x247fe66,
+// docs/exe-map/SHADER-PATH.md) and at the call of the installation's XboxBvhBuilder.dll (2026-11-26). The
+// description is the public compute pipeline description (0x38 bytes: root signature +0, shader +8/+0x10, node
+// mask +0x18, cached state +0x20/+0x28, flags +0x30); the console call has two more arguments, both 0. A shader
+// that is a plain PC container (a DXIL part, no console part) is what the PC device takes: the description goes
+// to the PC device's CreateComputePipelineState with the root signature's PC object. A console shader is not
+// covered yet (the translator is bound to the shell's layout) and stays answered "not implemented".
+bool is_plain_pc_shader(const void* code, std::size_t size) {
+    const auto* b = static_cast<const unsigned char*>(code);
+    if (!b || size < 32 || std::memcmp(b, "DXBC", 4) != 0) {
+        return false;
+    }
+    std::uint32_t count = 0;
+    std::memcpy(&count, b + 28, 4);
+    if (count == 0 || count > 64 || 32 + 4ull * count > size) {
+        return false;
+    }
+    bool dxil = false;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::uint32_t at = 0;
+        std::memcpy(&at, b + 32 + 4 * i, 4);
+        if (at + 8ull > size) {
+            return false;
+        }
+        if (std::memcmp(b + at, "PRIV", 4) == 0) {
+            return false;
+        }
+        dxil = dxil || std::memcmp(b + at, "DXIL", 4) == 0;
+    }
+    return dxil;
+}
+
+HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, void* zero2, void* identifier,
+                                  void** out) {
+    if (out) {
+        *out = nullptr;
+    }
+    if (!description || !out) {
+        return 0x80070057L;
+    }
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pc{};
+    std::memcpy(&pc, description, sizeof(pc));
+    if (!is_plain_pc_shader(pc.CS.pShaderBytecode, pc.CS.BytecodeLength)) {
+        static std::once_flag once;
+        std::call_once(once, [&] {
+            logf("device slot 62 (returns to %p): a compute pipeline of a console shader (%llu bytes, arguments 3 "
+                 "and 4: %p %p) - not covered yet, answered not implemented\n",
+                 _ReturnAddress(), static_cast<unsigned long long>(pc.CS.BytecodeLength), zero1, zero2);
+        });
+        return 0x80004001L;
+    }
+    pc.pRootSignature = static_cast<ID3D12RootSignature*>(to_pc(pc.pRootSignature));
+    auto* device = static_cast<ID3D12Device*>(self->pc);
+    HRESULT hr = device->CreateComputePipelineState(&pc, *static_cast<const GUID*>(identifier), out);
+    if (hr == static_cast<HRESULT>(0x80004002L)) {
+        hr = device->CreateComputePipelineState(&pc, *pc_identifier(kPipeline), out);
+    }
+    if (hr == 0 && *out) {
+        *out = wrap_kind(*out, kPipeline);
+    }
+    logf("device slot 62 (returns to %p): a compute pipeline of a PC shader (%llu bytes, arguments 3 and 4: %p %p) "
+         "made by the PC device, 0x%lx\n",
+         _ReturnAddress(), static_cast<unsigned long long>(pc.CS.BytecodeLength), zero1, zero2,
+         static_cast<unsigned long>(hr));
+    return hr;
+}
+
 // Device slot 86: (device, {stream size, stream}, identifier, out), the three arguments of the public
 // CreatePipelineState (docs/exe-map/GRAPHICS-CALLS.md section 2.2c). Slot 67 is not this call: from the image's
 // call at image+0x24800db its first argument is not a {size, stream} pair (boot b172), so it stays not provided
@@ -4250,26 +4317,13 @@ HRESULT __stdcall w_presentx(Wrap* self, unsigned int plane_count, const unsigne
     return hr;
 }
 
-} // namespace
-
-extern "C" {
-
-long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, const GUID* riid, void** device) {
-    if (parameters) {
-        const auto* d = static_cast<const unsigned long*>(parameters);
-        logf("D3D12XboxCreateDevice: adapter 0x%llx, parameters block dwords 0x%lx 0x%lx 0x%lx 0x%lx, riid "
-             "{%08lx-%04x-%04x}\n",
-             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(adapter)), d[0], d[1], d[2], d[3],
-             riid ? riid->Data1 : 0u, riid ? riid->Data2 : 0u, riid ? riid->Data3 : 0u);
-    }
-    if (!device) {
-        return 0x80004003L;
-    }
-    *device = nullptr;
-    // Prefer a vkd3d-built d3d12.dll beside the shell (D3D12 on Vulkan, so the game's own memory can be imported
-    // into the GPU zero-copy); fall back to the system's native d3d12.dll.
-    HMODULE d3d12 = nullptr;
-    {
+// The PC library the device comes from: a vkd3d-built d3d12.dll beside the shell (D3D12 on Vulkan, so the
+// program's own memory can be imported into the GPU zero-copy), else the system's native d3d12.dll. The device
+// and the functions of the same library that the program's own libraries import (the root signature serializer
+// and reader) come from this one library, so a description reaches the device the way it was given.
+HMODULE pc_d3d12() {
+    static const HMODULE module = [] {
+        HMODULE d3d12 = nullptr;
         char self[MAX_PATH * 2] = {};
         if (GetModuleFileNameA(nullptr, self, sizeof(self)) > 0) {
             std::string dir = self;
@@ -4288,10 +4342,31 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
                 logf("using the vkd3d-built d3d12.dll at %s (D3D12 on Vulkan)\n", vk.c_str());
             }
         }
+        if (!d3d12) {
+            d3d12 = LoadLibraryA("d3d12.dll");
+        }
+        return d3d12;
+    }();
+    return module;
+}
+
+} // namespace
+
+extern "C" {
+
+long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, const GUID* riid, void** device) {
+    if (parameters) {
+        const auto* d = static_cast<const unsigned long*>(parameters);
+        logf("D3D12XboxCreateDevice: adapter 0x%llx, parameters block dwords 0x%lx 0x%lx 0x%lx 0x%lx, riid "
+             "{%08lx-%04x-%04x}\n",
+             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(adapter)), d[0], d[1], d[2], d[3],
+             riid ? riid->Data1 : 0u, riid ? riid->Data2 : 0u, riid ? riid->Data3 : 0u);
     }
-    if (!d3d12) {
-        d3d12 = LoadLibraryA("d3d12.dll");
+    if (!device) {
+        return 0x80004003L;
     }
+    *device = nullptr;
+    const HMODULE d3d12 = pc_d3d12();
     if (!d3d12) {
         logf("d3d12.dll could not be loaded\n");
         return 0x80004005L;
@@ -4331,6 +4406,7 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {23, reinterpret_cast<void*>(&w_device_copy_descriptors)},
          {24, reinterpret_cast<void*>(&cpu_handle_thunk<24, 2, 3>)},  // copy (count, to, from, type)
          {25, reinterpret_cast<void*>(&w_device_allocation_info)},
+         {62, reinterpret_cast<void*>(&w_device_slot62)},  // compute pipeline (description, 0, 0, identifier, out)
          {70, reinterpret_cast<void*>(&w_device_slot70)},  // a shader view of the image's own memory
          {108, reinterpret_cast<void*>(&w_device_allocation_info2)},
          {26, reinterpret_cast<void*>(&struct_return_thunk<26, 20>)},  // GetCustomHeapProperties
@@ -4485,25 +4561,80 @@ int __stdcall whiwhi_d3d12_object_layout(unsigned long long* image_area_end, uns
 
 } // extern "C"
 
-// Exported under the PC's own plain name: the game's import resolves to this definition, which forwards to the
-// real one in d3d12.dll.
+// Exported under the PC's own plain name: the program's import resolves to this definition, which forwards to the
+// one in the library the device comes from (pc_d3d12). Measured 2026-11-26: the installation's XboxBvhBuilder.dll
+// describes its root signature with flags 0x3000000, two bits the PC's list does not have; Windows' own
+// d3d12.dll refuses them, vkd3d-proton's serializer writes them as given and its device creates the root signature.
 extern "C" __declspec(dllexport) long __stdcall D3D12SerializeVersionedRootSignature(const void* desc, void** blob,
                                                                                     void** error_blob) {
     static const auto fn = reinterpret_cast<long(__stdcall*)(const void*, void**, void**)>(
-        GetProcAddress(LoadLibraryA("d3d12.dll"), "D3D12SerializeVersionedRootSignature"));
+        GetProcAddress(pc_d3d12(), "D3D12SerializeVersionedRootSignature"));
     if (!fn) {
         return 0x80004005L;
     }
-    return fn(desc, blob, error_blob);
+    void* own_error = nullptr;
+    const long hr = fn(desc, blob, error_blob ? error_blob : &own_error);
+    if (hr < 0) {
+        // Recorded only: the answer stays the one d3d12.dll gave. What the caller described, and the reason
+        // d3d12.dll gives in its error text.
+        const auto* d = static_cast<const D3D12_VERSIONED_ROOT_SIGNATURE_DESC*>(desc);
+        std::string line;
+        const auto add = [&line](const char* format, auto... values) {
+            char piece[256];
+            std::snprintf(piece, sizeof(piece), format, values...);
+            line += piece;
+        };
+        add("D3D12SerializeVersionedRootSignature (returns to %p): d3d12.dll refused, 0x%08lx; version %d",
+            _ReturnAddress(), static_cast<unsigned long>(hr), d ? static_cast<int>(d->Version) : -1);
+        if (d && d->Version == D3D_ROOT_SIGNATURE_VERSION_1_1) {
+            const D3D12_ROOT_SIGNATURE_DESC1& r = d->Desc_1_1;
+            add(", %u parameters, %u fixed samplers, flags 0x%x", r.NumParameters, r.NumStaticSamplers,
+                static_cast<unsigned>(r.Flags));
+            for (UINT i = 0; i < r.NumParameters && r.pParameters && i < 16; ++i) {
+                const D3D12_ROOT_PARAMETER1& p = r.pParameters[i];
+                add("; parameter %u: type %d, visibility %d", i, static_cast<int>(p.ParameterType),
+                    static_cast<int>(p.ShaderVisibility));
+                if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+                    add(", %u ranges", p.DescriptorTable.NumDescriptorRanges);
+                    for (UINT k = 0; k < p.DescriptorTable.NumDescriptorRanges && p.DescriptorTable.pDescriptorRanges &&
+                                     k < 16;
+                         ++k) {
+                        const D3D12_DESCRIPTOR_RANGE1& g = p.DescriptorTable.pDescriptorRanges[k];
+                        add(" [kind %d, %u from register %u space %u, flags 0x%x, offset %u]",
+                            static_cast<int>(g.RangeType), g.NumDescriptors, g.BaseShaderRegister, g.RegisterSpace,
+                            static_cast<unsigned>(g.Flags), g.OffsetInDescriptorsFromTableStart);
+                    }
+                } else if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+                    add(", %u constants at register %u space %u", p.Constants.Num32BitValues,
+                        p.Constants.ShaderRegister, p.Constants.RegisterSpace);
+                } else {
+                    add(", register %u space %u, flags 0x%x", p.Descriptor.ShaderRegister, p.Descriptor.RegisterSpace,
+                        static_cast<unsigned>(p.Descriptor.Flags));
+                }
+            }
+        }
+        logf("%s\n", line.c_str());
+        void* const error = error_blob ? *error_blob : own_error;
+        if (error) {
+            auto* text = static_cast<ID3DBlob*>(error);
+            logf("D3D12SerializeVersionedRootSignature: d3d12.dll's reason: %.*s\n",
+                 static_cast<int>(text->GetBufferSize()), static_cast<const char*>(text->GetBufferPointer()));
+        }
+    }
+    if (own_error) {
+        static_cast<ID3DBlob*>(own_error)->Release();
+    }
+    return hr;
 }
 
 // The game itself does not import this one; the upscaler library that ships with the game does (measured from
-// that library's import table). It is the PC's own function: forwarded to d3d12.dll unchanged.
+// that library's import table). It is the PC's own function: forwarded unchanged to the library the device comes
+// from (pc_d3d12).
 extern "C" __declspec(dllexport) long __stdcall D3D12CreateRootSignatureDeserializer(const void* data,
                                                                                     unsigned long long size,
                                                                                     const GUID* riid, void** out) {
     static const auto fn = reinterpret_cast<long(__stdcall*)(const void*, unsigned long long, const GUID*, void**)>(
-        GetProcAddress(LoadLibraryA("d3d12.dll"), "D3D12CreateRootSignatureDeserializer"));
+        GetProcAddress(pc_d3d12(), "D3D12CreateRootSignatureDeserializer"));
     if (!fn) {
         return 0x80004005L;
     }
