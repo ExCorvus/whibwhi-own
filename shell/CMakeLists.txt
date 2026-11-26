@@ -38,6 +38,12 @@ target_link_libraries(xapu PRIVATE onecore)
 add_library(chad SHARED chad.cpp)
 target_compile_definitions(chad PRIVATE WHIWHI_CHAD_BUILD)
 
+# The console's storage library: the one imported entry point (DStorageGetFactory) answered on a PC, forwarded
+# to the PC's dstorage.dll when that library is installed.
+add_library(xcrdapi SHARED xcrdapi.cpp)
+target_compile_definitions(xcrdapi PRIVATE WHIWHI_XCRDAPI_BUILD)
+target_link_libraries(xcrdapi PRIVATE onecore)
+
 # Shell core: image mapper, import table reader, image loader, host-library resolver, console imports, flat
 # hosting model.
 add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp loader.cpp
@@ -108,3 +114,7 @@ add_executable(test_chad tests/test_chad.cpp)
 target_include_directories(test_chad PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_dependencies(test_chad chad)
 add_test(NAME chad COMMAND test_chad $<TARGET_FILE:chad>)
+
+add_executable(test_xcrdapi tests/test_xcrdapi.cpp)
+add_dependencies(test_xcrdapi xcrdapi)
+add_test(NAME xcrdapi COMMAND test_xcrdapi)
