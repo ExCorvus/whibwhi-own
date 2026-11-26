@@ -1,6 +1,7 @@
 // Image loader implementation. See loader.hpp.
 #include "loader.hpp"
 
+#include "console.hpp"
 #include "thread_block.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -364,6 +365,7 @@ bool load_image(const Image& image, const ImportResolver& resolve, LoadedImage& 
     }
     out.base = base;
     out.size = size;
+    set_hosted_image_base(base);
     out.delta = static_cast<std::int64_t>(reinterpret_cast<std::uint64_t>(base) - image.image_base());
 
     const auto fail = [&](const std::string& why) {
