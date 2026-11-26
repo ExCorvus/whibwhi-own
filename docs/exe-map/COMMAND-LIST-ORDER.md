@@ -202,12 +202,12 @@ surrounding code makes the record mean (**I**), and it is the thing to confirm f
 | `+0x190` | 50 | 0x33311 (fn 0x32520) | `(r8 = &block, r9 = 0, stack = rbx)` | record with a block and one extra value | **U** |
 | `+0x1a0` | 52 | 0x50a62d8 (fn 0x50a5eb0) | `(r8 = rax + 96·index + 0x84, a computed address in a table; stack = 0; rdx is set further up and was not followed)` | two-address record | **U** |
 | `+0x1f0` | 62 | 0x979699 (fn 0x979650) | `(rdx = [desc+0x50], r8 = fn 0x4ecc8f0([desc+0x30]), r9 = [desc+0x24], stack = 0)` | record with count/index and a translated address | **U** |
-| `+0x230` | 70 | 0x33390 (fn 0x32520) | `(none)`; 8 bytes were just stored to `ctx+0x123f0` | emit of a pending 8-byte value | **U** |
+| `+0x230` | 70 | 0x33390 (fn 0x32520) | `(xmm1 = float, xmm2 = float)`; the pair is kept at `ctx+0x123f0`/`+0x123f4`, and is the constant (0.0, 1.0) at 0x6159bc0 when word `+0x44` of the depth-stencil state entry is zero | OMSetDepthBounds(min, max); hosted by the shell since boot b149 | **I** (arguments and default measured) |
 | `+0x238` | 71 | 0x2490030 (fn 0x248ffd0) and 5 more | `(rdx = handle from fn 0x4ed46d0, r8d = count, r9d = 0, stack = 0)` | batched record taking a driver handle | **U** |
 | `+0x240` | 72 | 0x6c6672 (fn 0x6c6630), 0x2482b31 (fn 0x2482ae0) | `(rdx = resource/pointer, r8d = global dword 0xa9437ac, r9d = 0x800, stack = 0)`; the other site `(rdx = &table+8·index, r8 = 0, r9 = 0, stack = 1)` | record carrying a pointer and a global constant | **U** |
 | `+0x250` | 74 | 0x2484b0c (fn 0x2484ad0) and 1 more | `(rdx = arg1 of the wrapper, r8d = 7 (constant), r9 = arg3, stack = 1)` | record with a constant 7 | **U** |
 | `+0x258` | 75 | 0x3281a (fn 0x32520) | `(edx = 0 or 1, from bit 6 of `[pipeline+0x55]`)` | one flag | **U** |
-| `+0x3f0` | 126 | 0x32638 (fn 0x32520) | `(edx = state byte, r8 = &16-byte block at rsp+0x110)` | a 16-byte block + state | **U** |
+| `+0x3f0` | 126 | 0x32638 (fn 0x32520) | `(edx = byte 0 of the dword at ctx+0x12380, r8 = &two dwords at rsp+0x110 = bytes 1 and 2 of it)`; skipped when those three bytes did not change (the shifts 8/16 and mask 0xff are the constants at 0x615a8b0 and 0x6159f10) | RSSetShadingRate(rate, combiners[2]); hosted by the shell since boot b149 (only (0, 0, 0) seen so far) | **I** (shape only) |
 | `+0x470` | 142 | 0x329e3 (fn 0x32520) | `(none)`; `ctx+0x123e0` was just set from `ctx+0x12360` | emit of a resource-reference record | **U** |
 
 The four `+0x458`, `+0x490`, `+0x418`, `+0x420` offsets in COMMAND-LIST.md §3 keep their measured shapes; they are
