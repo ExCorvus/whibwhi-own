@@ -30,6 +30,36 @@ WHIWHI_D3D12_XS_API long __stdcall D3D12ConfigureVirtualMemoryX(void* parameters
 // The same call the PC has: forwarded to d3d12.dll unchanged. Declared by d3d12.h with the PC's own types;
 // this library exports it under the same name.
 
+// ---- For the shell and its tests ----------------------------------------------------------------------------
+
+// The records the image passes to the queue's page-mapping call (CopyPageMappingsBatchX), as its page mapper
+// builds them: a batch names an address in the GPU-only view and a list of ranges that follow each other from
+// there; a range of kind 1 shows one pool page, a range of kind 2 stops showing `count` pages.
+typedef struct WhiwhiPageRange {
+    unsigned int kind;
+    unsigned int first_pool_page;
+    unsigned int count;
+} WhiwhiPageRange;
+
+typedef struct WhiwhiPageBatch {
+    unsigned long long destination;
+    unsigned int range_count;
+    const WhiwhiPageRange* ranges;
+} WhiwhiPageBatch;
+
+// Applies page-mapping batches to the library's record, exactly as the queue method does once it has checked
+// the pool. All or nothing: returns 0, or a failure with the record unchanged.
+WHIWHI_D3D12_XS_API long __stdcall whiwhi_d3d12_apply_page_mappings(unsigned int batch_count,
+                                                                     const WhiwhiPageBatch* batches,
+                                                                     unsigned long long pool_pages);
+
+// Which pool page the 64 KiB page holding `address` shows. Returns 1 and writes *pool_page, or 0 when that page
+// of the view shows nothing.
+WHIWHI_D3D12_XS_API int __stdcall whiwhi_d3d12_view_page(unsigned long long address, unsigned int* pool_page);
+
+// How many pages of the view show a pool page right now.
+WHIWHI_D3D12_XS_API unsigned long long __stdcall whiwhi_d3d12_view_pages_shown(void);
+
 #ifdef __cplusplus
 }
 #endif
