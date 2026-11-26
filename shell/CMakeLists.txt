@@ -18,7 +18,9 @@ target_link_libraries(xmem PRIVATE onecore)
 
 # The console's graphics library: the three imported entry points answered on a PC (a wrapped real D3D12
 # device behind D3D12XboxCreateDevice).
-add_library(d3d12_xs SHARED d3d12_xs.cpp)
+add_library(d3d12_xs SHARED d3d12_xs.cpp inflate.cpp shader_container.cpp shader_isa.cpp shader_names.cpp
+                            shader_program.cpp shader_shape.cpp shader_walk.cpp shader_flow.cpp
+                            shader_emit_flow.cpp shader_access.cpp shader_dxbc.cpp shader_pc.cpp)
 target_compile_definitions(d3d12_xs PRIVATE WHIWHI_D3D12_XS_BUILD)
 target_link_libraries(d3d12_xs PRIVATE onecore)
 
@@ -60,7 +62,10 @@ target_link_libraries(xgameruntime PRIVATE onecore)
 # Shell core: image mapper, import table reader, image loader, host-library resolver, console imports, flat
 # hosting model.
 add_library(whiwhi_shell STATIC console.cpp hosting.cpp host_libraries.cpp image.cpp imports.cpp loader.cpp
-                               offline.cpp shader_container.cpp shader_isa.cpp shader_translate.cpp spirv.cpp)
+                               offline.cpp shader_access.cpp shader_container.cpp shader_dxbc.cpp
+                               shader_emit_flow.cpp shader_flow.cpp shader_isa.cpp shader_meaning.cpp
+                               shader_names.cpp shader_pc.cpp shader_program.cpp shader_shape.cpp
+                               shader_translate.cpp shader_walk.cpp spirv.cpp inflate.cpp)
 target_include_directories(whiwhi_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(whiwhi_shell PUBLIC whiwhi_seat)
 
@@ -133,6 +138,59 @@ add_test(NAME shader COMMAND test_shader)
 add_executable(test_shader_container tests/test_shader_container.cpp)
 target_link_libraries(test_shader_container PRIVATE whiwhi_shell)
 add_test(NAME shader_container COMMAND test_shader_container)
+
+# The writer for a DXBC container holding a shader-model-5.1 program; the system disassembler checks it.
+add_executable(test_shader_dxbc tests/test_shader_dxbc.cpp)
+target_link_libraries(test_shader_dxbc PRIVATE whiwhi_shell)
+add_test(NAME shader_dxbc COMMAND test_shader_dxbc)
+
+add_executable(test_shader_walk tests/test_shader_walk.cpp)
+target_link_libraries(test_shader_walk PRIVATE whiwhi_shell)
+add_test(NAME shader_walk COMMAND test_shader_walk)
+
+# The public names of the instructions the walk reads, and the groups a translator works through.
+add_executable(test_shader_names tests/test_shader_names.cpp)
+target_link_libraries(test_shader_names PRIVATE whiwhi_shell)
+add_test(NAME shader_names COMMAND test_shader_names)
+
+add_executable(test_shader_shape tests/test_shader_shape.cpp)
+target_link_libraries(test_shader_shape PRIVATE whiwhi_shell)
+add_test(NAME shader_shape COMMAND test_shader_shape)
+
+# The packed program inside a shader container, found and unpacked in memory (hand-built containers).
+add_executable(test_shader_program tests/test_shader_program.cpp)
+target_link_libraries(test_shader_program PRIVATE whiwhi_shell)
+add_test(NAME shader_program COMMAND test_shader_program)
+
+# The control flow of a decoded program: blocks, edges, dominators, loops, and the region tree (hand-built words).
+add_executable(test_shader_flow tests/test_shader_flow.cpp)
+target_link_libraries(test_shader_flow PRIVATE whiwhi_shell)
+add_test(NAME shader_flow COMMAND test_shader_flow)
+
+# Any control-flow graph as code a shader language can run: the same block order as the graph under the same
+# branch decisions, for hand-built shapes and 2,000 random graphs (no GPU, no game data).
+add_executable(test_shader_emit_flow tests/test_shader_emit_flow.cpp)
+target_link_libraries(test_shader_emit_flow PRIVATE whiwhi_shell)
+add_test(NAME shader_emit_flow COMMAND test_shader_emit_flow)
+
+# The pass that writes a PC shader for a console program: the written program against the reference interpreter
+# on random hand-built programs, single instructions, a pixel and a vertex program read back by the system's
+# shader disassembler (no GPU, no game data).
+add_executable(test_shader_pc tests/test_shader_pc.cpp)
+target_link_libraries(test_shader_pc PRIVATE whiwhi_shell)
+add_test(NAME shader_pc COMMAND test_shader_pc)
+
+
+
+# What the memory, image, interpolation, export and whole-wave instructions touch, on hand-built words.
+add_executable(test_shader_access tests/test_shader_access.cpp)
+target_link_libraries(test_shader_access PRIVATE whiwhi_shell)
+add_test(NAME shader_access COMMAND test_shader_access)
+
+# What the covered arithmetic, move, compare and bit instructions compute, on one hand-built lane.
+add_executable(test_shader_meaning tests/test_shader_meaning.cpp)
+target_link_libraries(test_shader_meaning PRIVATE whiwhi_shell)
+add_test(NAME shader_meaning COMMAND test_shader_meaning)
 
 # The network boundary: every imported network name is either refused with its documented failure value and error,
 # or passed through; the log line appears once per function; the counters count every call.
