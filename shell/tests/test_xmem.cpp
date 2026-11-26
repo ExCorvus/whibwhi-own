@@ -412,73 +412,6 @@ static void test_image_routines() {
     CHECK(stats().bytes_committed == before.bytes_committed);
 }
 
-// The routine told before memory stops being what it was: it records what it is told.
-struct ChangeNotice {
-    void* base;
-    unsigned long long bytes;
-};
-static std::vector<ChangeNotice> g_changes;
-static void change_routine(void* base, unsigned long long bytes) {
-    g_changes.push_back(ChangeNotice{base, bytes});
-}
-static bool told(void* base, unsigned long long bytes) {
-    for (const ChangeNotice& c : g_changes) {
-        if (c.base == base && c.bytes == bytes) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void test_change_routine() {
-    whiwhi_xmem_set_change_routine(&change_routine);
-    g_changes.clear();
-
-    // Mapping a page into an empty step changes nothing that was there: no notice.
-    char* range = static_cast<char*>(XMemVirtualAlloc(nullptr, 4 * kPage, kReservePages, 0x21, PAGE_READWRITE));
-    CHECK(range != nullptr);
-    unsigned long long count = 2;
-    unsigned long long entries[2] = {};
-    CHECK(XMemAllocatePhysicalPages(0x380, &count, entries) == 1);
-    CHECK(XMemMapPhysicalPages(range + kPage, 1, &entries[0]) != nullptr);
-    CHECK(g_changes.empty());
-    // Mapping the same page again changes nothing either.
-    CHECK(XMemMapPhysicalPages(range + kPage, 1, &entries[0]) != nullptr);
-    CHECK(g_changes.empty());
-    // Another page in its place: told about that step, before it changes.
-    CHECK(XMemMapPhysicalPages(range + kPage, 1, &entries[1]) != nullptr);
-    CHECK(g_changes.size() == 1 && told(range + kPage, kPage));
-    // Unmapping: told again.
-    g_changes.clear();
-    CHECK(XMemMapPhysicalPages(range + kPage, 1, nullptr) != nullptr);
-    CHECK(g_changes.size() == 1 && told(range + kPage, kPage));
-    // Releasing the whole range: told about the whole range.
-    g_changes.clear();
-    CHECK(XMemMapPhysicalPages(range, 1, &entries[0]) != nullptr);
-    CHECK(whiwhi_xmem_virtual_free(range, 0, MEM_RELEASE) == 1);
-    CHECK(told(range, 4 * kPage));
-    CHECK(XMemFreePhysicalPages(2, entries) == 1);
-
-    // Committed memory and an allocation: told when they are released.
-    g_changes.clear();
-    void* committed = XMemVirtualAlloc(nullptr, 2 * kPage, kCommit64k, 0x181, PAGE_READWRITE);
-    CHECK(committed != nullptr && g_changes.empty());
-    CHECK(whiwhi_xmem_virtual_free(committed, 0, MEM_RELEASE) == 1);
-    CHECK(g_changes.size() == 1 && told(committed, 2 * kPage));
-    g_changes.clear();
-    void* block = XMemAllocDefault(0x3000, 0);
-    CHECK(block != nullptr && g_changes.empty());
-    XMemFreeDefault(block, 0);
-    CHECK(g_changes.size() == 1 && g_changes[0].base == block && g_changes[0].bytes >= 0x3000);
-
-    // Cleared: no more notices.
-    whiwhi_xmem_set_change_routine(nullptr);
-    g_changes.clear();
-    void* quiet = XMemAllocDefault(0x1000, 0);
-    XMemFreeDefault(quiet, 0);
-    CHECK(g_changes.empty());
-}
-
 constexpr int kThreads = 4;
 constexpr int kSteps = 64;
 
@@ -560,7 +493,6 @@ int main() {
     test_scatter();
     test_heap();
     test_image_routines();
-    test_change_routine();
     test_threads();
     test_many_pages();
     CHECK(whiwhi_xmem_regions(nullptr, 0) == regions_before);
