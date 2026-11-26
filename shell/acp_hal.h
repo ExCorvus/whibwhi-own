@@ -2,13 +2,13 @@
 //
 // A console image imports these nine functions by name from "AcpHal.dll". The signatures are read off the
 // image's own call sites (docs/console-libs/acp-xapu.md names every site); no header of the console's library
-// is involved. The library is the only way the image reaches the audio DSP: it creates an APU heap from which
-// the image allocates the ring buffers it decodes into, it hands out the "shape contexts" the DSP reads, and it
-// translates between CPU addresses and 32-bit APU addresses.
+// is involved.
 //
-// Nothing of that exists on a PC. This skeleton is honest about it: every export says its name and arguments
-// once on stderr and answers with a failure. It never reports success it cannot back with real memory or a real
-// device, because the image acts on success (it dereferences the handle an AcpHalCreate success promises).
+// A PC already has the unified memory the console's APU shares, so the memory side is real on a PC: ApuCreateHeap
+// creates a committed heap below 4 GiB, ApuAlloc bump-allocates from it, the shape contexts are a real zeroed
+// array, and ApuMapVirtualAddress/ApuMapApuAddress are the identity map (the APU address of a byte is the byte's
+// own address). AcpHalCreate is the one thing a PC cannot provide - the audio device itself - so it still answers
+// E_NOTIMPL and writes no handle rather than inventing an object the image would wait on forever.
 #ifndef WHIWHI_SHELL_ACP_HAL_H
 #define WHIWHI_SHELL_ACP_HAL_H
 
