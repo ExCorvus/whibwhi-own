@@ -102,9 +102,9 @@ end of a PC vtable.
 
 | slot | what the image does with it | where read |
 |---|---|---|
-| 48 | creates five objects with a 16-byte description, riid, out, right after the queue | fn 0x2478440 |
+| 48 | creates four more command queues right after the main one: (device, 16-byte description, the public identifier of ID3D12CommandQueue, output). The descriptions are {2, 0, 1, 0}, {2, 0, 2, 0}, {2, 0, 3, 0}, {2, 0, 0, 1}; the main queue (slot 8) uses {0, 0, 0, 1}. A failure is fatal by the game's own check. Meaning of the third number: not known | fn 0x2478440, calls at 0x2478813, 0x2478853, 0x2478893, 0x24788d3 |
 | 49 | one call with two integers, after a version-string comparison | fn 0x2478440 |
-| 55 | derived pipeline state ("CreateDerivedPipelineStateX" in the old layer's logs) | fn 0x2479f40 |
+| 55 | derived pipeline state (a pipeline made from a base pipeline of slot 57) | fn 0x2479f40 |
 | 57 | base pipeline state (a pipeline derived from it) | fn 0x24774c0 |
 | 61 | one call in the shader system | fn 0x12b9800 |
 | 62 | compute pipeline state: desc {pointer at +0, count 1 at +0x18}, riid, out | fn 0x247fd30 |
@@ -121,9 +121,19 @@ end of a PC vtable.
 | 132 | notification from the fatal stop (argument 3) | fn 0x2474500 (MAP.md §2.1) |
 | 133 | placed resource at a title address (4 callers) | 0x6dc20, 0x193de10, 0x1e86440, 0x56f7fc0 |
 
-The console-only slots above 43 are answered as not provided today (logged once each). The next ones the shell
-must answer for a frame are 73 (command list), 78-81 (frame events) and 148 (upload memory, seen in the old
-layer's logs but its call site was not read yet in this image).
+The console-only slots above 43 are answered as not provided today (logged once each). A run stops at the first
+of them, slot 48. After it, the ones the shell must answer for a frame are 73 (command list) and 78-81 (frame
+events).
+
+### 2.2a Argument order of methods that return a structure (measured)
+
+At its three calls of slot 26 (0x247870d, 0x2478731, 0x2478758) the image passes the place for the returned
+structure in rcx and the device in rdx, then the method's arguments (r8d = 1, r9d = heap type 1, 2, 3). A PC
+object takes the object in rcx and the place in rdx. The shell's wrapper swaps the two for the
+structure-returning methods (device 25, 26, 43; descriptor heap 8, 9, 10; queue 18). Only slot 26 is measured;
+the others are given the same order by inference and need checking at their call sites.
+
+The device is asked for with the public identifier of ID3D12Device11 ({5405c344-d457-444e-b4dd-2366e45aee39}).
 
 ### 2.3 Queue slots
 
@@ -203,8 +213,7 @@ The game keeps **one** builder object for the process: constructed in fn 0x24784
 | `CopyRaytracingAccelerationStructure(list4, dst, src, mode)` | 2 sites | copies between structures |
 | `XMemVirtualQuery` | (its own import, not the game's) | the builder asks our **xmem.dll** for it |
 
-The rehydration path is the one that stopped the old layer at world start (FINDINGS, boot 35/36). Reading fn
-0xea6c60 shows what it hands the builder:
+Reading fn 0xea6c60, the rehydration path, shows what it hands the builder:
 
 - it walks the game's build descriptions in batches of at most 16;
 - for each description it converts the stored **GPU-view address to the CPU-view address** through the view
