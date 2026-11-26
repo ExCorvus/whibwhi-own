@@ -335,7 +335,7 @@ its own layout) and without a proven reading of +0x48's fourth argument, which i
 ## 11. What was not done in this pass
 
 - No code: §8.1 and §8.2's unknowns mean any value written into the layout would be a guess, and the copy methods
-  write into the game's memory, so a guess there is a corruption, not a log line. `shell/xg_xs.cpp` is unchanged
+  write into the game's memory, so a guess there is a corruption, not a log line. `weave/xg_xs.cpp` is unchanged
   and still refuses both exports with a log line each.
 - No run: this session does not start the game. The next run should log `XGCreateTextureComputer`'s description
   (type, width, height, depth, mips, format, element size, flags) and the four call sites' return addresses, so the
