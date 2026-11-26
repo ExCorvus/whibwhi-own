@@ -389,4 +389,9 @@ Nothing is written to disk, and no shader state is kept between calls.
   declared over a range without an upper end this disassembles as `dcl_sampler S0[0:*], mode_default,
   space=22344` and `S0[r1.x + 0]`. Checked for the sampler; the resource form is written the same way and not
   checked.
+- **A constant buffer element taken at run time** (`constant_buffer_source_indexed`): the third index of the
+  operand (the 16-byte element) is given as "a number plus the value of a register component", the same form
+  as above at the third index's three bits. The buffer is then declared `dynamicIndexed`. Disassembles as
+  `dcl_constantbuffer CB0[2:2][4096], dynamicIndexed, space=1` and `CB0[2][r9.x + 2].xyzw`. Checked by the
+  system disassembler in the test of the pass (`tests/test_shader_pc.cpp`).
 - Still true of all of it: the proof is disassembly, not a graphics device.
