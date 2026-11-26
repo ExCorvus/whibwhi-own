@@ -33,6 +33,10 @@ add_executable(connect_imports tools/connect_imports.cpp)
 target_link_libraries(connect_imports PRIVATE whiwhi_shell)
 add_dependencies(connect_imports xmem)
 
+add_executable(boot_image tools/boot_image.cpp)
+target_link_libraries(boot_image PRIVATE whiwhi_shell)
+add_dependencies(boot_image xmem)
+
 enable_testing()
 
 add_executable(test_hosting tests/test_hosting.cpp)
