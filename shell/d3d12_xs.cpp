@@ -165,6 +165,10 @@ struct Wrap {
     // Whether the last primitive topology the image set on the list is one the PC library has. Draws are held
     // while it is not: the PC library would draw them as something else.
     std::atomic<bool> topology_known{true};
+    // A pipeline state written against the shell's layout is set on the list. Its draws need the arguments buffer
+    // and the shell's heaps filled from the game's root arguments, which is not built yet; until it is, they are
+    // held (a draw with the game's own root signature bound would read the wrong places).
+    std::atomic<bool> shell_layout_set{false};
 
     Wrap(void* pc_object, int kind_number, const char* kind_name)
         : vt(nullptr), image_area{}, pc(pc_object), refs(1), kind_id(kind_number), kind(kind_name) {}
@@ -1021,6 +1025,7 @@ void __stdcall w_list_set_pipeline(Wrap* self, void* state) {
     static std::atomic<int> shown{0}, refused{0};
     if (kind_of(state) != kPipeline) {
         self->pipeline_set.store(false);
+        self->shell_layout_set.store(false);
         if (few(refused)) {
             logf("command list slot 25: %p is not a pipeline state of this library - not passed on; draws on this "
                  "list are not carried out until one is set\n",
@@ -1028,10 +1033,13 @@ void __stdcall w_list_set_pipeline(Wrap* self, void* state) {
         }
         return;
     }
-    static_cast<ID3D12GraphicsCommandList*>(self->pc)->SetPipelineState(static_cast<ID3D12PipelineState*>(to_pc(state)));
-    self->pipeline_set.store(true);
+    // Every pipeline state this library makes is written against the shell's layout (device slot 86). It is not
+    // set on the PC list until the list's arguments for that layout are filled; draws are held meanwhile.
+    self->pipeline_set.store(false);
+    self->shell_layout_set.store(true);
     if (few(shown)) {
-        logf("command list slot 25: pipeline state set on the PC list\n");
+        logf("command list slot 25: a pipeline state of the shell's layout named - not set on the PC list yet (its "
+             "arguments are not filled yet); draws on this list are held\n");
     }
 }
 
@@ -1081,6 +1089,16 @@ bool pipeline_ready(Wrap* self, const char* what) {
     }
     if (self->pipeline_set.load()) {
         return true;
+    }
+    if (self->shell_layout_set.load()) {
+        static std::atomic<unsigned long long> held{0};
+        const unsigned long long nth = held.fetch_add(1) + 1;
+        if ((nth & (nth - 1)) == 0) {
+            logf("command list: %s asked with a pipeline state of the shell's layout named (time %llu) - NOT DRAWN, "
+                 "its arguments are not filled yet\n",
+                 what, nth);
+        }
+        return false;
     }
     const unsigned long long nth = g_draws_without_pipeline.fetch_add(1) + 1;
     if ((nth & (nth - 1)) == 0) {
