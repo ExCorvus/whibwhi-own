@@ -534,3 +534,178 @@ the same order, each table holding the entries the first table lists at their pl
 arguments the game sets against that one. Register spaces come from the container's public resource list for
 declared resources; for an entry no program of the pipeline declares, the class and space are not established.
 Not built.
+
+## 21. Any control flow as structured code
+
+The target language has nested control flow only: if / else / endif, loop / endloop, break, and continue. Section
+17 builds a tree of regions for that, and section 18 measured that it covers 538 of the 701 analysed programs and
+named the rest: a loop header with two paths into its body, a loop that leaves to two blocks, and a block that
+would appear twice. Section 18 ended by saying that the dispatch-loop form was not built; this section is that
+pass. `shell/shader_emit_flow.{hpp,cpp}` writes any graph `flow_of` accepts as a program in that language, and
+`shell/tests/test_shader_emit_flow.cpp` proves by execution that the program runs the same blocks in the same
+order as the graph. Everything below is measured by that test on programs built word by word in it, unless it is
+marked as a source.
+
+**The form.** A flat list of items in emission order: `BLOCK(n)`, `IF(n)` with which edge is the then side,
+`ELSE`, `ENDIF`, `LOOP`, `ENDLOOP`, `BREAK`, `CONTINUE`, and - only when the graph cannot be written nested -
+`SET_NEXT(k)` and `IF_NEXT(k)` over a variable `next`, whose value `END` means the program has ended. A `BLOCK`
+item means the block's instructions up to, not including, the program-control word it ends with: a branch is
+replaced by the items, and an end-of-program word ends the program after that block. So the program's text ends
+where the program ends, and no return statement is needed.
+
+**The nested form, for the graphs `structure_of` writes.** The tree is read from the outside in and becomes
+items, with three things added that the tree names but does not spell out:
+
+- a loop's header block is named by the tree (the loop region's block) but is not placed in it; it is emitted as
+  the first item inside the loop, and its own branch becomes the loop's test (`if (the branch leaves) break`);
+- a block whose branch leaves the loop is listed by the tree as a break block (or a continue block); it is
+  emitted as `BLOCK`, then `IF (taken) BREAK ELSE <rest of the region> ENDIF`, so the rest runs only on the edge
+  that stays inside;
+- an inner loop that leaves to the enclosing loop's exit is followed by a `BREAK`; the tree does not list that
+  edge anywhere, and without it the outer loop would run again.
+
+The seven tree shapes of section 17 come out as: straight line 1 item; if-then 5; if-then-else 7; nested ifs 9;
+a loop 10; a loop with a break 15; two nested loops 19. How many items an if costs is fixed: the branch block's
+item, the `IF`, the arm, the `ELSE` when there is one, and the `ENDIF`.
+
+**The dispatch loop, and how much of the program it takes.** The pass first asks `structure_of` for the whole
+graph. If that is refused, it looks for a cut: a block `c` other than the entry such that (a) the blocks a run can
+reach from `c` do not include the entry, (b) every edge from outside that set enters it at `c`, and (c) every
+natural loop lies wholly inside or wholly outside the set. The smallest such set is tried first. Its prefix is
+written by building a graph of the prefix blocks plus one extra block, ending the program, that stands for the
+dispatch, and asking `structure_of` to write that graph: the prefix is accepted only when the extra block comes
+out as the last block, at the top level, so the nested part is complete before the dispatch begins. Then come the
+prefix items, `next = c`, and one dispatch loop over the set: `LOOP; if next == b0 { BLOCK(b0); next = ... }
+else if next == b1 { ... } ...; if next == END break; ENDLOOP`, where a block ending in a conditional branch sets
+`next` with an `IF` on its own condition, and a block ending the program sets `next = END`. If no cut is usable
+the whole reachable program is one dispatch loop entered at the entry block.
+
+Measured on the three shapes section 17 refuses and on the irreducible graph:
+
+| shape | blocks | items | what the pass did |
+|---|---|---|---|
+| loop whose header has two paths into the body | 6 | 39 | block 0 nested, 5 blocks dispatched from block 1 |
+| loop that leaves to two blocks | 6 | 39 | block 0 nested, 5 blocks dispatched from block 1 |
+| diamond whose arm is shared (a block twice) | 5 | 38 | no prefix possible; the whole program is dispatched |
+| irreducible (two blocks entered from outside) | 3 | 24 | no cut is usable; the whole program is dispatched |
+
+The crossing-edge shape is the one that cannot keep anything nested: every block after the first is reached from
+two sides, so there is no single-entry suffix to cut at. The two loop shapes keep the code before the loop.
+
+**Proof by execution.** The test holds two small interpreters. One walks the graph block by block; the other runs
+the item list, with a stack for the loops and the `next` variable. Both are given the same branch decision for
+each (block, visit count), from a hash of the two, so both see the same decision at the same visit. They must
+visit the same blocks in the same order and agree on whether the program ended. Measured: the twelve hand-built
+shapes with eight decision sequences each, and 2,000 random programs (1 to 40 instructions, random branches, the
+end always reachable) with three sequences each, 6,000 comparisons in all - zero mismatches. Of the 2,000, 665
+(33 %) were written nested with no helper variable and 1,335 needed a dispatch loop, 421 of those after a nested
+prefix. A one-off run of 50,000 programs and 150,000 comparisons was also clean; that larger number is not part
+of the committed test.
+
+**Size.** For the nested form the cost is about one item per block plus one `IF`/`ELSE`/`ENDIF` set per branch:
+1.22 items per block over the 665 nested random programs. The dispatch form costs, per block, one `IF_NEXT`, one
+`ENDIF`, the block item, and its transfer (one item for an unconditional branch, fallthrough or end of program,
+five for a conditional branch), plus one `ELSE` between neighbouring arms and five items for the loop and the END
+test: about nine items per block when every block ends in a branch. Over the 1,335 dispatched random programs the
+average was 77.6 items for 11.4 blocks (6.8 items per block; the random graphs are smaller and less branchy than
+the average game program). This is a size cost of the form, not a measurement on the game's programs: no run of
+the game was made for this work.
+
+**What is not established, and what is not done.**
+
+- The pass has not been run on the game's 163 refused programs. No run of the game was made for this work, and
+  the counts of section 18 are the reasons `structure_of` gave in the earlier run, not this pass's output.
+- The emitted form is this project's own. The back end's spelling of the items (its syntax for a loop, and how a
+  `next` variable becomes a register or an index) is not written; that is a later pass.
+- The question of section 17 stands: a conditional branch is treated as "either edge possible", and how the
+  hardware's execution mask divides a wave's work is not established here.
+- A structurer of the relooper family (Zakai, "Emscripten: an LLVM-to-JavaScript compiler", 2011) can sometimes
+  avoid the helper variable by copying blocks; that family is cited only, and not implemented, because a copied
+  block means the block's instructions run at two places in the emitted program, which this project's translator
+  has no need of yet.
+- While building this, one property of the graph facts was seen and worked with rather than changed: a natural
+  loop as `flow_of` reports it can list a block that no path reaches (a dead block that falls into the loop body -
+  the hand-built "loop whose header has two paths into the body" has one, and random programs showed the same).
+  For a block no run can enter this makes no difference to the program's meaning, but `structure_of` requires every
+  loop block it is given to be placed, so the front graph of a cut lists only the reachable loop blocks. This is a
+  fact about the loop list, not a wrong answer from `shader_flow.*`, and that file was not changed.
+
+## 22. What section 21's pass makes of the game's programs (boot b114; measured)
+
+Counted in a run (boot b114) over the programs of the first 1,024 different containers. The flow analysis
+accepted 700 of them in that run (505 pixel, 194 compute, 1 vertex; which containers are among a run's first
+1,024 differs a little from run to run, so section 18 has 701). The pass writes every one of them:
+
+| | pixel | compute | vertex |
+|---|---|---|---|
+| nested, no helper variable | 401 | 135 | 1 |
+| one loop around a choice of the next block, over all blocks | 104 | 32 | - |
+| a nested start, then such a loop over a part of the blocks | - | 27 | - |
+| not written | 0 | 0 | 0 |
+
+The 226 vertex programs the flow analysis does not accept are the ones that call through a register near their
+start (section 18); nothing about them is counted here. The choice loops of the pixel programs run 5 to 16
+blocks (two run up to 4); of the compute programs 36 run more than 64 blocks.
+
+## 23. A program's inputs and outputs against what its container declares (boots b111-b113; measured)
+
+A container has two public parts that list the inputs and the outputs the shader declares ('ISG1' and 'OSG1':
+for each element a name, an index, a system value number, a register and a component mask).
+`shell/shader_program.*` reads them (`read_signature`), and the run counts, for each program of a run (505 pixel and 227 vertex programs),
+whether the simple links between those lists and the program's own instructions hold. They do:
+
+**Pixel programs (505).**
+- An interpolation instruction names its input by an attribute number and a channel. In all 500 programs
+  that interpolate, attribute number n is the n-th input element that is not a system value, taken in rising
+  order of their registers, and every channel used lies in that element's mask. (In 489 the attribute number
+  is also the element's register itself; the other 11 declare a system value before their ordinary inputs,
+  which moves the registers but not the attribute numbers.) 5 programs neither interpolate nor declare an
+  ordinary input. In 13 programs some declared input is never interpolated.
+- 146 programs declare the position input (system value 1). Vector registers read before they are written:
+  v0 and v1 in 431 programs (354 without a declared position, 77 with), v0 to v3 in 68 programs that all
+  declare the position, v2 alone in 1, none in 5. Reading, not established: v0 and v1 carry the two
+  interpolation weights and, when the shader reads the position, v2 and v3 carry its x and y.
+- Exports: in all 505 the colour export targets are exactly the registers of the render-target output
+  elements (system value 64) and every such element is exported; no program exports or declares depth. Every
+  export is in the compressed form (two 16-bit values in a register), every export carries the valid-mask
+  flag, and the done flag is on the last export only.
+
+**Vertex programs (227).**
+- Inputs: the elements' registers are 0, 1, 2, ... with one element each (227 of 227). The vector registers a
+  program reads before writing them, from v4 up, are exactly the components the shader reads when element r
+  takes the four registers v(4 + 4r) to v(7 + 4r), one for each component (227 of 227; the other reading tried,
+  one register for each component in the mask, holds in 167). No register below v4 is read, except v0 by the
+  one program whose only input is the vertex number (system value 6) - the one vertex program that does not
+  call through s4 either.
+- Outputs: a parameter export to target 32 + k is the k-th output element that is not the position, in rising
+  order of their registers (224 of 227). The other 3 declare the position as their only output and still
+  export one parameter (target 32), which nothing declares. The position is exported to target 12 in all
+  227; no vertex export is compressed, none has the valid-mask flag, and the done flag is not on the last
+  export.
+
+**Samplers loaded from memory.** Every sampler descriptor a pixel program loads through a register is at
+offset 0 of what that register points at (989 uses); compute programs load at 16-byte places 64 and 82 (11
+uses). In the same run the image made its samplers at places 0 to 10 of its sampler heap (device slot 61), so
+places 64 and 82 held nothing yet. That a program's place is a place in the sampler heap rests on the root
+signature flag (section 20 and FINDINGS.md, boots b100-b108) and is not confirmed by this.
+
+What this gives the translator: the declared inputs and outputs of the PC shader it writes can be taken from
+the container's own two lists, and each is tied to the console program by a rule that held for every program
+counted - attribute number to input element, vertex input element to four vector registers, parameter and
+colour export targets to output elements.
+
+## 24. The PC container writer and what is still between the pieces
+
+`shell/shader_dxbc.*` (namespace `whiwhi::shell::dxbc`; `docs/SHADER-CONTAINER-WRITER.md`) writes the
+container the PC graphics library compiles: the two signature parts and a shader-model-5.1 program, with the
+container's checksum. Its test builds eight shaders by hand and has the system's own shader disassembler read
+each one back. It has not been given to the graphics device.
+
+So the pieces exist separately: the program and its tables out of the container (sections 15, 16), the fields
+of every instruction (14, 19), what the common arithmetic instructions compute (docs/SHADER-MEANINGS.md), the
+control flow as nested code (17, 21, 22), the inputs and outputs (23), and a writer for the PC's container.
+What joins them is not written: a pass that walks a program's items and writes, instruction by instruction,
+the PC instructions that compute the same thing for one pixel, vertex or thread, with the resources declared
+from the module's tables and a PC root signature to match (section 20). Until that pass exists and its output
+has drawn a picture that can be compared with what the game means to show, none of the above has been checked
+by eye.
