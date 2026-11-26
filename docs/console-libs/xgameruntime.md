@@ -7,7 +7,7 @@ module is asked for nothing in this document that needs the game started. RVAs a
 How to read the markings: **V** = read in the image's code or data, **I** = inferred from what the code does
 (reasoning stated), **U** = unknown.
 
-## 0. What the shell answers today (added after the map; seen in runs)
+## 0. What the weave answers today (added after the map; seen in runs)
 
 - Every pair is answered "no such interface", except pair 6 below, the system interface
   (`{e349bd1a-fc20-4e40-b99c-4178cc6b409f}` / `{1861cf2e-e18b-4834-a9f5-b4a4e6efb4cf}`).
@@ -15,7 +15,7 @@ How to read the markings: **V** = read in the image's code or data, **I** = infe
   for a size); one caller, fn `0x3dda560`, then compares the text with `RETAIL`, `CERT`, `RKTR.99`, `CERT.DEBUG`
   or a text beginning `RKTR` and stops at a breakpoint of its own (image+`0x3dda76b`) when none matches. This is
   the one refusal among the pairs that did stop the game (section 3 said none does; that was wrong for this one).
-- **I** The argument list and the values are the public `XSystemGetXboxLiveSandboxId`. The shell answers the
+- **I** The argument list and the values are the public `XSystemGetXboxLiveSandboxId`. The weave answers the
   sandbox name this PC stores, or `RETAIL` when it stores none, which is the default Microsoft's public page
   documents. The methods at `+0x18` and `+0x28` (fn `0x55dd13c`, fn `0x55dd1d0`; three arguments, an error code
   back; **U** what they are) and every other position answer "not implemented".
@@ -335,7 +335,7 @@ method **+0x20**, one argument) and `XNetworkingQuerySecurityInformationForUrlAs
   console-only device function (slot 48). So refusing any of these *by itself* has never stopped the game. (V,
   earlier run's log and FINDINGS.md)
 
-**Conclusion for the shell:** nothing here has to be answered for the game to keep running. Answering one is about
+**Conclusion for the weave:** nothing here has to be answered for the game to keep running. Answering one is about
 making a feature work, not about passing a gate.
 
 ### (b) On the path to a first frame — the six the game asks for before the device exists
@@ -414,7 +414,7 @@ Both are reached when an export is missing, and both are *after* the library han
 fn `0x55de048` also has a path that would call it (when `QueryApiImpl` answers `REGDB_E_CLASSNOTREG`), but our
 answer is `E_NOINTERFACE`, so in our runs it is never reached. (V)
 
-One consequence for the shell: `XErrorReport` is only ever called with a code and a message string, so answering it
+One consequence for the weave: `XErrorReport` is only ever called with a code and a message string, so answering it
 with success (as the skeleton does) changes nothing that the game reads.
 
 ## 6. Unknowns
