@@ -19,9 +19,13 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 - `host_libraries.hpp` / `host_libraries.cpp` — connects an import to the library of the same name: the shell's
   own library beside the tool first, otherwise the PC's.
 - `console.hpp` / `console.cpp` — the few imports that are not answered by the same-named library: `VirtualFree`
-  goes to the memory library, and `GetModuleHandleA/W(NULL)` answers with the loaded game image.
+  goes to the memory library, `GetModuleHandleA/W(NULL)` answers with the loaded game image, and file calls on
+  the drive letter the console mounts the game's package as are answered from the game folder, read-only. Also
+  connects the allocation routines the game exports to the memory library.
 - `hosting.hpp` / `hosting.cpp` — address model for showing the game's memory to the GPU: one range,
   `device_address = heap_base + (game_va - flat_base)`. Not yet connected to a GPU.
+- `shader_container.hpp` / `shader_container.cpp` — recognises the two headers the game's shader bytes arrive
+  with; it names no instruction stream it cannot prove.
 - `shader_isa.hpp` / `shader_isa.cpp` — reads the instruction words of a console shader. An instruction it cannot
   classify is reported, not guessed.
 - `shader_translate.hpp` / `shader_translate.cpp` — translates a console shader to SPIR-V, kept in memory. Today
@@ -32,13 +36,15 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 
 - `xmem.h` / `xmem.cpp` → `xmem.dll`. The console's memory library: 64 KiB physical pages, address ranges the
   pages are mapped into, committed memory. Keeps a record of every region with the flags the game asked for.
-- `d3d12_xs.h` / `d3d12_xs.cpp` → `d3d12_xs.dll`. The console's three graphics entry points. Creates a PC D3D12
-  device and hands the game a wrapper around it: standard functions are forwarded, most console-only functions
-  log once and answer "not implemented".
+- `d3d12_xs.h` / `d3d12_xs.cpp` → `d3d12_xs.dll`. The console's graphics entry points. Creates a PC D3D12
+  device and hands the game its own objects around the PC ones: functions the two share are forwarded, the
+  console-only ones the game's start-up needs are written out (queues, command lists, the frame clock,
+  descriptor heaps, buffers over the game's own memory, display surfaces), and every other one logs its
+  arguments once and answers "not implemented".
 - `xcrdapi.h` / `xcrdapi.cpp` → `XCRDAPI.dll`. The console's file-read library: our own factory, file, status
   array and queue; a read goes straight from the file into the address the game names.
 - `xgameruntime.h` / `xgameruntime.cpp` → `xgameruntime.dll`. The runtime library the game loads at start:
-  initialise and uninitialise answer success, queries answer "not implemented".
+  initialise and uninitialise answer success, interface queries are logged and answered "no such interface".
 - `acp_hal.h` / `acp_hal.cpp` → `AcpHal.dll`. Console audio hardware library: the memory functions are real, the
   audio device answers "not implemented".
 - `xapu.h` / `xapu.cpp` → `xapu.dll`, `chad.h` / `chad.cpp` → `chad.dll`. Console audio command libraries:
@@ -60,8 +66,8 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 
 ## Tests
 
-`tests/` holds 13 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
-acpxapu, chad, xcrdapi, gfx_stubs). They use made-up inputs only: no game files, no GPU.
+`tests/` holds 14 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
+shader_container, acpxapu, chad, xcrdapi, gfx_stubs). They use made-up inputs only: no game files, no GPU.
 
 ## Build and test
 
