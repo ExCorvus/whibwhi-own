@@ -6,7 +6,7 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 
 ## Current state (2026-11-26)
 
-- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 14 tests pass.
+- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 15 tests pass.
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
@@ -17,9 +17,12 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   command allocators and lists, a frame clock, descriptor heaps at the addresses the game chose, two
   3840 x 2160 display surfaces, command signatures, and two pieces of the game's own memory opened on the
   device without a copy (a 174 MiB buffer and the 6.2 GiB page pool).
-- **Where it stops:** when the game creates its first texture it asks the texture layout library
-  (`xg_xs.dll`) for a layout computer. The shell's library is a skeleton and refuses. The game does not check
-  that answer and faults on it (a read at an invalid address at image+0x16f71fb).
+- **Where it stops:** when the game creates its first texture (256 x 128, one mip, format code 61) it asks the
+  texture layout library (`xg_xs.dll`) for a layout computer. The shell's library refuses and clears the
+  result. The game does not check that answer and uses the object at once (a read at address 0 at
+  image+0x16f71ea).
+- **Network:** every imported function that could open a socket, resolve a name or make an HTTP request is
+  connected to a refusal (docs/console-libs/network.md). No run so far has called one.
 - **Not built:** anything that draws. The texture layout library. Pipeline states (the shader translator
   handles only straight-line compute test shaders). Command-list methods above slot 26, except indirect
   execution. Views made from raw descriptor words (device slot 70), device slots 61 and 86, presentation
@@ -528,10 +531,9 @@ place in the code as well. They are the first places to look when the game later
 Outside the repository: one registry value was set on the development PC with ExCorvus's agreement
 (`ForceUseLocalServices`, described in docs/BUILD-AND-RUN.md).
 
-**Network.** Rule 3 says nothing online. The game's network imports (the Windows socket and HTTP libraries, and
-the two HTTP libraries shipped with the game) are connected to the real libraries, and the shell does not yet
-refuse or log network calls at its boundary. No run so far has got past the graphics start-up, but nothing
-stops a later run from opening a connection. A refusal at the boundary is the next thing to build here.
+**Network.** Rule 3 says nothing online. When this entry was written the game's network imports were connected
+to the real libraries with nothing refusing them. Superseded: the boundary is built (see the entry "the network
+boundary" below).
 
 ## 2026-11-26 - the queue's page-mapping call is recorded (measured layout; not yet reached by a run)
 
@@ -556,3 +558,60 @@ stops a later run from opening a connection. A refusal at the boundary is the ne
 - Tested without a device (shell/tests/test_d3d12_xs.cpp) with made-up addresses: showing, showing again,
   removing, two batches in one call, and every refusal leaving the record unchanged. No run has reached this
   call: the latest run stops earlier, at the texture layout library.
+
+## 2026-11-26 - the network boundary, the first texture description, and what the command list really is (boots b65-b66)
+
+**The network boundary is built** (shell/offline.*, connected in shell/console.cpp; details and sources in
+docs/console-libs/network.md).
+
+- Measured: the game imports 78 network functions - 25 from the Windows socket library (23 by ordinal), 15 from
+  the Windows HTTP library, 38 from the HTTP client shipped with the game.
+- 49 of them could open a socket, resolve a name or build an HTTP request. Each has a replacement with the
+  public argument list that touches no network, sets the documented error, returns the documented failure
+  value, logs once and counts its calls. The other 29 only read, release or convert something and go to the
+  real libraries.
+- One decision taken when connecting it, which ExCorvus can reverse: starting the socket library (WSAStartup) goes
+  to the real library. It initialises the library inside the process and sends nothing; the game stops in its
+  own check if it fails (measured: one call site, a breakpoint on any failure). Creating a socket is refused, so
+  nothing can go out either way. The stricter refusal stays in the code, tested, but is not connected.
+- Not known: whether a run reaches the game's network start-up at all. Boot b66 ended without a single network
+  call. At the end of a run the tool prints how often each function was refused.
+
+**The texture layout library: the argument lists were wrong, and the first description is measured**
+(docs/console-libs/xg-xs.md).
+
+- Measured at all four call sites: XGCreateTextureComputer takes two arguments, the description and a place
+  for the object. Ours declared four and never cleared the place, so the game used a leftover value. Fixed: both
+  functions take what the game passes, still refuse, clear the place, and log each distinct description.
+- Measured in boot b65: the first texture is two-dimensional, 256 x 128, one mip, format code 61, element size
+  1 byte, flags 0x300000. 61 is the public DXGI number for an 8-bit single-channel format, which is 1 byte per
+  pixel; the block-format code ranges the game tests (70-84, 94-99) are the public DXGI numbers of the
+  block-compressed formats. Inferred from these: the format codes are DXGI format numbers, so the size of every
+  mip can be computed from the public format list. Two agreeing cases, not a proof for every code.
+- The call site that does not check the answer (fn 0x16f7100) then calls the object's method at +0x40 once per
+  mip of each slice with (object, destination base, 0, subresource number, source pointer, bytes per row,
+  rows), and the method at +0x08 at the end. Measured: the destination base is the same for every call, so the
+  object itself adds each subresource's position.
+- The game reads seven fields of the 0x6c8-byte layout block (a 0x38-byte header and 15 records of 0x70 bytes).
+  It compares two of them with its own tightly packed sizes and copies directly when they are equal. So a layout
+  that is simply the game's own packed order is one the game accepts without a second buffer. Not built yet.
+
+**The command list is an object the game writes into** (docs/exe-map/COMMAND-LIST-ORDER.md, with review notes).
+
+- Measured: the game keeps a write position (list +0x18) and an end (list +0x30) inside the list object and
+  writes drawing records there itself; it calls a method only when the position has reached the end. It also
+  writes two 16-byte blocks at list +0x544 and +0x554 without any check.
+- Consequence for the shell, not yet fixed: our list object is 0x50 bytes, so those two writes land outside it.
+  No run has reached a draw, so this has not happened yet; the object must be made large enough before one does.
+- Inferred from the argument shapes of 15 slots: the methods the game falls back to are the ordinary public
+  command-list methods (console slots 20-26 are public 20-26; console 33-50 are public 29-46). Four console-only
+  methods sit at slots 27-32 and two public ones are missing before slot 61. To be confirmed by a run.
+- Design choice that follows: keep the position equal to the end, so every drawing command arrives as a method
+  call that can be answered with the same call on the PC list. The records the game would otherwise write are
+  hardware command words; decoding those would mean recreating the console's graphics hardware, which this
+  project does not do.
+
+**Three device methods identified by the same reading** (measured argument lists; the public names are inferred):
+slot 61 creates a sampler at a position in the game's descriptor memory from a console-layout description;
+slot 70 writes a view at such a position from two description blocks; slot 86 is the public pipeline-state
+creation from a stream (its identifier is the public pipeline-state identifier). None is answered yet.
