@@ -207,6 +207,20 @@ docs/exe-map/COMMAND-LIST.md has the list of call sites.
 The pool queue (global 0x71bfce8) is separate from the frame queue (global 0x8759ff8): the page mapper uses the
 pool queue's slot 31, and the frame code uses the frame queue.
 
+**Slot 31 in detail** (measured in fn 0xf2c470; the call is at 0xf2cc7f). Arguments: the number of batches, the
+batches, the pool address (global 0x71bfaa8), the pool size in 64 KiB pages as a 32-bit number, a 32-bit 0. The
+result is not looked at.
+
+| record | size | fields |
+|---|---|---|
+| batch | 24 bytes | +0 destination address in the GPU-only view (view base + view page x 64 KiB), +8 number of ranges (32 bits), +0x10 pointer to the ranges |
+| range | 12 bytes | +0 kind, +4 pool page number, +8 count (all 32 bits) |
+
+The game builds two shapes: to show pages (code at 0xf2c7cf), one batch whose ranges are {kind 1, pool page,
+count 1}, one per page; to stop showing pages (code at 0xf2c893), one batch with the single range {kind 2, 0,
+number of pages}. Whether kind 1 with a larger count means consecutive pool pages is not known; the game never
+builds it. The shell records these calls exactly (see FINDINGS.md); nothing reads the record yet.
+
 ---
 
 ## 3. xg_xs.dll — the console texture-tiling library
