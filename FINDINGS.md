@@ -23,7 +23,9 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   game's commands leave in its display surface today: it clears the surface, and every draw is held, because
   no pipeline state exists (the game's shaders are not translated yet). The shell draws nothing of its own.
 - **Audio:** the APU memory side is real (a heap below 4 GiB, a shape-context array, an identity address map).
-  The audio device (AcpHalCreate) and the command channel (xapu) are not provided and answer "not provided".
+  Since boot b148 the audio device opens the PC's sound output and the command channel (xapu) decodes Opus with
+  libopus; one start-up command is accepted under a stated exception; nothing plays sound yet (entry "audio
+  start-up hosted" at the end). The paragraph that follows is the earlier state.
   The silent audio host of boot b141 was withdrawn on 2026-11-26 (see the entry "what went wrong" at the end):
   it answered success for work that was not done. Boot b143 (after the withdrawal, normal priority, game folder unchanged):
   AcpHalCreate is refused, the game keeps presenting (at least 32 frames in all), then stops itself at its own breakpoint
@@ -1463,3 +1465,29 @@ in fact presented at least 128.
 - **Next for views**: the 52 textures exist on the console only as memory plus block A (the tiling description,
   the same one xg_xs is asked about). A PC view of them needs a PC texture made from block A whose pixels come
   from that memory, untiled. That is the texture-upload work, not started.
+
+## 2026-11-26 - audio start-up hosted; the game runs on (measured, boots b145-b148)
+
+ExCorvus chose "real audio in steps". Built:
+
+- **xapu.dll decodes Opus.** What the channel carries was read from the numbers in the image (960 samples per
+  submit, 0x1e00 bytes of output per stream, channel count x 0xf00 bytes named): Opus frames at 48 kHz. The
+  decoding is done by libopus (BSD licence, built separately, loaded as `opus.dll`; NOTICE.md). Results are
+  handed back only for work done. Details: docs/console-libs/acp-xapu.md section 9.
+- **The audio device** (AcpHalCreate) opens and starts the PC's default sound output. Command 2 (magic
+  0xf0f0f0f0, checked by the start-up) is accepted without being carried out: a rule-4 exception ExCorvus granted,
+  said at every call. Other commands are refused.
+- **Corrected:** the start-up does not wait for a driver-written status word (the image zeroes it and waits only
+  while it is negative); the old notes said it would hang.
+- **File reads fixed (xcrdapi).** Boot b147 got past audio and then many reads well inside `audio.rpf` came back
+  with nothing read (reported as end of file), and the game failed with a read at an unmapped address
+  (image+0x5561d8d). Cause: several threads read through the same file handle, and each read waited on the handle
+  itself, so another thread's finished read woke it with 0 bytes. Each read now waits on its own event.
+- **Boot b148** (40 s, game folder unchanged): audio start-up passes, no file read fails, no exception; at least
+  256 frames presented; the game unpacked 3,418 distinct shader containers (774 before, when runs stopped at
+  audio); slot 70 wrote 440 buffer views and 8 texture views. No Opus stream was opened in those 40 seconds, and
+  no sound is played yet. Boot b146 ended at the game's own watchdog (image+0x2215c35) before audio, as in the
+  slow-start runs b124-b128; b145 was cut off at the time limit.
+- **Next unhosted** (b148): command-list slots 70, 75, 126 and 142; device slot 81; the interface
+  {54ec77fa-1377-44e6-8c32-88fd5f44c84c} asked of the device; two game-runtime interfaces; XGSuggestSwizzleMode;
+  Map of placed textures; views of textures that exist only as memory; pipelines (threading open).
