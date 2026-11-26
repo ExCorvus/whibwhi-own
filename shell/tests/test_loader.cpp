@@ -119,9 +119,10 @@ static DWORD protection_at(const std::uint8_t* p) {
 }
 
 static UnprovidedImport reported;
-static void record_and_leave(const UnprovidedImport& which) {
+static std::uintptr_t record_and_leave(const UnprovidedImport& which) {
     reported = which;
     ExitThread(42);
+    return 0;  // unreachable
 }
 static DWORD WINAPI call_slot(void* target) {
     reinterpret_cast<void (*)()>(target)();
