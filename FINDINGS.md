@@ -34,7 +34,7 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   from the game's memory into a PC texture yet, so no texture with starting data can be sampled.
 - **Network:** every imported function that could open a socket, resolve a name or make an HTTP request is
   connected to a refusal (docs/console-libs/network.md). No run so far has called one.
-- **Shaders (measured, boots b81-b96):** every pipeline request names shader containers with the public
+- **Shaders (measured, boots b81-b99):** every pipeline request names shader containers with the public
   container's parts. The part that would hold portable shader code holds none (its code field is the four
   letters "NOBC"), so the PC device cannot take the game's shaders as they are. What the part does hold is the
   console's compiled program, zlib-packed: the shell unpacks it in memory, finds the program inside and reads
@@ -42,10 +42,13 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   The same kind of program is also handed over ready-made in the descriptions of device slots 57 (graphics)
   and 67 (compute); of 1,329 distinct ones in a run the shell reads 1,302 from the first word exactly to the
   end word and decodes every one of those (27 contain words of no public instruction format).
+  The packed block also says how each resource reaches the program (which register carries which table, and
+  where in the table each descriptor lies); the shell reads that for all 581 and it agrees with what the
+  programs do and with what the containers declare.
   A translator from that hardware code is the way to a picture. None is built: the shell can read the
   programs and say what each expects and uses, nothing more. Nearly every request comes from the game's worker
   threads (tens of thousands in the first seconds); three come from the thread that created the device.
-  Details: docs/SHADER-TRANSLATOR.md sections 13 and 15, docs/exe-map/SHADER-PATH.md section 10.
+  Details: docs/SHADER-TRANSLATOR.md sections 13, 15 and 16, docs/exe-map/SHADER-PATH.md sections 10 and 11.
 - **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
   slots 57, 62, 67 and 86; each request is read and counted, and none can be made (the shader translator
   handles only straight-line compute test shaders), so every draw is held. The
@@ -1015,3 +1018,43 @@ programs and the module programs expect and use, per kind of shader. 21 tests.
 
 **Not done.** No program is translated. The mapping from a program's registers to root parameters, the
 tables of the module, control flow and the back end are all open.
+
+## 2026-11-26 - how a shader's resources reach its program: the module's two tables (boots b97-b99; measured)
+
+- After its code, each unpacked module (docs/exe-map/SHADER-PATH.md section 10) holds two tables and the
+  shader's name. The record that names the code names them too. The reader is `read_module_tables` in
+  shell/shader_program.*; what the entries mean is written out in shader_program.hpp and in
+  docs/exe-map/SHADER-PATH.md section 11.
+- The meaning was first read on five modules by hand and then counted over every module of a run (boot b99:
+  581 distinct containers; 567 pixel, 8 compute, 6 vertex shaders). The count:
+  - The tables are laid out as the reader requires in all 581. In 34 pixel modules the shader declares no
+    resources: the second table's count is zero and its offset holds the padding value. (The first version of
+    the reader refused those 34; the count showed why.)
+  - The second table has exactly as many entries as the container's public 'PSV0' part declares resources, in
+    all 581, and every declared resource is in the table with the same class and register number. No exception.
+  - Every entry of the second table has the entry in the first table that it needs (same register number,
+    same scalar register and offset, or same fixed-sampler index). No exception.
+  - The first table's scalar registers start at s8 in every vertex and pixel module and at s4 in every compute
+    module, and follow one another without a gap when each parameter is given as many registers as its count
+    word says. So the count word is the number of scalar registers a root parameter takes: 1 for a table's
+    address, 2 for a buffer address, 2 or 4 for constants. Measured in all 581.
+  - What the programs do agrees: 1,101 image descriptors that programs load from a table lie at a register
+    and offset where the first table has a resource entry; 814 sampler descriptors lie where it has a sampler
+    entry; 459 constant-buffer descriptors lie where it has a resource entry. The only loads with no entry
+    are the 200 of the ten modules described next. (Which 581 containers arrive in the first 30 seconds
+    differs a little from run to run, so these sums do too; the statements held in boots b97, b98 and b99.)
+- Not understood:
+  - 10 pixel modules have a first-table entry of a kind not seen elsewhere (kind 5, in scalar register s13).
+    Their programs load 100 image and 100 constant-buffer descriptors through s13 at offsets no entry names.
+    The reader reports such a module as laid out correctly but not understood.
+  - 109 sampler uses (101 in pixel, 8 in compute programs) do not come from a table the shape pass can follow.
+    These modules have fixed-sampler entries; where a program gets a fixed sampler from is not established.
+  - Registers a program reads that no table entry names: s12 in 536 pixel programs (the register right after
+    the last parameter in most of them), s0 and s1 in a few, s0 and s14 in the ten with kind 5; s5-s7 in all
+    8 compute programs; s4 in 5 vertex programs. These are values the console's pipeline provides besides the
+    root parameters. What each one is has not been established.
+  - Word 3 of a second-table entry (4 for textures, 1 for a raw buffer, 0 otherwise) and the bit 0x100 that
+    constants carry in their last word.
+- Nothing of this is used to draw yet. It is what a translator needs to turn a program's loads from registers
+  into the PC shader's declared resources.
+- The game folder was unchanged after every run. 21 tests pass.
