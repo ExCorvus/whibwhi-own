@@ -38,6 +38,7 @@
 #include "shader_pc.hpp"         // the pass that writes a PC shader for a console program, and the shell's layout
 #include "shader_program.hpp"    // the packed program inside a shader container, unpacked in memory
 #include "xg_xs.h"  // the texture description; the library's functions are looked up by name at run time
+#include "xmem.h"   // the memory library's region records; its functions are looked up by name at run time
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -64,6 +65,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -4225,7 +4227,39 @@ unsigned long long __stdcall whiwhi_d3d12_view_pages_shown(void) {
     return shown;
 }
 
+// A measurement at the end of a run, numbers only: the memory the image holds through the memory library, grouped
+// by what it asked for - the kind of request, its type, its protection with the graphics bits above the low byte,
+// and its attributes. It shows which memory the image means for the graphics side.
+void log_memory_kinds() {
+    using Regions = unsigned long long (*)(WhiwhiXmemRegion*, unsigned long long);
+    const auto regions = reinterpret_cast<Regions>(xmem_function("whiwhi_xmem_regions"));
+    if (!regions) {
+        return;
+    }
+    std::vector<WhiwhiXmemRegion> list(static_cast<std::size_t>(regions(nullptr, 0)) + 256);
+    const unsigned long long count = regions(list.data(), list.size());
+    list.resize(static_cast<std::size_t>(std::min<unsigned long long>(count, list.size())));
+    struct Total {
+        unsigned long long regions = 0, bytes = 0, mapped_pages = 0;
+    };
+    std::map<std::tuple<unsigned long, unsigned long, unsigned long, unsigned long long>, Total> kinds;
+    for (const WhiwhiXmemRegion& r : list) {
+        Total& t = kinds[std::make_tuple(r.kind, r.type, r.protect, r.attributes)];
+        ++t.regions;
+        t.bytes += r.bytes;
+        t.mapped_pages += r.mapped_pages;
+    }
+    for (const auto& item : kinds) {
+        logf("memory the image holds: kind %lu, type 0x%lx, protect 0x%lx (graphics bits 0x%lx), attributes 0x%llx: "
+             "%llu regions, %llu bytes, %llu pages mapped\n",
+             std::get<0>(item.first), std::get<1>(item.first), std::get<2>(item.first),
+             std::get<2>(item.first) & ~0xFFul, std::get<3>(item.first), item.second.regions, item.second.bytes,
+             item.second.mapped_pages);
+    }
+}
+
 unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
+    log_memory_kinds();
     log_pipeline_refusals();
     write_shader_check();
     // Per kind of object: which offsets of the image's area are not zero in at least one live object.
