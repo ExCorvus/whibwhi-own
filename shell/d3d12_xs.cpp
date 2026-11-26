@@ -1570,6 +1570,26 @@ void __stdcall w_list_shading_rate(Wrap* self, unsigned int rate, const unsigned
     }
 }
 
+// List slot 142: (64-bit mask). Measured in the image: fn 0x32520 (site 0x329e3) passes the value at context
+// +0x12360 when it changed; the setter fn 0x4e57ff0 takes it from fn 0x4e58060, which picks an entry of the table
+// at 0x6500dc0 (masks that switch on 16-bit groups one after another) and may invert it; all ones means "none set".
+// Read as a mask of which parts of the console's GPU may run the following work (inferred, not proven): a
+// scheduling hint the PC device has no counterpart for - the PC driver places work itself. Noted, NOT carried out;
+// the image does not check a result. A stated rule-4 exception granted by ExCorvus (2026-11-26).
+void __stdcall w_list_unit_mask(Wrap*, unsigned long long mask) {
+    static SRWLOCK lock = SRWLOCK_INIT;
+    static std::set<unsigned long long> seen;
+    AcquireSRWLockExclusive(&lock);
+    const bool first = seen.size() < 32 && seen.insert(mask).second;
+    ReleaseSRWLockExclusive(&lock);
+    if (first) {
+        logf("command list slot 142: mask 0x%016llx - NOT CARRIED OUT: read as which parts of the console's GPU may "
+             "run the following work, which the PC device has no control for (rule-4 exception granted by "
+             "ExCorvus)\n",
+             mask);
+    }
+}
+
 // Draws and dispatches asked while the list has no pipeline state: counted, said at the first and at every power
 // of two, never passed on.
 std::atomic<unsigned long long> g_draws_without_pipeline{0};
@@ -2063,7 +2083,8 @@ Wrap* wrap_kind(void* pc, int kind) {
                  {61, reinterpret_cast<void*>(&w_list_execute_indirect)},
                  {70, reinterpret_cast<void*>(&w_list_depth_bounds)},
                  {126, reinterpret_cast<void*>(&w_list_shading_rate)},
-                 {139, reinterpret_cast<void*>(&w_list_begin)}});
+                 {139, reinterpret_cast<void*>(&w_list_begin)},
+                 {142, reinterpret_cast<void*>(&w_list_unit_mask)}});
             list->recording.store(true);  // a PC list is recording when it is created
             return list;
         }
