@@ -423,14 +423,16 @@ static void test_read_fields_one_word_formats() {
 }
 
 static void test_read_fields_two_word_formats() {
-    // VOP3 opcode 0x1C1: v9 = |v1| + (-v2) + v3, with clamp, op_sel 3 and output modifier 2.
+    // VOP3 opcode 0x14B (three sources in the public table): v9 from v1, v2, v3, with the absolute-value bits
+    // 5, op_sel 3, clamp, the negate bits 2 and output modifier 2.
     {
         const Instruction ins =
-            decode_one({vop3_word0(0x1C1, 9, 0x5, 0x3, true), vop3_word1(0x101, 0x102, 0x103, 0x2, 0x2)});
-        CHECK(ins.format == WalkFormat::kVop3 && ins.opcode == 0x1C1);
+            decode_one({vop3_word0(0x14B, 9, 0x5, 0x3, true), vop3_word1(0x101, 0x102, 0x103, 0x2, 0x2)});
+        CHECK(ins.format == WalkFormat::kVop3 && ins.opcode == 0x14B);
         CHECK(ins.word_count == 2);
         CHECK(ins.dst.kind == OperandKind::kVgpr && ins.dst.index == 9);
         CHECK(ins.source_count == 3);
+        CHECK(ins.vop3.sources_used == 3 && ins.vop3.sources_established && !ins.vop3.has_scalar_result);
         CHECK(ins.src[0].kind == OperandKind::kVgpr && ins.src[0].index == 1);
         CHECK(ins.src[1].kind == OperandKind::kVgpr && ins.src[1].index == 2);
         CHECK(ins.src[2].kind == OperandKind::kVgpr && ins.src[2].index == 3);
@@ -444,10 +446,62 @@ static void test_read_fields_two_word_formats() {
     // VOP3 with src2 = 255: the third word is the constant; the first two words are the instruction.
     {
         const Instruction ins = decode_one(
-            {vop3_word0(0x1C1, 9), vop3_word1(0x101, 0x102, 255), 0x40000000u});
+            {vop3_word0(0x14B, 9), vop3_word1(0x101, 0x102, 255), 0x40000000u});
         CHECK(ins.word_count == 3);
         CHECK(ins.has_constant_word && ins.constant_word == 0x40000000u);
         CHECK(ins.src[2].kind == OperandKind::kLiteral && ins.src[2].value == 0x40000000u);
+    }
+    // A three-operand compare (opcode 6, below 0x100): the destination field is a SCALAR code, here the pair
+    // starting at s10, and only two of the source fields are sources. The third field holds 0, which must not
+    // be counted as a read of s0.
+    {
+        const Instruction ins = decode_one({vop3_word0(6, 10), vop3_word1(0x101, 0x102, 0)});
+        CHECK(ins.format == WalkFormat::kVop3 && ins.opcode == 6);
+        CHECK(ins.has_destination && ins.dst.kind == OperandKind::kSgpr && ins.dst.index == 10);
+        CHECK(ins.source_count == 2 && ins.vop3.sources_used == 2 && ins.vop3.sources_established);
+        CHECK(ins.src[0].kind == OperandKind::kVgpr && ins.src[0].index == 1);
+        CHECK(ins.src[1].kind == OperandKind::kVgpr && ins.src[1].index == 2);
+        CHECK(ins.vop3.vdst == 10);
+        CHECK(vop3_is_compare(6) && vop3_source_count(6) == 2);
+    }
+    // The same compare writing the condition mask VCC (code 106): a special register, not vector register 106.
+    {
+        const Instruction ins = decode_one({vop3_word0(6, 106), vop3_word1(0x101, 0x102, 0)});
+        CHECK(ins.has_destination && ins.dst.kind == OperandKind::kSpecialRegister && ins.dst.index == 106);
+    }
+    // A re-encoded two-source instruction (0x108) uses two fields; the select (0x101) uses the third for its
+    // lane mask; a re-encoded one-source instruction (0x181) uses one; the no-operation (0x180) uses none and
+    // has no destination, whatever its fields hold.
+    {
+        const Instruction two = decode_one({vop3_word0(0x108, 4), vop3_word1(0x101, 0x102, 0)});
+        CHECK(two.source_count == 2 && two.dst.kind == OperandKind::kVgpr && two.dst.index == 4);
+        const Instruction select = decode_one({vop3_word0(0x101, 4), vop3_word1(0x101, 0x102, 12)});
+        CHECK(select.source_count == 3);
+        CHECK(select.src[2].kind == OperandKind::kSgpr && select.src[2].index == 12);
+        const Instruction one = decode_one({vop3_word0(0x181, 4), vop3_word1(0x101, 0, 0)});
+        CHECK(one.source_count == 1 && one.has_destination);
+        const Instruction nop = decode_one({vop3_word0(0x180, 7), vop3_word1(0x105, 0x106, 0x107)});
+        CHECK(nop.source_count == 0 && !nop.has_destination);
+        CHECK(vop3_source_count(0x108) == 2 && vop3_source_count(0x101) == 3 && vop3_source_count(0x181) == 1 &&
+              vop3_source_count(0x180) == 0);
+        CHECK(!vop3_is_compare(0x108) && !vop3_is_compare(0x101));
+    }
+    // A carry-in add (0x128): three fields used, and word 0 bits 14..8 name its second, scalar result.
+    {
+        const Instruction carry = decode_one({vop3_word0(0x128, 4, 0x3, 0x1), vop3_word1(0x101, 0x102, 20)});
+        CHECK(carry.source_count == 3);
+        CHECK(carry.vop3.has_scalar_result && carry.vop3.scalar_result == ((0x1u << 3) | 0x3u));
+        CHECK(vop3_has_scalar_result(0x128) && vop3_has_scalar_result(365) && vop3_has_scalar_result(793));
+        CHECK(!vop3_has_scalar_result(0x14B) && !vop3_has_scalar_result(6));
+    }
+    // An opcode the public table does not list (0x200): all three fields are kept and it says so.
+    {
+        const Instruction unknown = decode_one({vop3_word0(0x200, 4), vop3_word1(0x101, 0x102, 0x103)});
+        CHECK(unknown.source_count == 3 && !unknown.vop3.sources_established);
+        CHECK(vop3_source_count(0x200) == -1 && vop3_source_count(0x1FF) == -1 && vop3_source_count(0x40) == -1);
+        // The VOP3-only instructions the table lists with two and with three operands.
+        CHECK(vop3_source_count(361) == 2 && vop3_source_count(866) == 2 && vop3_source_count(838) == 3 &&
+              vop3_source_count(887) == 3);
     }
     // VOP3P opcode 0x21: the packed format's own modifier fields.
     {
