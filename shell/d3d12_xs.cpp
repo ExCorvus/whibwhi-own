@@ -6,12 +6,17 @@
 // order; the ones not implemented return E_NOTIMPL. Implemented beyond forwarding:
 //
 //   device slot 8    CreateCommandQueue    real PC queue, itself wrapped
-//   device slot 9    CreateCommandList     real PC command list, itself wrapped
-//   device slot 11   CreateDescriptorHeap  real PC descriptor heap, itself wrapped
+//   device slot 9    CreateCommandAllocator  real PC allocator, itself wrapped (the console allocator has its
+//                                            own method on slot 9 of the allocator, answered as not provided)
+//   device slot 14   CreateDescriptorHeap  real PC descriptor heap, itself wrapped
 //   device slot 74   pool registration     success - on a PC the pool is host memory; the shell shows pages to
 //                                          the GPU when graphics calls name them
 //   queue  slot 31   CopyPageMappingsBatchX  success, logged - the GPU view is filled by the shell later
 //   queue  slots 30/32  PresentX            success, logged - nothing is on screen yet
+//
+// The slot numbers are the public D3D12 method indices, which is what the image's own calls use (its call sites
+// were read and matched: 8 queue, 9 allocator, 14 descriptor heap, 26 custom heap properties, 41 command
+// signature, and the console-only methods above slot 43). See docs/exe-map/GRAPHICS-CALLS.md.
 #include "d3d12_xs.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -63,8 +68,8 @@ void log_slot(int kind_id, int slot) {
 
 constexpr int kDevice = 1;
 constexpr int kQueue = 2;
-constexpr int kList = 3;
 constexpr int kHeap = 4;
+constexpr int kAllocator = 5;
 constexpr int kVtableSlots = 160;
 
 struct Wrap {
@@ -172,37 +177,32 @@ HRESULT __stdcall w_device_slot8(Wrap* self, void* desc, void* riid, void** pp, 
     return hr;
 }
 
-HRESULT __stdcall w_device_slot9(Wrap* self, void* node_mask, void* type, void* allocator, void* initial_state,
-                                 void* riid, void** pp, void*, void*) {
-    using Fn = HRESULT(__stdcall*)(void*, void*, void*, void*, void*, void*, void**);
+HRESULT __stdcall w_device_slot9(Wrap* self, void* type, void* riid, void** pp, void*, void*, void*, void*,
+                                 void*) {
+    using Fn = HRESULT(__stdcall*)(void*, void*, void*, void**);
     void** pc_vt = reinterpret_cast<void***>(self->pc)[0];
-    HRESULT hr = reinterpret_cast<Fn>(pc_vt[9])(self->pc, node_mask, type, allocator, initial_state, riid, pp);
-    if (hr != 0 && pp) {
-        hr = reinterpret_cast<Fn>(pc_vt[9])(self->pc, node_mask, type, allocator, initial_state,
-                                             static_cast<void*>(const_cast<GUID*>(&__uuidof(ID3D12CommandList))), pp);
-    }
+    HRESULT hr = reinterpret_cast<Fn>(pc_vt[9])(self->pc, type, riid, pp);
     if (hr == 0 && pp && *pp) {
-        *pp = wrap_object(*pp, kList, "command list", 60, {});
-        logf("device slot 9 CreateCommandList: PC list created and wrapped\n");
-    } else {
-        logf("device slot 9 CreateCommandList failed 0x%lx\n", static_cast<unsigned long>(hr));
+        // The console allocator has one method of its own after the public ones (the image sets an allocator
+        // callback on it); the wrapper answers that one as not provided and forwards the rest.
+        *pp = wrap_object(*pp, kAllocator, "command allocator", 8, {});
+        logf("device slot 9 CreateCommandAllocator: PC allocator created and wrapped\n");
+    } else if (hr != 0) {
+        logf("device slot 9 CreateCommandAllocator failed 0x%lx\n", static_cast<unsigned long>(hr));
     }
     return hr;
 }
 
-HRESULT __stdcall w_device_slot11(Wrap* self, void* desc, void* riid, void** pp, void*, void*, void*, void*,
+HRESULT __stdcall w_device_slot14(Wrap* self, void* desc, void* riid, void** pp, void*, void*, void*, void*,
                                   void*) {
     using Fn = HRESULT(__stdcall*)(void*, void*, void*, void**);
     void** pc_vt = reinterpret_cast<void***>(self->pc)[0];
-    HRESULT hr = reinterpret_cast<Fn>(pc_vt[11])(self->pc, desc, riid, pp);
-    if (hr != 0 && pp) {
-        hr = reinterpret_cast<Fn>(pc_vt[11])(self->pc, desc, static_cast<void*>(const_cast<GUID*>(&__uuidof(ID3D12DescriptorHeap))), pp);
-    }
+    HRESULT hr = reinterpret_cast<Fn>(pc_vt[14])(self->pc, desc, riid, pp);
     if (hr == 0 && pp && *pp) {
-        *pp = wrap_object(*pp, kHeap, "descriptor heap", 5, {});
-        logf("device slot 11 CreateDescriptorHeap: PC heap created and wrapped\n");
-    } else {
-        logf("device slot 11 CreateDescriptorHeap failed 0x%lx\n", static_cast<unsigned long>(hr));
+        *pp = wrap_object(*pp, kHeap, "descriptor heap", 9, {});
+        logf("device slot 14 CreateDescriptorHeap: PC heap created and wrapped\n");
+    } else if (hr != 0) {
+        logf("device slot 14 CreateDescriptorHeap failed 0x%lx\n", static_cast<unsigned long>(hr));
     }
     return hr;
 }
@@ -276,7 +276,7 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
     *device = wrap_object(pc, kDevice, "device", 43,
                           {{8, reinterpret_cast<void*>(&w_device_slot8)},
                            {9, reinterpret_cast<void*>(&w_device_slot9)},
-                           {11, reinterpret_cast<void*>(&w_device_slot11)},
+                           {14, reinterpret_cast<void*>(&w_device_slot14)},
                            {74, reinterpret_cast<void*>(&w_device_slot74)}});
     logf("D3D12XboxCreateDevice: PC device created, wrapper returned\n");
     return 0;
