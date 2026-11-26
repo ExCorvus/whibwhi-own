@@ -32,6 +32,10 @@
 // were read and matched: 8 queue, 9 allocator, 14 descriptor heap, 26 custom heap properties, 41 command
 // signature, and the console-only methods above slot 43). See docs/exe-map/GRAPHICS-CALLS.md.
 #include "d3d12_xs.h"
+#include "shader_container.hpp"  // the chunks of a shader container
+#include "shader_isa.hpp"        // the console instruction reader
+#include "shader_pc.hpp"         // the pass that writes a PC shader for a console program, and the shell's layout
+#include "shader_program.hpp"    // the packed program inside a shader container, unpacked in memory
 #include "xg_xs.h"  // the texture description; the library's functions are looked up by name at run time
 
 #define WIN32_LEAN_AND_MEAN
@@ -49,6 +53,7 @@
 #include <dxgi1_2.h>  // the swap chain description the PC library takes
 #include <intrin.h>
 
+#include <algorithm>
 #include <atomic>
 #include <string>
 #include <cstdarg>
@@ -1651,10 +1656,13 @@ HRESULT __stdcall w_device_pipeline(Wrap*, void*, void*, void** out, void*, void
     return 0x80004001L;  // E_NOTIMPL
 }
 
-// Device slots 86 and 67: (device, {stream size, stream}, identifier, out), the three arguments of the public
-// CreatePipelineState (docs/exe-map/GRAPHICS-CALLS.md section 2.2c). Handed to the PC device's CreatePipelineState
-// unchanged, except that a root signature of this library's is replaced by the PC object behind it. The shaders in
-// the stream are the game's own; what the PC device answers is logged. A test of what the normal call says.
+// Device slot 86: (device, {stream size, stream}, identifier, out), the three arguments of the public
+// CreatePipelineState (docs/exe-map/GRAPHICS-CALLS.md section 2.2c). Slot 67 is not this call: from the image's
+// call at image+0x24800db its first argument is not a {size, stream} pair (boot b172), so it stays not provided
+// until its shape is read. The stream itself walks by the public
+// subobject shapes (boots b170-b171); its shader stages hold the console's packed programs, which the PC device
+// refuses. So the shell writes each one as a PC shader bound to the shell's layout (shader_pc.hpp), names the
+// shell's one root signature instead of the game's, and hands the rest of the stream on unchanged.
 template <typename T>
 void stream_shape(std::size_t& payload_at, std::size_t& whole) {
     payload_at = (4 + alignof(T) - 1) / alignof(T) * alignof(T);
@@ -1692,8 +1700,221 @@ bool stream_subobject(unsigned type, std::size_t& payload_at, std::size_t& whole
     }
 }
 
+const whiwhi::shell::ShaderChunk* chunk_named(const whiwhi::shell::ShaderContainer& parts, const char* name) {
+    for (const whiwhi::shell::ShaderChunk& chunk : parts.chunks) {
+        if (std::strcmp(chunk.name, name) == 0) {
+            return &chunk;
+        }
+    }
+    return nullptr;
+}
+
+whiwhi::shell::Signature signature_of(const whiwhi::shell::ShaderContainer& parts, const std::uint8_t* container,
+                                      std::uint32_t bytes, const char* name) {
+    whiwhi::shell::Signature none;
+    const whiwhi::shell::ShaderChunk* chunk = parts.ok() ? chunk_named(parts, name) : nullptr;
+    if (!chunk) {
+        none.reason = "the container has no such part";
+        return none;
+    }
+    if (static_cast<std::uint64_t>(chunk->offset) + 8 + chunk->size > bytes) {
+        none.reason = "the part does not fit in the container";
+        return none;
+    }
+    return whiwhi::shell::read_signature(name, container + chunk->offset + 8, chunk->size);
+}
+
+// One console shader container written as a PC shader, or refused with a reason: the packed program is unpacked,
+// its module found and decoded, and the module's tables, the container's signatures and its declared resources
+// are handed to the pass (shader_pc.hpp).
+whiwhi::shell::PcShader translate_shader_container(const std::uint8_t* container, std::uint32_t bytes,
+                                                   whiwhi::shell::PcStage stage) {
+    using namespace whiwhi::shell;
+    PcShader refused;
+    const PackedProgram program = read_packed_program(container, bytes);
+    if (!program.ok()) {
+        refused.reason = "the packed program: " + program.reason;
+        return refused;
+    }
+    const std::vector<std::uint8_t>& block = program.bytes;
+    const ModuleProgram found = find_module_program(block.data(), block.size());
+    if (!found.found) {
+        refused.reason = "the module: " + found.reason;
+        return refused;
+    }
+    const DecodedShader decoded =
+        decode_shader(block.data() + found.code_offset, found.program_bytes, ShaderStage::kUnknown);
+    if (!decoded.ok) {
+        refused.reason = "the decode: " + decoded.bad_reason;
+        return refused;
+    }
+    const ModuleTables tables = read_module_tables(block.data(), block.size(), found);
+    const ShaderContainer parts = read_shader_container(container, bytes);
+    const Signature in = signature_of(parts, container, bytes, "ISG1");
+    const Signature out = signature_of(parts, container, bytes, "OSG1");
+    DeclaredResources declared;
+    const ShaderChunk* validation = parts.ok() ? chunk_named(parts, "PSV0") : nullptr;
+    if (validation && static_cast<std::uint64_t>(validation->offset) + 8 + validation->size <= bytes) {
+        declared = read_declared_resources(container + validation->offset + 8, validation->size);
+    }
+    PcShaderInput input;
+    input.stage = stage;
+    input.program = &decoded;
+    input.tables = &tables;
+    input.inputs = &in;
+    input.outputs = &out;
+    input.declared = &declared;
+    return write_pc_shader(input);
+}
+
+// Shaders already written, kept in memory for the whole run: the game names the same containers in many pipeline
+// requests, so each one is written once. Found by a hash of the bytes and the stage, taken only when the stored
+// bytes match exactly. Refusals are kept as well.
+struct TranslatedEntry {
+    std::vector<std::uint8_t> original;
+    whiwhi::shell::PcStage stage;
+    std::shared_ptr<const whiwhi::shell::PcShader> shader;
+};
+SRWLOCK g_translated_lock = SRWLOCK_INIT;
+std::unordered_multimap<unsigned long long, TranslatedEntry> g_translated;
+std::atomic<unsigned long long> g_translated_made{0}, g_translated_reused{0};
+
+std::shared_ptr<const whiwhi::shell::PcShader> translated_shader(const std::uint8_t* container, std::uint32_t bytes,
+                                                                 whiwhi::shell::PcStage stage) {
+    unsigned long long key = 1469598103934665603ull ^ static_cast<unsigned long long>(stage);
+    for (std::uint32_t i = 0; i < bytes; ++i) {
+        key = (key ^ container[i]) * 1099511628211ull;
+    }
+    const auto same = [&](const TranslatedEntry& entry) {
+        return entry.stage == stage && entry.original.size() == bytes &&
+               std::memcmp(entry.original.data(), container, bytes) == 0;
+    };
+    AcquireSRWLockShared(&g_translated_lock);
+    for (auto [at, end] = g_translated.equal_range(key); at != end; ++at) {
+        if (same(at->second)) {
+            auto shader = at->second.shader;
+            ReleaseSRWLockShared(&g_translated_lock);
+            ++g_translated_reused;
+            return shader;
+        }
+    }
+    ReleaseSRWLockShared(&g_translated_lock);
+    auto made = std::make_shared<const whiwhi::shell::PcShader>(translate_shader_container(container, bytes, stage));
+    AcquireSRWLockExclusive(&g_translated_lock);
+    for (auto [at, end] = g_translated.equal_range(key); at != end; ++at) {
+        if (same(at->second)) {  // another thread wrote it meanwhile
+            made = at->second.shader;
+            ReleaseSRWLockExclusive(&g_translated_lock);
+            ++g_translated_reused;
+            return made;
+        }
+    }
+    g_translated.emplace(key, TranslatedEntry{std::vector<std::uint8_t>(container, container + bytes), stage, made});
+    ReleaseSRWLockExclusive(&g_translated_lock);
+    ++g_translated_made;
+    return made;
+}
+
+// The shell's one root signature, the PC side of the shell's layout (shader_pc.hpp, namespace shell_layout):
+//   0  a table of samplers, s0 onward in the sampler space
+//   1  the arguments buffer, a root constant buffer at b0 of the arguments space
+//   2  a table over the resource heap, every range starting at the table's first place: constant buffers,
+//      raw buffers, and the textures of each dimension, each in its own space
+//   3..18  the buffers at addresses, root shader resources t0..t15 of the address space
+// Made once from the device the image created; the cache keeps the reference.
+ID3D12RootSignature* shell_layout_root_signature(ID3D12Device* device, HRESULT& hr) {
+    namespace layout = whiwhi::shell::shell_layout;
+    static std::once_flag once;
+    static ID3D12RootSignature* made = nullptr;
+    static HRESULT made_hr = 0x80004005L;
+    std::call_once(once, [device] {
+        const D3D12_DESCRIPTOR_RANGE_FLAGS volatile_range =
+            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+        D3D12_DESCRIPTOR_RANGE1 samplers = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, UINT_MAX, 0, layout::kSamplerSpace,
+                                            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE, 0};
+        std::vector<D3D12_DESCRIPTOR_RANGE1> resources;
+        resources.push_back({D3D12_DESCRIPTOR_RANGE_TYPE_CBV, UINT_MAX, 0, layout::kConstantBufferSpace,
+                             volatile_range, 0});
+        resources.push_back({D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, layout::kRawBufferSpace, volatile_range, 0});
+        for (std::uint32_t dimension = static_cast<std::uint32_t>(whiwhi::shell::dxbc::ResourceDimension::kBuffer);
+             dimension <= static_cast<std::uint32_t>(whiwhi::shell::dxbc::ResourceDimension::kTextureCubeArray);
+             ++dimension) {
+            resources.push_back({D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, layout::kTextureSpace + dimension,
+                                 volatile_range, 0});
+        }
+        std::vector<D3D12_ROOT_PARAMETER1> parameters(3 + layout::kAddressRegisters);
+        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[0].DescriptorTable = {1, &samplers};
+        parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        parameters[1].Descriptor = {0, layout::kArgumentsSpace, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
+        parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[2].DescriptorTable = {static_cast<UINT>(resources.size()), resources.data()};
+        parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        for (std::uint32_t n = 0; n < layout::kAddressRegisters; ++n) {
+            D3D12_ROOT_PARAMETER1& p = parameters[3 + n];
+            p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+            p.Descriptor = {n, layout::kAddressSpace, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
+            p.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        }
+        D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc = {};
+        desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+        desc.Desc_1_1.NumParameters = static_cast<UINT>(parameters.size());
+        desc.Desc_1_1.pParameters = parameters.data();
+        desc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        const auto serialize = reinterpret_cast<long(__stdcall*)(const void*, ID3DBlob**, ID3DBlob**)>(
+            GetProcAddress(LoadLibraryA("d3d12.dll"), "D3D12SerializeVersionedRootSignature"));
+        ID3DBlob* blob = nullptr;
+        ID3DBlob* error = nullptr;
+        made_hr = serialize ? serialize(&desc, &blob, &error) : 0x80004005L;
+        if (made_hr == 0 && blob) {
+            made_hr = device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                                  __uuidof(ID3D12RootSignature), reinterpret_cast<void**>(&made));
+        }
+        logf("the shell's root signature (%zu parameters, %zu resource ranges): 0x%08lx%s%s\n", parameters.size(),
+             resources.size(), static_cast<unsigned long>(made_hr), error ? " - " : "",
+             error ? static_cast<const char*>(error->GetBufferPointer()) : "");
+        if (blob) blob->Release();
+        if (error) error->Release();
+    });
+    hr = made_hr;
+    return made;
+}
+
+// Why requests were not answered with a pipeline, counted per reason; each new reason is logged once.
+SRWLOCK g_pipeline_refusals_lock = SRWLOCK_INIT;
+std::map<std::string, unsigned long long> g_pipeline_refusals;
+
+void note_pipeline_refusal(const std::string& reason) {
+    AcquireSRWLockExclusive(&g_pipeline_refusals_lock);
+    const bool first = ++g_pipeline_refusals[reason] == 1;
+    const std::size_t reasons = g_pipeline_refusals.size();
+    ReleaseSRWLockExclusive(&g_pipeline_refusals_lock);
+    if (first && reasons <= 64) {
+        logf("device slot 86: a new reason a pipeline was not made: %s\n", reason.c_str());
+    }
+}
+
+void log_pipeline_refusals() {
+    AcquireSRWLockShared(&g_pipeline_refusals_lock);
+    std::vector<std::pair<unsigned long long, std::string>> sorted;
+    for (const auto& item : g_pipeline_refusals) {
+        sorted.emplace_back(item.second, item.first);
+    }
+    ReleaseSRWLockShared(&g_pipeline_refusals_lock);
+    std::sort(sorted.rbegin(), sorted.rend());
+    logf("device slot 86 (whole run): shader translations %llu written, %llu taken from memory; %zu reason(s) a "
+         "pipeline was not made\n",
+         g_translated_made.load(), g_translated_reused.load(), sorted.size());
+    for (std::size_t i = 0; i < sorted.size() && i < 40; ++i) {
+        logf("device slot 86 (whole run): %llu x  %s\n", sorted[i].first, sorted[i].second.c_str());
+    }
+}
+
 HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const GUID* riid, void** out, void*, void*,
                                            void*, void*, void*) {
+    using whiwhi::shell::PcStage;
     static std::atomic<unsigned long long> asked{0}, made{0}, refused{0};
     const unsigned long long n = ++asked;
     if (out) {
@@ -1706,51 +1927,131 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
         std::memcpy(&stream, static_cast<const std::uint8_t*>(desc) + 8, 8);
     }
     std::string types;
+    std::string reason;
     HRESULT hr = 0x80070057L;  // E_INVALIDARG
     std::vector<std::uint8_t> copy;
-    if (out && stream && size >= 8 && size <= 0x10000 && can_read(stream, static_cast<std::size_t>(size))) {
+    std::vector<std::size_t> signature_at;
+    std::vector<std::shared_ptr<const whiwhi::shell::PcShader>> shaders;
+    if (!out || !stream || size < 8 || size > 0x10000 || !can_read(stream, static_cast<std::size_t>(size))) {
+        reason = "the stream or the result place cannot be read";
+    } else {
         copy.assign(stream, stream + static_cast<std::size_t>(size));
-        bool walked = true;
-        for (std::size_t at = 0; at < copy.size();) {
+        for (std::size_t at = 0; at < copy.size() && reason.empty();) {
             unsigned type = 0;
             std::memcpy(&type, copy.data() + at, 4);
             types += (types.empty() ? "" : " ") + std::to_string(type);
             std::size_t payload_at = 0, whole = 0;
             if (!stream_subobject(type, payload_at, whole) || at + whole > copy.size()) {
-                walked = false;
+                reason = "a subobject type the public list does not have, or one past the end";
                 break;
             }
-            if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE) {
-                void* signature = nullptr;
-                std::memcpy(&signature, copy.data() + at + payload_at, 8);
-                signature = to_pc(signature);
-                std::memcpy(copy.data() + at + payload_at, &signature, 8);
+            std::uint8_t* payload = copy.data() + at + payload_at;
+            switch (type) {
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE:
+                signature_at.push_back(at + payload_at);
+                break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS:
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS: {
+                D3D12_SHADER_BYTECODE code;
+                std::memcpy(&code, payload, sizeof(code));
+                if (!code.pShaderBytecode && !code.BytecodeLength) {
+                    break;
+                }
+                const bool vertex = type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS;
+                if (!code.pShaderBytecode || code.BytecodeLength > 0x1000000 ||
+                    !can_read(code.pShaderBytecode, static_cast<std::size_t>(code.BytecodeLength))) {
+                    reason = std::string(vertex ? "vertex" : "pixel") + " shader: its bytes cannot be read";
+                    break;
+                }
+                auto shader = translated_shader(static_cast<const std::uint8_t*>(code.pShaderBytecode),
+                                                static_cast<std::uint32_t>(code.BytecodeLength),
+                                                vertex ? PcStage::kVertex : PcStage::kPixel);
+                if (!shader->ok) {
+                    reason = std::string(vertex ? "vertex" : "pixel") + " shader: " + shader->reason;
+                    break;
+                }
+                const D3D12_SHADER_BYTECODE pc_code{shader->container.data(), shader->container.size()};
+                std::memcpy(payload, &pc_code, sizeof(pc_code));
+                shaders.push_back(std::move(shader));
+                break;
+            }
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS:
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS: {
+                D3D12_SHADER_BYTECODE code;
+                std::memcpy(&code, payload, sizeof(code));
+                if (code.pShaderBytecode || code.BytecodeLength) {
+                    reason = "a shader of stage " + std::to_string(type) + " (the pass writes vertex and pixel only)";
+                }
+                break;
+            }
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO: {
+                D3D12_CACHED_PIPELINE_STATE cached;
+                std::memcpy(&cached, payload, sizeof(cached));
+                if (cached.pCachedBlob || cached.CachedBlobSizeInBytes) {
+                    reason = "the stream names a cached pipeline (the console's)";
+                }
+                break;
+            }
+            default:
+                break;
             }
             at += whole;
         }
-        if (walked) {
-            ID3D12Device2* device = nullptr;
-            hr = static_cast<IUnknown*>(self->pc)->QueryInterface(__uuidof(ID3D12Device2),
-                                                                 reinterpret_cast<void**>(&device));
-            if (hr == 0 && device) {
-                const D3D12_PIPELINE_STATE_STREAM_DESC pc_desc = {copy.size(), copy.data()};
-                ID3D12PipelineState* state = nullptr;
-                hr = device->CreatePipelineState(&pc_desc, __uuidof(ID3D12PipelineState),
-                                                 reinterpret_cast<void**>(&state));
-                device->Release();
-                if (hr == 0 && state) {
-                    *out = wrap_kind(state, kPipeline);
-                }
+        if (reason.empty() && shaders.empty()) {
+            reason = "the stream names no vertex or pixel shader";
+        }
+        if (reason.empty() && signature_at.empty()) {
+            reason = "the stream names no root signature";
+        }
+    }
+    if (reason.empty()) {
+        ID3D12Device2* device = nullptr;
+        hr = static_cast<IUnknown*>(self->pc)->QueryInterface(__uuidof(ID3D12Device2),
+                                                             reinterpret_cast<void**>(&device));
+        ID3D12RootSignature* signature = hr == 0 && device ? shell_layout_root_signature(device, hr) : nullptr;
+        if (signature) {
+            for (const std::size_t at : signature_at) {
+                void* pointer = signature;
+                std::memcpy(copy.data() + at, &pointer, 8);
+            }
+            const D3D12_PIPELINE_STATE_STREAM_DESC pc_desc = {copy.size(), copy.data()};
+            ID3D12PipelineState* state = nullptr;
+            hr = device->CreatePipelineState(&pc_desc, __uuidof(ID3D12PipelineState),
+                                             reinterpret_cast<void**>(&state));
+            if (hr == 0 && state) {
+                *out = wrap_kind(state, kPipeline);
+            } else {
+                char text[64];
+                std::snprintf(text, sizeof(text), "the PC device refused the pipeline (0x%08lx)",
+                              static_cast<unsigned long>(hr));
+                reason = text;
             }
         } else {
-            types += " (a type the public list does not have, or past the end)";
+            char text[64];
+            std::snprintf(text, sizeof(text), "the shell's root signature was not made (0x%08lx)",
+                          static_cast<unsigned long>(hr));
+            reason = text;
+        }
+        if (device) {
+            device->Release();
+        }
+    }
+    if (!reason.empty()) {
+        note_pipeline_refusal(reason);
+        if (hr == 0) {
+            hr = 0x80004001L;  // E_NOTIMPL
         }
     }
     const unsigned long long count = hr == 0 ? ++made : ++refused;
     if (n <= 8 || (count & (count - 1)) == 0) {
-        logf("device slot 86/67 (normal CreatePipelineState, stream unchanged) #%llu: %llu bytes, subobject types %s "
-             "-> 0x%08lx; %llu made, %llu refused by the PC device so far (returns to %p)\n",
-             n, size, types.c_str(), static_cast<unsigned long>(hr), made.load(), refused.load(), _ReturnAddress());
+        logf("device slot 86 #%llu: %llu bytes, subobject types %s, %zu shader(s) written -> 0x%08lx%s%s; %llu "
+             "made, %llu not so far (returns to %p)\n",
+             n, size, types.c_str(), shaders.size(), static_cast<unsigned long>(hr), reason.empty() ? "" : ": ",
+             reason.c_str(), made.load(), refused.load(), _ReturnAddress());
     }
     (void)riid;
     return hr;
@@ -3314,7 +3615,6 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {41, reinterpret_cast<void*>(&w_device_slot41)},
          {43, reinterpret_cast<void*>(&struct_return_thunk<43, 8>)},  // GetAdapterLuid
          {48, reinterpret_cast<void*>(&w_device_slot48)},
-         {67, reinterpret_cast<void*>(&w_device_stream_pipeline)},
          {86, reinterpret_cast<void*>(&w_device_stream_pipeline)},
          {73, reinterpret_cast<void*>(&w_device_slot73)},
          {74, reinterpret_cast<void*>(&w_device_slot74)},
@@ -3362,6 +3662,7 @@ unsigned long long __stdcall whiwhi_d3d12_view_pages_shown(void) {
 }
 
 unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
+    log_pipeline_refusals();
     // Per kind of object: which offsets of the image's area are not zero in at least one live object.
     std::map<std::string, std::pair<std::size_t, std::vector<bool>>> by_kind;
     AcquireSRWLockShared(&g_wraps_lock);
