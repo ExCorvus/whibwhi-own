@@ -444,3 +444,27 @@ moves of constants just before (all 12 pixel programs with fixed-sampler entries
 The constants are the hardware's sampler state. The second table names which declared sampler register a fixed
 sampler is. In 35 compute programs with fixed-sampler entries some or all sampling instructions get their
 sampler another way; not read yet.
+
+## 13. The container's lists of inputs and outputs, against the program (boots b111-b113; measured)
+
+Besides the packed program, a container carries the public parts 'ISG1' and 'OSG1': the inputs and the outputs
+the shader declares. The layout is the public one: the element count, the number 8, then one record of eight
+32-bit words for each element (stream, offset of the name, index, system value, component type, register, a
+word whose low byte is the component mask and whose second byte says which components are read, minimum
+precision), and the names as zero-terminated text. `shell/shader_program.*` reads it and refuses a part that is
+laid out differently.
+
+Counted over the 505 pixel and 227 vertex programs of a run:
+
+| link | holds in |
+|---|---|
+| pixel: attribute number n of an interpolation = the n-th input element that is not a system value, by rising register; channels inside its mask | 500 of 500 that interpolate |
+| pixel: colour export targets = the registers of the render-target outputs, each exported | 505 of 505 |
+| pixel: exports compressed, with the valid-mask flag, the done flag on the last one | 505 of 505 |
+| vertex: input element r arrives in the vector registers v(4 + 4r) to v(7 + 4r), one for each component | 227 of 227 |
+| vertex: parameter export target 32 + k = the k-th output element that is not the position, by rising register | 224 of 227 |
+| vertex: the position is exported to target 12 | 227 of 227 |
+
+The 3 vertex programs outside the fifth row declare only the position and still export one parameter. The one
+vertex program whose input is the vertex number reads it from v0. docs/SHADER-TRANSLATOR.md section 23 has the
+other counts (which vector registers pixel programs read, where sampler descriptors are loaded from).
