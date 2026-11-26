@@ -354,6 +354,64 @@ static void test_heap() {
     CHECK(stats().bytes_committed == before.bytes_committed);
 }
 
+// An image's allocation routines, stood in for: they answer one request size with a block of their own and pass
+// every other request on to the plain allocation, as the routines of a console image do.
+static char g_own_block[0x40];
+static int g_routine_allocs = 0;
+static int g_routine_frees = 0;
+static void* image_alloc_routine(unsigned long long size, unsigned long long attributes) {
+    ++g_routine_allocs;
+    if (size == 0x40 && (attributes & 0x3FFF) == 4) {
+        return g_own_block;
+    }
+    return XMemAllocDefault(size, attributes);
+}
+static void image_free_routine(void* pointer, unsigned long long attributes) {
+    ++g_routine_frees;
+    if (pointer == g_own_block) {
+        return;
+    }
+    XMemFreeDefault(pointer, attributes);
+}
+
+static void test_image_routines() {
+    const WhiwhiXmemStatistics before = stats();
+    // One routine alone is not accepted: both or neither.
+    whiwhi_xmem_set_allocation_hooks(&image_alloc_routine, nullptr);
+    char* plain = static_cast<char*>(XMemAlloc(0x40, 0x00800004ull));
+    CHECK(plain != nullptr && plain != g_own_block && g_routine_allocs == 0);
+    XMemFree(plain, 0x00800004ull);
+    CHECK(state_of(plain) == MEM_FREE);
+
+    whiwhi_xmem_set_allocation_hooks(&image_alloc_routine, &image_free_routine);
+    // The routine's own answer comes back unchanged, and no record is made for it.
+    void* chosen = XMemAlloc(0x40, 0x00800004ull);
+    CHECK(chosen == g_own_block && g_routine_allocs == 1);
+    WhiwhiXmemRegion record{};
+    CHECK(!find_region(g_own_block, record));
+    XMemFree(chosen, 0x00800004ull);
+    CHECK(g_routine_frees == 1);
+    // A request the routine passes on is a plain allocation, made and freed through the routine.
+    char* passed = static_cast<char*>(XMemAlloc(0x2000, 0x00010000ull));
+    CHECK(passed != nullptr && g_routine_allocs == 2);
+    CHECK(find_region(passed, record) && record.kind == WHIWHI_XMEM_HEAP && record.attributes == 0x00010000ull);
+    passed[0x1FFF] = 1;
+    XMemFree(passed, 0x00010000ull);
+    CHECK(g_routine_frees == 2 && state_of(passed) == MEM_FREE);
+    // The Default pair never goes through the routines.
+    char* direct = static_cast<char*>(XMemAllocDefault(0x1000, 0));
+    CHECK(direct != nullptr && g_routine_allocs == 2);
+    XMemFreeDefault(direct, 0);
+    CHECK(g_routine_frees == 2);
+    CHECK(stats().calls_through_image_routines == before.calls_through_image_routines + 4);
+
+    whiwhi_xmem_set_allocation_hooks(nullptr, nullptr);
+    char* after = static_cast<char*>(XMemAlloc(0x40, 0x00800004ull));
+    CHECK(after != nullptr && after != g_own_block && g_routine_allocs == 2);
+    XMemFree(after, 0x00800004ull);
+    CHECK(stats().bytes_committed == before.bytes_committed);
+}
+
 constexpr int kThreads = 4;
 constexpr int kSteps = 64;
 
@@ -434,6 +492,7 @@ int main() {
     test_committed();
     test_scatter();
     test_heap();
+    test_image_routines();
     test_threads();
     test_many_pages();
     CHECK(whiwhi_xmem_regions(nullptr, 0) == regions_before);
