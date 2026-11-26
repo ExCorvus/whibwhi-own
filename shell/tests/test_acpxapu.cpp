@@ -1,14 +1,12 @@
-// Tests for the two audio libraries we provide: AcpHal.dll and xapu.dll.
+// Tests for the two audio libraries we provide as skeletons: AcpHal.dll and xapu.dll.
 //
-// The DLLs beside this test must export every name the image imports from "AcpHal.dll" and "xapu.dll". The
-// memory side is real (a heap, a shape-context array, an identity address map); the device and the command
-// channel are a SILENT host (a stated exception): they answer success and host the interface without sound.
-// No image, no game data, no device.
+// The DLLs beside this test must export every name the image imports from "AcpHal.dll" and "xapu.dll", and
+// every one of them must answer "not provided" - a negative HRESULT, a 0 count, a null address - without
+// writing through the pointers it was handed. No image, no game data, no device.
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cstddef>
-#include <initializer_list>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -112,18 +110,11 @@ void test_acp_hal(const AcpHal& api) {
     CHECK(api.allocate_shape_contexts(nullptr) < 0);
     CHECK(api.release_shape_contexts(nullptr) == 0);
 
-    // The silent device: a handle is written, and the vtable slots the image calls answer success (no sound).
+    // The audio device itself is still not provided: no handle is invented.
     void* handle = reinterpret_cast<void*>(kSentinel);
-    CHECK(api.create(&handle) == 0);
-    CHECK(handle != nullptr && handle != reinterpret_cast<void*>(kSentinel));
+    CHECK(api.create(&handle) < 0);
+    CHECK(handle == reinterpret_cast<void*>(kSentinel));
     CHECK(api.create(nullptr) < 0);
-    void** vtable = *reinterpret_cast<void***>(handle);
-    using Slot = long (*)(void*, unsigned long long, unsigned long long, unsigned long long, unsigned long long,
-                          unsigned long long);
-    for (int slot : {0, 1, 2, 5}) {  // the byte offsets 0x00, 0x08, 0x10, 0x28 the image uses
-        Slot fn = reinterpret_cast<Slot>(vtable[slot]);
-        CHECK(fn(handle, 0x1000, 0x1000, 0, 0, 0) == 0);
-    }
 
     // The APU heap is real committed memory below 4 GiB; ApuAlloc bump-allocates from it, aligned as asked.
     CHECK(api.create_heap(0x1000000u, 0x226E00u) == 0);
@@ -153,12 +144,11 @@ void test_xapu(const XApu& api) {
     unsigned char config[0x18] = {};
     unsigned char buffers[0x200] = {};
     void* client = reinterpret_cast<void*>(kSentinel);
-    CHECK(api.connect(config, buffers, &client) == 0);
-    CHECK(client != nullptr && client != reinterpret_cast<void*>(kSentinel));
+    CHECK(api.connect(config, buffers, &client) < 0);
+    CHECK(client == reinterpret_cast<void*>(kSentinel)); // no client handle was invented
     CHECK(api.connect(nullptr, nullptr, nullptr) < 0);
 
-    // An open-stream command (opcode 1, stream 7): the channel queues the "stream opened" event the image's
-    // state machine waits for.
+    // One command as the image builds it: opcode 1, stream id 7, a dword of payload at +0x18.
     struct Command {
         unsigned opcode;
         unsigned stream;
@@ -167,37 +157,26 @@ void test_xapu(const XApu& api) {
     } command{};
     command.opcode = 1;
     command.stream = 7;
-    CHECK(api.enqueue_command(client, &command, 0) == 0);
-    CHECK(api.get_result_count(client) == 1);
+    command.value = 0x5DC0;
+    CHECK(api.enqueue_command(nullptr, &command, 0) < 0);
+    CHECK(api.enqueue_command(client, &command, 0) < 0); // the handle it kept is not needed to answer
+
+    // The count is the one answer that must be 0: the image loops over it.
+    CHECK(api.get_result_count(client) == 0);
 
     struct Result {
-        unsigned event;    // +0x00
-        unsigned stream;   // +0x04
-        unsigned pad[0xB]; // +0x08
-        unsigned payload;  // +0x34
+        unsigned event;   // +0x00, 1, 2, 3 or 5 in the image
+        unsigned stream;  // +0x04
+        unsigned pad[0xB];// +0x08
+        unsigned payload; // +0x34
     } result{};
     static_assert(offsetof(Result, payload) == 0x34, "the result payload dword is at +0x34");
     result.event = 0xA5A5A5A5;
-    CHECK(api.dequeue_result(client, &result) == 0);
-    CHECK(result.event == 1 && result.stream == 7 && result.payload == 0);
-    CHECK(api.get_result_count(client) == 0);
-    CHECK(api.dequeue_result(client, &result) < 0);  // nothing waiting
-
-    // A buffer-submit command (opcode 3) carries its byte count at +0x24; the type-3 result hands that count back.
-    unsigned char submit[0x40] = {};
-    const unsigned op3 = 3, stream3 = 9, count3 = 0x3C0;
-    std::memcpy(submit + 0x00, &op3, 4);
-    std::memcpy(submit + 0x04, &stream3, 4);
-    std::memcpy(submit + 0x24, &count3, 4);
-    CHECK(api.enqueue_command(client, submit, 0) == 0);
-    CHECK(api.get_result_count(client) == 1);
-    std::memset(&result, 0, sizeof(result));
-    CHECK(api.dequeue_result(client, &result) == 0);
-    CHECK(result.event == 3 && result.stream == 9 && result.payload == 0x3C0);
-
-    CHECK(api.enqueue_command(client, nullptr, 0) < 0);
-    CHECK(api.dequeue_result(client, nullptr) < 0);
-    CHECK(api.disconnect(client) == 0);
+    CHECK(api.dequeue_result(client, &result) < 0);
+    CHECK(result.event == 0xA5A5A5A5 && result.stream == 0 && result.payload == 0);
+    CHECK(api.dequeue_result(nullptr, nullptr) < 0);
+    CHECK(api.disconnect(client) < 0);
+    CHECK(api.disconnect(nullptr) < 0);
 }
 
 } // namespace
@@ -211,8 +190,7 @@ int main() {
     test_acp_hal(acp_hal);
     test_xapu(xapu);
     if (failures == 0) {
-        std::printf("all checks passed (9 AcpHal.dll exports, 5 xapu.dll exports; memory real, device/channel a "
-                    "silent host)\n");
+        std::printf("all checks passed (9 AcpHal.dll exports, 5 xapu.dll exports, all answering not-provided)\n");
     }
     return failures ? 1 : 0;
 }
