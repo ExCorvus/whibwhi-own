@@ -114,9 +114,19 @@ struct FlowGraph {
     std::vector<std::uint32_t> unreachable;         // ascending; reported, not removed
 };
 
+// What the caller asks of the analysis beyond the default.
+struct FlowOptions {
+    // Treat s_swappc_b64 (a call to an address held in a register) as an ordinary instruction that comes back
+    // to the word after it, instead of refusing the program. Nothing here follows the call; a caller that sets
+    // this takes it on itself to know what the called code leaves behind. The vertex programs of the game the
+    // shell was written for call through a register once, near their start (docs/SHADER-TRANSLATOR.md).
+    bool call_through_register_returns = false;
+};
+
 // The blocks of a decoded program and the edges between them. `shader.ok` must be true and its entry must be
 // the first word of the body; anything else is refused with a reason.
 FlowGraph flow_of(const DecodedShader& shader);
+FlowGraph flow_of(const DecodedShader& shader, const FlowOptions& options);
 
 // A node of the structured description. See the header comment for what shapes are produced and refused.
 enum class RegionKind : std::uint8_t {
