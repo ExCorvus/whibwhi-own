@@ -76,8 +76,8 @@ The exact state is the "Current state" block at the top of [FINDINGS.md](FINDING
 my own verdict. this was not written or committed by an agent. it is an impressive system that traps ai agents
 exactly by the way they work. giving them instructions to "clear until intro" will make them spin out of 
 control because they will inspect the code an try to fix it. 
-this only a hypothesis, but the game was written in a special OS and was folded it into
-the xbox os. trying to stitch fix the the inside of the game will basically make the agemts 
+this only a hypothesis, but the game was written in a special OS and was folded into
+the xbox os. trying to stitch fix the the inside of the game will basically make the agents 
 write the original os into the drive. and i tested this hypothesis with fable. but for the moment this needs
 independent verification, as this might be a path to native xbox games in windows. look at whibwhi multi for
 this specfic idea
