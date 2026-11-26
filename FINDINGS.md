@@ -232,3 +232,38 @@ Boot 35 (watchdog ARMED + liveness relay): no watchdog fire, no GPU fault, no de
   on a PC those map to a DXGI swapchain created with tearing allowed and presented accordingly, gated on the
   display actually supporting variable refresh). It changes the frame cadence the game's watchdog sees, so it is
   a deliberate later change with her sign-off, not something to fold into the current boot work.
+
+## 2026-11-26 - booting the image in the shell; what the runs showed (measured)
+
+- shell/tools/boot_image.cpp (run by Temp\opencode\run_boot.ps1) loads the image, connects imports, optionally
+  runs its thread-storage callbacks, and calls the entry point on a new thread with the image's own stack size.
+  Unprovided imports are logged and answered with failure (0); exceptions are logged with instruction, data
+  address, registers and a stack scan. The game folder listing was identical before and after every boot.
+- Imports now connect 558 of 587 (our xmem.dll answers all 12 xmem functions; our d3d12_xs.dll answers the 3
+  graphics imports). Remaining 29: chad.dll (5 XDsp*), xg_xs.dll (2), XboxBvhBuilder.dll (7, needs d3d12_xs +
+  XMemVirtualQuery), XCRDAPI.dll (DStorageGetFactory), xapu.dll (5), AcpHal.dll (9).
+- shell/d3d12_xs.*: our graphics library. D3D12ConfigureVirtualMemoryX is answered success (a PC driver manages
+  virtual memory). D3D12SerializeVersionedRootSignature is forwarded to the PC's d3d12.dll. D3D12XboxCreateDevice
+  creates a real PC D3D12 device behind a COM wrapper: standard vtable slots forward to the PC object; the
+  console-only slots are logged the first time they are called and answered E_NOTIMPL, except slot 74 (pool
+  registration: success, nothing to register on a PC) and queue slot 31 CopyPageMappingsBatchX plus queue slots
+  30/32 PresentX (success, logged). Queues, command lists and descriptor heaps returned by the wrapped device
+  are wrapped the same way. The game's creation call passes a 64-byte block (dwords 0x20004, 0x100000, ...) and
+  gets the wrapper; memory start-up then completes: both 24 GiB views and all fixed pools are allocated
+  through our xmem (traced with WHIWHI_XMEM_TRACE=1).
+- The runs then stop in one of two ways, non-deterministically: an access violation at image+0x104075 (a
+  vtable thunk `mov rax,[rcx]; mov rax,[rax]; jmp rax` called with a bad object), or STATUS_HEAP_CORRUPTION
+  raised inside ntdll right after the fixed pools are committed. Both happen during engine init after memory
+  start-up (call path fn 0x5c34fd0 -> fn 0x1e1cdb0 -> fn 0x4fac3c0).
+- Thread-local storage finding: the image reads its storage block both through its index variable (rva
+  0x6e08b2c) and directly as array entry 0 (`mov rcx, gs:[0x58]; mov rcx, [rcx]`, e.g. at image+0x4ec6754 and
+  +0x4ec6783) - on the console the game is the main module, so its storage owns index 0. On a PC, index 0 is
+  owned by the first module with storage (kernelbase, or our own exe if it has a thread-local variable). The
+  shell's tools now carry a dummy thread-local variable so the shell's own exe owns index 0, and
+  whiwhi_thread_block_set_redirect (WHIWHI_TLS_REDIRECT=1) points entry 0 at the lent block while an image
+  holds it. Pointing entry 0 at the block currently trips a heap-corruption check in the test process, so it
+  is OFF by default and recorded here as the known next thing to solve (needs a debugger backtrace or a cleaner
+  slot-0 arrangement).
+- Not done yet: the remaining console libraries (audio/APU, chad, xg_xs, XCRDAPI, XboxBvhBuilder), showing the
+  regions to the GPU (the flat hosting model plugs in where graphics calls name memory), and a boot that reaches
+  the game's run loop.
