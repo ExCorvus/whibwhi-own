@@ -27,6 +27,7 @@
 // were read and matched: 8 queue, 9 allocator, 14 descriptor heap, 26 custom heap properties, 41 command
 // signature, and the console-only methods above slot 43). See docs/exe-map/GRAPHICS-CALLS.md.
 #include "d3d12_xs.h"
+#include "xg_xs.h"  // the texture description; the library's functions are looked up by name at run time
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -130,6 +131,12 @@ struct Wrap {
     // the image sees as the heap's start (see "descriptor heaps" below), and the bytes that belong to it.
     unsigned long long title_address = 0;
     unsigned long long title_bytes = 0;
+    // A buffer placed over the image's own memory (device slot 133): the PC buffer starts at the 64 KiB
+    // boundary below the image's address, because a PC device places resources only on such boundaries;
+    // placed_delta is the distance from that boundary to the image's address, added wherever the image names
+    // an offset inside the buffer.
+    bool over_image_memory = false;
+    unsigned long long placed_delta = 0;
     // For a surface that can be displayed: the block asked of XMemAlloc on its behalf (see device slot 127), given
     // back with XMemFree and the same attributes when the surface goes.
     unsigned long long requested_block = 0;
@@ -207,29 +214,41 @@ HRESULT __stdcall stub_thunk(Wrap* self, void* a1, void* a2, void* a3, void* a4,
     return 0x80004001L;  // E_NOTIMPL
 }
 
-// Methods that return a structure. The image passes the place for the structure first and the object second
-// (measured at its three calls of device slot 26: rcx = a local block, rdx = the device, then the arguments);
-// a PC object takes the object first and the place second. The other structure-returning slots below are
-// given the same order by inference from that one measurement.
-//
-// That order is what a plain function returning a large structure has (the place comes first, the object is an
-// ordinary first argument). A plain function returning a structure of eight bytes or less takes the object
-// first and returns the value in the register, and some of these methods return such small structures. Which
-// order the image uses for those is not measured, so the thunk looks at what it was given: if the first
-// argument is one of our objects, it answers in the register; if the second is, it writes to the place given.
-// The first call of each kind and slot logs which order was seen.
-template <int I>
+// Methods that return a structure. Two argument orders were measured in the image:
+//   the device  (slots 25, 26, 108):  rcx = the place for the structure, rdx = the device, then the arguments;
+//   a resource  (slot 10, a 56-byte description, +0x501f80b): rcx = the resource, rdx = the place.
+// And a descriptor heap's start (8 bytes) is asked with the heap alone and read from the register.
+// So the thunk looks at what it was given. Place first: the PC method writes to that place. Object first: a
+// structure of eight bytes or less is answered in the register; a larger one is written to the place that
+// follows the object. Bytes is the structure's size in the public interface. The first call of each kind and
+// slot logs which order was seen.
+template <int I, int Bytes>
 void* __stdcall struct_return_thunk(void* a1, void* a2, void* a3, void* a4, void* a5, void* a6) {
     using Fn = void*(__stdcall*)(void*, void*, void*, void*, void*, void*);
     static std::once_flag once;
     if (is_wrap(a1)) {
         Wrap* self = static_cast<Wrap*>(a1);
-        alignas(16) unsigned char place[256] = {};
+        void* const returns_to = _ReturnAddress();
+        if (Bytes > 8) {
+            std::call_once(once, [self, returns_to, a2] {
+                logf("%s: structure-returning slot %d (%d bytes) was called with the object first and the place %p "
+                     "second (returns to %p)\n",
+                     self->kind, I, Bytes, a2, returns_to);
+            });
+            if (!a2) {
+                return nullptr;
+            }
+            reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][I])(self->pc, a2, to_pc(a3), to_pc(a4),
+                                                                            to_pc(a5), to_pc(a6));
+            return a2;
+        }
+        alignas(16) unsigned char place[64] = {};
         reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][I])(self->pc, place, to_pc(a2), to_pc(a3),
                                                                         to_pc(a4), to_pc(a5));
-        std::call_once(once, [self] {
-            logf("%s: structure-returning slot %d was called with the object first; answered in the register\n",
-                 self->kind, I);
+        std::call_once(once, [self, returns_to] {
+            logf("%s: structure-returning slot %d (%d bytes) was called with the object first (returns to %p); "
+                 "answered in the register\n",
+                 self->kind, I, Bytes, returns_to);
         });
         void* value = nullptr;
         std::memcpy(&value, place, sizeof(value));
@@ -238,8 +257,8 @@ void* __stdcall struct_return_thunk(void* a1, void* a2, void* a3, void* a4, void
     if (is_wrap(a2)) {
         Wrap* self = static_cast<Wrap*>(a2);
         std::call_once(once, [self] {
-            logf("%s: structure-returning slot %d was called with the place first, the object second\n", self->kind,
-                 I);
+            logf("%s: structure-returning slot %d (%d bytes) was called with the place first, the object second\n",
+                 self->kind, I, Bytes);
         });
         reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][I])(self->pc, a1, to_pc(a3), to_pc(a4),
                                                                         to_pc(a5), to_pc(a6));
@@ -346,6 +365,10 @@ Wrap* wrap_object(void* pc, int kind_id, const char* kind, int forward_last,
 HRESULT __stdcall w_presentx(Wrap*, void*, void*, void*, void*, void*, void*, void*, void*);
 HRESULT __stdcall w_queue_slot31(Wrap*, void*, void*, void*, void*, void*, void*, void*, void*);
 unsigned long long __stdcall w_resource_gpu_address(Wrap* self);
+HRESULT __stdcall w_resource_map(Wrap* self, unsigned int subresource, const D3D12_RANGE* range, void** data);
+void __stdcall w_resource_unmap(Wrap* self, unsigned int subresource, const D3D12_RANGE* range);
+void* __stdcall w_resource_desc(void* first, void* second);
+HRESULT __stdcall w_queue_timestamp_frequency(Wrap* self, unsigned long long* frequency);
 
 // Queue slot 10, ExecuteCommandLists(count, lists): the lists arrive as an array, so each entry is translated
 // here.
@@ -714,6 +737,26 @@ void forget_console_signature(const Wrap* signature) {
     ReleaseSRWLockExclusive(&g_signatures_lock);
 }
 
+// The distance to add to an offset the image names inside a buffer (see Wrap::placed_delta); 0 for anything
+// that is not a buffer placed over the image's memory.
+unsigned long long placed_delta_of(void* resource) {
+    return is_wrap(resource) ? static_cast<Wrap*>(resource)->placed_delta : 0;
+}
+
+// List slot 15, CopyBufferRegion (destination, offset, source, offset, bytes): the public argument list, which
+// the image's calls have (measured). Offsets are moved for buffers that start before the image's address.
+void __stdcall w_list_copy_buffer(Wrap* self, void* destination, unsigned long long destination_offset,
+                                  void* source, unsigned long long source_offset, unsigned long long bytes) {
+    if (!is_wrap(destination) || !is_wrap(source)) {
+        logf("command list: buffer copy between %p and %p - not both objects of this library; nothing done\n",
+             destination, source);
+        return;
+    }
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)->CopyBufferRegion(
+        static_cast<ID3D12Resource*>(to_pc(destination)), destination_offset + placed_delta_of(destination),
+        static_cast<ID3D12Resource*>(to_pc(source)), source_offset + placed_delta_of(source), bytes);
+}
+
 // List slot 61: the arguments of ExecuteIndirect (signature, maximum count, argument buffer, offset, count
 // buffer, offset), measured at two calls of the image (+0x248cdef, +0x9444x). The PC list has it at slot 59.
 void __stdcall w_list_execute_indirect(Wrap* self, void* signature, unsigned int max_count, void* arguments,
@@ -739,8 +782,69 @@ void __stdcall w_list_execute_indirect(Wrap* self, void* signature, unsigned int
     }
     static_cast<ID3D12GraphicsCommandList*>(self->pc)->ExecuteIndirect(
         static_cast<ID3D12CommandSignature*>(to_pc(signature)), max_count,
-        static_cast<ID3D12Resource*>(to_pc(arguments)), arguments_offset,
-        static_cast<ID3D12Resource*>(to_pc(count_buffer)), count_offset);
+        static_cast<ID3D12Resource*>(to_pc(arguments)), arguments_offset + placed_delta_of(arguments),
+        static_cast<ID3D12Resource*>(to_pc(count_buffer)), count_offset + placed_delta_of(count_buffer));
+}
+
+// Queue slot 18: (queue, address of a 64-bit number), result checked as a success code (measured, +0x24841a6;
+// the image turns the number into a floating-point factor). Answered with the PC queue's timestamp frequency.
+HRESULT __stdcall w_queue_timestamp_frequency(Wrap* self, unsigned long long* frequency) {
+    if (!frequency) {
+        return 0x80004003L;
+    }
+    const HRESULT hr = static_cast<ID3D12CommandQueue*>(self->pc)->GetTimestampFrequency(frequency);
+    static std::once_flag once;
+    std::call_once(once, [hr, frequency] {
+        logf("queue slot 18: timestamp frequency asked - the PC queue answered 0x%lx, %llu ticks per second\n",
+             static_cast<unsigned long>(hr), *frequency);
+    });
+    return hr;
+}
+
+// Command allocator slot 9 (console-only): measured at the image's call (+0x1884fe): (allocator, a function of
+// the image, the image's rendering context); the result is not looked at. The function named (+0x555df10) takes
+// a byte count and an alignment, cuts that much out of the context's frame memory and returns it: on the console
+// the allocator gets the memory for its command buffers from the image through it.
+// This library never needs such memory - the commands arrive as method calls and are recorded by the PC list in
+// the PC device's own memory - so the function is kept on record and never called. That is said once.
+HRESULT __stdcall w_allocator_memory_function(Wrap* self, void* function, void* context) {
+    (void)self;
+    static std::once_flag once;
+    std::call_once(once, [function, context] {
+        logf("command allocator slot 9: the image names its function %p (context %p) for command-buffer memory - "
+             "kept on record and never called: commands are recorded by the PC list in the PC device's memory\n",
+             function, context);
+    });
+    return 0;
+}
+
+// Command list slot 139 (console-only): measured at the image's one call (+0x2474cce): (list, command allocator,
+// 0, 0), a negative result stops the image. The image calls it when it hands a list to a thread for recording,
+// after the list was closed at creation, and never calls the public Reset (slot 10): this is how a console list
+// starts recording with an allocator. Answered with the PC list's Reset(allocator, no pipeline state). A third
+// or fourth argument other than 0 has not been seen and is refused.
+//
+// Not done yet: the image never resets its allocators (their memory comes from its own frame memory, see slot 9
+// above), while a PC allocator keeps growing until it is reset - and may only be reset when the device has
+// finished the lists recorded with it. Until the shell resets PC allocators at the right moments, the PC
+// device's command memory grows for as long as the image runs.
+HRESULT __stdcall w_list_begin(Wrap* self, void* allocator, void* third, void* fourth) {
+    static std::atomic<int> shown{0};
+    if (third || fourth || !is_wrap(allocator)) {
+        logf("command list slot 139: (allocator %p, %p, %p) - not the call that was measured; answered not "
+             "implemented\n",
+             allocator, third, fourth);
+        return 0x80004001L;
+    }
+    const HRESULT hr = static_cast<ID3D12GraphicsCommandList*>(self->pc)->Reset(
+        static_cast<ID3D12CommandAllocator*>(to_pc(allocator)), nullptr);
+    const int n = shown.fetch_add(1);
+    if (hr != 0 || n < 3) {
+        logf("command list slot 139: list %p starts recording with allocator %p - the PC list's Reset answered "
+             "0x%lx\n",
+             static_cast<void*>(self), allocator, static_cast<unsigned long>(hr));
+    }
+    return hr;
 }
 
 // Wraps a PC object of the given kind. The number is the last method slot the kind shares with the PC interface
@@ -750,15 +854,21 @@ Wrap* wrap_kind(void* pc, int kind) {
     void* const get_device = reinterpret_cast<void*>(&w_get_device);
     switch (kind) {
     case kQueue:
-        return wrap_object(pc, kQueue, "queue", 18,
+        // The console queue's method order is not the public one. Measured: slot 18 is called with the queue
+        // and the address of one 64-bit number and its result is checked as a success code (+0x24841a6) - the
+        // shape of the public GetTimestampFrequency, which the public queue has at slot 16, where the public
+        // slot 18 returns a 16-byte description. So no queue slot is forwarded by the public order: each one is
+        // written out when the image's own call shows what it is, and says "not provided" with its arguments
+        // until then.
+        return wrap_object(pc, kQueue, "queue", 7,
                            {{7, get_device},
-                            {10, reinterpret_cast<void*>(&w_queue_execute)},
-                            {18, reinterpret_cast<void*>(&struct_return_thunk<18>)},  // GetDesc
+                            {18, reinterpret_cast<void*>(&w_queue_timestamp_frequency)},
                             {30, reinterpret_cast<void*>(&w_presentx)},
                             {31, reinterpret_cast<void*>(&w_queue_slot31)},
                             {32, reinterpret_cast<void*>(&w_presentx)}});
     case kAllocator:
-        return wrap_object(pc, kAllocator, "command allocator", 8, {{7, get_device}});
+        return wrap_object(pc, kAllocator, "command allocator", 8,
+                           {{7, get_device}, {9, reinterpret_cast<void*>(&w_allocator_memory_function)}});
     case kList:
         // Which method sits at which slot of the console's command list is only partly measured. Three calls of
         // the image agree with the public order: slot 9 (Close, no arguments, result checked), slot 15 (the five
@@ -772,23 +882,27 @@ Wrap* wrap_kind(void* pc, int kind) {
         // that reason.
         return wrap_object(pc, kList, "command list", 26,
                            {{7, get_device},
+                            {15, reinterpret_cast<void*>(&w_list_copy_buffer)},
                             {16, reinterpret_cast<void*>(&w_list_copy_texture)},
                             {26, reinterpret_cast<void*>(&w_list_barrier)},
-                            {61, reinterpret_cast<void*>(&w_list_execute_indirect)}});
+                            {61, reinterpret_cast<void*>(&w_list_execute_indirect)},
+                            {139, reinterpret_cast<void*>(&w_list_begin)}});
     case kHeap:
         return wrap_object(pc, kHeap, "descriptor heap", 10,
                            {{7, get_device},
-                            {8, reinterpret_cast<void*>(&struct_return_thunk<8>)},  // GetDesc
+                            {8, reinterpret_cast<void*>(&struct_return_thunk<8, 16>)},  // GetDesc
                             {9, reinterpret_cast<void*>(&w_heap_start<0>)},         // CPU handle of the start
                             {10, reinterpret_cast<void*>(&w_heap_start<1>)}});      // GPU handle of the start
     case kResource:
         return wrap_object(pc, kResource, "resource", 14,
                            {{7, get_device},
-                            {10, reinterpret_cast<void*>(&struct_return_thunk<10>)},      // GetDesc
+                            {8, reinterpret_cast<void*>(&w_resource_map)},
+                            {9, reinterpret_cast<void*>(&w_resource_unmap)},
+                            {10, reinterpret_cast<void*>(&w_resource_desc)},
                             {11, reinterpret_cast<void*>(&w_resource_gpu_address)}});
     case kMemoryHeap:
         return wrap_object(pc, kMemoryHeap, "heap", 8,
-                           {{7, get_device}, {8, reinterpret_cast<void*>(&struct_return_thunk<8>)}});  // GetDesc
+                           {{7, get_device}, {8, reinterpret_cast<void*>(&struct_return_thunk<8, 56>)}});  // GetDesc
     case kPipeline:
         return wrap_object(pc, kPipeline, "pipeline state", 8, {{7, get_device}});
     case kRootSignature:
@@ -1307,6 +1421,85 @@ ID3D12Heap* span_heap(Wrap* device, unsigned long long address, unsigned long lo
 Wrap* wrap_kind(void* pc, int kind);
 unsigned public_resource_flags(unsigned flags, const char* where);
 
+// The image writes console tiling numbers (0x100 and up; 0x105 for a volume) where the public description has
+// its texture layout. A PC device chooses the layout of its own textures, so such a number is replaced by the
+// public "unknown" (0); each new number is logged once.
+D3D12_TEXTURE_LAYOUT public_texture_layout(unsigned layout, const char* where) {
+    if (layout < 0x100) {
+        return static_cast<D3D12_TEXTURE_LAYOUT>(layout);
+    }
+    static std::mutex lock;
+    static std::set<unsigned> seen;
+    bool first = false;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        first = seen.insert(layout).second;
+    }
+    if (first) {
+        logf("%s: texture layout number 0x%x is a console tiling number; the PC texture gets the PC device's own "
+             "layout\n",
+             where, layout);
+    }
+    return D3D12_TEXTURE_LAYOUT_UNKNOWN;
+}
+
+ID3D12Device13* pc_device13(Wrap* self);
+
+// A texture placed at an address of the image's memory (device slot 133 with a texture description).
+// Measured in the image's texture creation (+0x193de10): for a texture that is drawn into, or that comes without
+// starting data, the image sets aside memory of its own (of the size device slot 25 or 108 told it) and asks for
+// the texture AT that address. The fourth argument is the public initial-layout number of the newer resource
+// calls (6 = shader resource was seen; 0xffffffff = undefined).
+// A PC graphics device cannot draw into, or sample, a texture lying in ordinary memory in a layout the program
+// chooses: its textures are in its own memory, in its own layout. So the answer is a real PC texture of the same
+// description (a committed one), remembered as standing at that address. The pixels are in the PC device's
+// memory. The bytes at the image's address are NOT the texture's pixels and nothing copies between the two here;
+// code of the image that read or wrote those bytes directly would not see or change the picture.
+// Dropped from the description: the console layout number and the console-only flag bits.
+HRESULT placed_texture(Wrap* self, unsigned long long address, const D3D12_RESOURCE_DESC* desc, unsigned layout,
+                       const D3D12_CLEAR_VALUE* clear, void** out, bool show) {
+    ID3D12Device13* device = pc_device13(self);
+    if (!device) {
+        logf("device slot 133: the PC device has no CreateCommittedResource3; a texture at 0x%llx is answered not "
+             "implemented\n",
+             address);
+        return 0x80004001L;
+    }
+    D3D12_RESOURCE_DESC1 pc_desc{};
+    std::memcpy(&pc_desc, desc, sizeof(D3D12_RESOURCE_DESC));
+    pc_desc.Alignment = 0;
+    pc_desc.Layout = public_texture_layout(static_cast<unsigned>(desc->Layout), "device slot 133");
+    pc_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(
+        public_resource_flags(static_cast<unsigned>(desc->Flags), "device slot 133"));
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap.CreationNodeMask = 1;
+    heap.VisibleNodeMask = 1;
+    ID3D12Resource* resource = nullptr;
+    const HRESULT hr = device->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &pc_desc,
+                                                        static_cast<D3D12_BARRIER_LAYOUT>(layout), clear, nullptr, 0,
+                                                        nullptr, __uuidof(ID3D12Resource),
+                                                        reinterpret_cast<void**>(&resource));
+    if (hr != 0 || !resource) {
+        logf("device slot 133: the PC device refused a texture for 0x%llx (dimension %d, %llu x %u x %u, mips %u, "
+             "format %d, samples %u, flags 0x%x, initial layout 0x%x, clear value format %d): 0x%lx\n",
+             address, static_cast<int>(desc->Dimension), static_cast<unsigned long long>(desc->Width), desc->Height,
+             static_cast<unsigned>(desc->DepthOrArraySize), static_cast<unsigned>(desc->MipLevels),
+             static_cast<int>(desc->Format), desc->SampleDesc.Count, static_cast<unsigned>(pc_desc.Flags), layout,
+             clear ? static_cast<int>(clear->Format) : -1, static_cast<unsigned long>(hr));
+        return hr ? hr : 0x80004005L;
+    }
+    Wrap* wrapped = wrap_kind(resource, kResource);
+    wrapped->title_address = address;
+    *out = wrapped;
+    if (show) {
+        logf("device slot 133: a real PC texture stands for the one the image placed at 0x%llx; its pixels are in "
+             "the PC device's memory, not at that address\n",
+             address);
+    }
+    return 0;
+}
+
 HRESULT __stdcall w_device_slot133(Wrap* self, void* address_arg, const D3D12_RESOURCE_DESC* desc, void* state_arg,
                                    const D3D12_CLEAR_VALUE* clear, const GUID* riid, void** out, void*, void*) {
     const unsigned long long address = reinterpret_cast<std::uintptr_t>(address_arg);
@@ -1332,10 +1525,7 @@ HRESULT __stdcall w_device_slot133(Wrap* self, void* address_arg, const D3D12_RE
              riid ? static_cast<unsigned long>(riid->Data1) : 0ul);
     }
     if (desc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
-        logf("device slot 133: a texture placed at 0x%llx (dimension %d, format %d) - the console's texture memory "
-             "layout is not answered yet, refused\n",
-             address, static_cast<int>(desc->Dimension), static_cast<int>(desc->Format));
-        return 0x80004001L;
+        return placed_texture(self, address, desc, state, clear, out, show);
     }
     D3D12_RESOURCE_DESC pc_desc = *desc;
     pc_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(
@@ -1347,6 +1537,13 @@ HRESULT __stdcall w_device_slot133(Wrap* self, void* address_arg, const D3D12_RE
     unsigned long long offset = 0;
     HRESULT hr = 0;
     ID3D12Heap* heap = span_heap(self, address, desc->Width, offset, hr);
+    // A PC device places a resource only at a multiple of 64 KiB inside a heap; the image places buffers at any
+    // address (measured: a 16-byte buffer at an address ending in 0x6fc0). So the PC buffer starts at the
+    // boundary below and is longer by the distance to it.
+    const unsigned long long delta = offset & 0xFFFFull;
+    offset -= delta;
+    pc_desc.Width = desc->Width + delta;
+    pc_desc.Alignment = 0;
     if (!heap) {
         logf("device slot 133: the memory at 0x%llx (%llu bytes) could not be opened as a heap on the PC device "
              "(0x%lx) - answered that failure\n",
@@ -1362,16 +1559,25 @@ HRESULT __stdcall w_device_slot133(Wrap* self, void* address_arg, const D3D12_RE
                                                                     __uuidof(ID3D12Resource),
                                                                     reinterpret_cast<void**>(&resource));
     if (hr != 0 || !resource) {
-        logf("device slot 133: the PC device refused the buffer placed at 0x%llx (0x%lx)\n", address,
-             static_cast<unsigned long>(hr));
+        logf("device slot 133: the PC device refused the buffer placed at 0x%llx (0x%lx): width %llu, alignment "
+             "0x%llx, format %d, layout %d, flags 0x%x (as given 0x%x), state 0x%x, offset 0x%llx in the opened "
+             "memory\n",
+             address, static_cast<unsigned long>(hr), static_cast<unsigned long long>(desc->Width),
+             static_cast<unsigned long long>(desc->Alignment), static_cast<int>(desc->Format),
+             static_cast<int>(desc->Layout), static_cast<unsigned>(pc_desc.Flags),
+             static_cast<unsigned>(desc->Flags), state, offset);
         return hr ? hr : 0x80004005L;
     }
     Wrap* wrapped = wrap_kind(resource, kResource);
     wrapped->title_address = address;
+    wrapped->title_bytes = desc->Width;
+    wrapped->over_image_memory = true;
+    wrapped->placed_delta = delta;
     *out = wrapped;
     if (show) {
-        logf("device slot 133: a PC buffer of %llu bytes now lies over the image's memory at 0x%llx (no copy)\n",
-             static_cast<unsigned long long>(desc->Width), address);
+        logf("device slot 133: a PC buffer of %llu bytes now lies over the image's memory at 0x%llx (no copy; it "
+             "starts 0x%llx bytes earlier, on a 64 KiB boundary)\n",
+             static_cast<unsigned long long>(desc->Width), address, delta);
     }
     return 0;
 }
@@ -1398,23 +1604,139 @@ unsigned public_resource_flags(unsigned flags, const char* where) {
     return flags & known;
 }
 
+// A function of the shell's texture layout library (xg_xs.dll, beside this library).
+void* xg_function(const char* name) {
+    static const HMODULE xg = []() -> HMODULE {
+        if (const HMODULE loaded = GetModuleHandleA("xg_xs.dll")) {
+            return loaded;
+        }
+        HMODULE self = nullptr;
+        char path[MAX_PATH * 2] = {};
+        if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCSTR>(&g_wraps_lock), &self) ||
+            !GetModuleFileNameA(self, path, sizeof(path))) {
+            return nullptr;
+        }
+        std::string beside = path;
+        const std::size_t slash = beside.find_last_of("\\/");
+        beside = (slash == std::string::npos ? std::string() : beside.substr(0, slash + 1)) + "xg_xs.dll";
+        return LoadLibraryA(beside.c_str());
+    }();
+    return xg ? reinterpret_cast<void*>(GetProcAddress(xg, name)) : nullptr;
+}
+
 // Device slot 25, GetResourceAllocationInfo(visible mask, count, descriptions): returns a 16-byte structure, so
-// the place for it comes first and the device second (measured). The descriptions are the public ones except
-// for the console-only flag bits.
+// the place for it comes first and the device second (measured).
+//
+// What the image does with the answer (measured, the texture creation function at +0x193de10 and the function at
+// +0x343e80 that makes this call): it sets aside that many bytes of its OWN memory with that alignment, has the
+// texture layout library copy the texture's rows into that memory, and later names the memory's address in the
+// views it creates. For a texture with starting data no resource object is created at all: on the console a
+// texture is memory plus a description. It asks for alignment 0x1000 first when its own estimate is small and
+// asks again without it unless the answer's alignment is 0x1000; it stops itself when the size does not fit in
+// 32 bits.
+//
+// So for a texture the answer has to be the size of the texture's bytes in the layout those bytes will have in
+// the image's memory - and in this shell that layout is the texture library's own untiled one (xg_xs.h). The
+// answer is that library's total for the description, rounded up to the alignment: 0x1000 when the image asks
+// for it, 64 KiB otherwise. This is the shell's number: not the console's tiled size, and not what the PC device
+// would need for a texture of its own. A description the texture library does not answer gets the public
+// failure value (a size of all ones). The console layout number in the description is not used.
+// A buffer has no layout; its description goes to the PC device, without the console-only flag bits.
+D3D12_RESOURCE_ALLOCATION_INFO shell_allocation_info(Wrap* self, unsigned int visible_mask, unsigned int count,
+                                                     const void* descs, std::size_t stride,
+                                                     D3D12_RESOURCE_ALLOCATION_INFO1* each, const char* where) {
+    static_assert(sizeof(D3D12_RESOURCE_DESC) == sizeof(WhiwhiXgDescription), "one description, two names");
+    const auto total_bytes =
+        reinterpret_cast<unsigned long long (*)(const WhiwhiXgDescription*)>(xg_function("whiwhi_xg_total_bytes"));
+    D3D12_RESOURCE_ALLOCATION_INFO info{};
+    info.Alignment = 1;
+    bool failed = !descs || count == 0;
+    static std::atomic<int> shown{0};
+    for (unsigned i = 0; !failed && i < count; ++i) {
+        D3D12_RESOURCE_DESC d;
+        std::memcpy(&d, static_cast<const unsigned char*>(descs) + i * stride, sizeof(d));
+        unsigned long long bytes = 0;
+        unsigned long long alignment = 0;
+        if (d.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+            D3D12_RESOURCE_DESC pc = d;
+            pc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(public_resource_flags(static_cast<unsigned>(d.Flags), where));
+            const D3D12_RESOURCE_ALLOCATION_INFO one =
+                static_cast<ID3D12Device*>(self->pc)->GetResourceAllocationInfo(visible_mask, 1, &pc);
+            bytes = one.SizeInBytes;
+            alignment = one.Alignment;
+            failed = bytes == ~0ull || alignment == 0;
+        } else {
+            WhiwhiXgDescription asked;
+            std::memcpy(&asked, &d, sizeof(asked));
+            bytes = total_bytes ? total_bytes(&asked) : 0;
+            alignment = d.Alignment == 0x1000 ? 0x1000 : 0x10000;
+            if (bytes == 0) {
+                failed = true;
+                logf("%s: no size for a texture of dimension %d, %llu x %u x %u, %u mips, format %d, %u samples, "
+                     "layout number 0x%x, flags 0x%x - the texture library does not answer this description; "
+                     "answered the failure value\n",
+                     where, static_cast<int>(d.Dimension), static_cast<unsigned long long>(d.Width), d.Height,
+                     static_cast<unsigned>(d.DepthOrArraySize), static_cast<unsigned>(d.MipLevels),
+                     static_cast<int>(d.Format), d.SampleDesc.Count, static_cast<unsigned>(d.Layout),
+                     static_cast<unsigned>(d.Flags));
+            } else if (shown.fetch_add(1) < 12) {
+                logf("%s: a texture of dimension %d, %llu x %u x %u, %u mips, format %d, layout number 0x%x, flags "
+                     "0x%x takes %llu bytes in the shell's untiled layout (alignment 0x%llx)\n",
+                     where, static_cast<int>(d.Dimension), static_cast<unsigned long long>(d.Width), d.Height,
+                     static_cast<unsigned>(d.DepthOrArraySize), static_cast<unsigned>(d.MipLevels),
+                     static_cast<int>(d.Format), static_cast<unsigned>(d.Layout), static_cast<unsigned>(d.Flags),
+                     bytes, alignment);
+            }
+        }
+        if (!failed) {
+            const unsigned long long rounded = (bytes + alignment - 1) / alignment * alignment;
+            info.SizeInBytes = (info.SizeInBytes + alignment - 1) / alignment * alignment;
+            if (each) {
+                each[i].Offset = info.SizeInBytes;
+                each[i].Alignment = alignment;
+                each[i].SizeInBytes = rounded;
+            }
+            info.SizeInBytes += rounded;
+            if (alignment > info.Alignment) {
+                info.Alignment = alignment;
+            }
+        }
+    }
+    if (failed) {
+        info.SizeInBytes = ~0ull;
+        info.Alignment = 0;
+    }
+    return info;
+}
+
 void* __stdcall w_device_allocation_info(void* place, Wrap* self, unsigned int visible_mask, unsigned int count,
                                          const D3D12_RESOURCE_DESC* descs) {
     if (!is_wrap(self) || !place) {
         logf("device slot 25: called without a place for the result and the device after it; nothing done\n");
         return place;
     }
-    std::vector<D3D12_RESOURCE_DESC> pc(descs ? count : 0);
-    for (std::size_t i = 0; i < pc.size(); ++i) {
-        pc[i] = descs[i];
-        pc[i].Flags = static_cast<D3D12_RESOURCE_FLAGS>(
-            public_resource_flags(static_cast<unsigned>(descs[i].Flags), "device slot 25"));
+    const D3D12_RESOURCE_ALLOCATION_INFO info = shell_allocation_info(
+        self, visible_mask, count, descs, sizeof(D3D12_RESOURCE_DESC), nullptr, "device slot 25");
+    std::memcpy(place, &info, sizeof(info));
+    return place;
+}
+
+// Device slot 108: the same question with one more argument. Measured at the image's call (+0xabfe07, in the
+// function at +0xabfae0): place for the 16-byte result, the device, 1, 1, a description, and the address of a
+// 24-byte block. That is the argument list of the public GetResourceAllocationInfo2 (the longer description
+// whose first 56 bytes are the plain one, and an optional offset / alignment / size record per description),
+// and the image checks the answer the same way as for slot 25. Answered the same way; the 24-byte record is
+// filled when given. The extra bytes of the longer description are not used.
+void* __stdcall w_device_allocation_info2(void* place, Wrap* self, unsigned int visible_mask, unsigned int count,
+                                          const D3D12_RESOURCE_DESC1* descs,
+                                          D3D12_RESOURCE_ALLOCATION_INFO1* each) {
+    if (!is_wrap(self) || !place) {
+        logf("device slot 108: called without a place for the result and the device after it; nothing done\n");
+        return place;
     }
-    const D3D12_RESOURCE_ALLOCATION_INFO info = static_cast<ID3D12Device*>(self->pc)->GetResourceAllocationInfo(
-        visible_mask, static_cast<UINT>(pc.size()), pc.data());
+    const D3D12_RESOURCE_ALLOCATION_INFO info = shell_allocation_info(
+        self, visible_mask, count, descs, sizeof(D3D12_RESOURCE_DESC1), each, "device slot 108");
     std::memcpy(place, &info, sizeof(info));
     return place;
 }
@@ -1496,6 +1818,7 @@ HRESULT __stdcall w_device_slot127(Wrap* self, const D3D12_HEAP_PROPERTIES* prop
     }
     D3D12_RESOURCE_DESC1 pc_desc{};
     std::memcpy(&pc_desc, desc, sizeof(D3D12_RESOURCE_DESC));
+    pc_desc.Layout = public_texture_layout(static_cast<unsigned>(desc->Layout), "device slot 127");
     pc_desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(
         public_resource_flags(static_cast<unsigned>(desc->Flags), "device slot 127"));
     ID3D12Resource* resource = nullptr;
@@ -1546,6 +1869,65 @@ HRESULT __stdcall w_device_slot127(Wrap* self, const D3D12_HEAP_PROPERTIES* prop
         }
     }
     return 0;
+}
+
+// Resource slots 8 and 9, Map and Unmap (the public argument lists). A buffer placed over the image's own
+// memory IS that memory, so its data pointer is the image's address and nothing has to be done to make it
+// readable or to write it back. Every other resource goes to the PC device. A texture the image placed at an
+// address is refused here: its pixels are in the PC device's memory in the device's own layout, and the rows the
+// image would expect at the pointer are not there.
+HRESULT __stdcall w_resource_map(Wrap* self, unsigned int subresource, const D3D12_RANGE* range, void** data) {
+    if (self->over_image_memory) {
+        if (data) {
+            *data = reinterpret_cast<void*>(self->title_address);
+        }
+        return 0;
+    }
+    if (self->title_address) {
+        static std::atomic<int> shown{0};
+        if (shown.fetch_add(1) < 8) {
+            logf("resource: Map asked for the texture the image placed at 0x%llx (subresource %u, returns to %p) - "
+                 "its pixels are not in memory the image can read; refused\n",
+                 self->title_address, subresource, _ReturnAddress());
+        }
+        if (data) {
+            *data = nullptr;
+        }
+        return 0x80004001L;
+    }
+    return static_cast<ID3D12Resource*>(self->pc)->Map(subresource, range, data);
+}
+
+void __stdcall w_resource_unmap(Wrap* self, unsigned int subresource, const D3D12_RANGE* range) {
+    if (self->title_address) {
+        return;
+    }
+    static_cast<ID3D12Resource*>(self->pc)->Unmap(subresource, range);
+}
+
+// Resource slot 10, GetDesc: the 56-byte description, in either argument order (see struct_return_thunk; the
+// image was seen calling it with the resource first and the place second). For a buffer over the image's memory
+// the width told is the one the image asked for, not the longer PC buffer's.
+void* __stdcall w_resource_desc(void* first, void* second) {
+    Wrap* self = is_wrap(first) ? static_cast<Wrap*>(first) : is_wrap(second) ? static_cast<Wrap*>(second) : nullptr;
+    void* const place = self == first ? second : first;
+    static std::once_flag once;
+    void* const returns_to = _ReturnAddress();
+    std::call_once(once, [self, first, returns_to] {
+        logf("resource slot 10 (description): called with %s (returns to %p)\n",
+             !self ? "no object of ours" : self == first ? "the resource first, the place second"
+                                                         : "the place first, the resource second",
+             returns_to);
+    });
+    if (!self || !place) {
+        return nullptr;
+    }
+    D3D12_RESOURCE_DESC desc = static_cast<ID3D12Resource*>(self->pc)->GetDesc();
+    if (self->over_image_memory) {
+        desc.Width = self->title_bytes;
+    }
+    std::memcpy(place, &desc, sizeof(desc));
+    return place;
 }
 
 // Resource slot 11 (GetGPUVirtualAddress): on the console a resource placed at an address of the image's memory
@@ -1783,7 +2165,8 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {23, reinterpret_cast<void*>(&w_device_copy_descriptors)},
          {24, reinterpret_cast<void*>(&cpu_handle_thunk<24, 2, 3>)},  // copy (count, to, from, type)
          {25, reinterpret_cast<void*>(&w_device_allocation_info)},
-         {26, reinterpret_cast<void*>(&struct_return_thunk<26>)},  // GetCustomHeapProperties
+         {108, reinterpret_cast<void*>(&w_device_allocation_info2)},
+         {26, reinterpret_cast<void*>(&struct_return_thunk<26, 20>)},  // GetCustomHeapProperties
          {27, reinterpret_cast<void*>(&create_thunk<27, 6, 7, kResource>)},  // committed resource
          {28, reinterpret_cast<void*>(&create_thunk<28, 2, 3, kMemoryHeap>)},
          {29, reinterpret_cast<void*>(&create_thunk<29, 6, 7, kResource>)},  // placed resource
@@ -1791,7 +2174,7 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {36, reinterpret_cast<void*>(&create_thunk<36, 3, 4, kFence>)},
          {39, reinterpret_cast<void*>(&create_thunk<39, 2, 3, kQueryHeap>)},
          {41, reinterpret_cast<void*>(&w_device_slot41)},
-         {43, reinterpret_cast<void*>(&struct_return_thunk<43>)},  // GetAdapterLuid
+         {43, reinterpret_cast<void*>(&struct_return_thunk<43, 8>)},  // GetAdapterLuid
          {48, reinterpret_cast<void*>(&w_device_slot48)},
          {73, reinterpret_cast<void*>(&w_device_slot73)},
          {74, reinterpret_cast<void*>(&w_device_slot74)},
