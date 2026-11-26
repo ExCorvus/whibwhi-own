@@ -17,13 +17,18 @@ shell/                       our runtime (C++17, MSVC)
                              does not start it
   thread_block.h / .cpp      whiwhi_tls.dll — the per-thread storage block the loader lends to the image
   host_libraries.hpp / .cpp  connects an import to the same-named library on the PC, when there is one
+  xmem.h / xmem.cpp          xmem.dll — the console's memory library, answered on a PC: 64 KiB physical
+                             pages, ranges they are mapped into, committed memory
+  console.hpp / console.cpp  where an import of a console image is connected: the shell's own library, or
+                             the PC's
   hosting.hpp / hosting.cpp  flat hosting model — one GPU backing over the game's flat VA space,
                              uniform heap_base shift, real pages bound on demand
   tools/list_imports.cpp     prints an image's imported libraries and function counts
   tools/describe_image.cpp   prints what an image asks of a loader (sections, relocations, thread-local storage)
   tools/connect_imports.cpp  loads an image without starting it and reports which imports connect
-  tests/                     unit tests (hosting, image, imports, loader, thread storage; no game data)
-  CMakeLists.txt             build definition (whiwhi_shell + whiwhi_tls.dll + tools + tests, CTest)
+  tests/                     unit tests (hosting, image, imports, loader, thread storage, console imports,
+                             memory library; no game data)
+  CMakeLists.txt             build definition (whiwhi_shell + whiwhi_tls.dll + xmem.dll + tools + tests, CTest)
   build.cmd                  build + test helper
 docs/
   exe-map/MAP.md             outward map of the original exe: memory model, GPU-address channels
@@ -45,7 +50,8 @@ LICENSE                      GPLv3-or-later (our own code)
 shell\build.cmd
 ```
 
-Builds `whiwhi_shell`, `whiwhi_tls.dll` and the tools, and runs the tests via CTest. No game data or GPU needed.
+Builds `whiwhi_shell`, `whiwhi_tls.dll`, `xmem.dll` and the tools, and runs the tests via CTest. No game data or
+GPU needed.
 
 ## License
 
