@@ -40,6 +40,9 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   device slots 57 (graphics) and 67 (compute). So a translator from that hardware code is the way to a picture;
   the PC device cannot take the game's shaders as they are. Nearly every request comes from the game's worker
   threads (tens of thousands in the first seconds); three come from the thread that created the device.
+  The shell can walk those programs (boots b86-b87): of the first 1,024 distinct programs, 997 are read
+  from their first word exactly to their end word; 27 contain words of no public instruction format. A count
+  of the instructions used is in docs/SHADER-TRANSLATOR.md section 13.
 - **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
   slots 57, 62, 67 and 86; each request is read and counted, and none can be made (the shader translator
   handles only straight-line compute test shaders), so every draw is held. Command-list methods that name buffers by address (slots 41 to 48: root
@@ -842,3 +845,22 @@ ExCorvus's: a real audio path behind the audio device object, or a silent device
   that asks (rule 7 as written forbids building pipelines on another thread).
 - Not established: where a program starts inside its block, what the other blocks of a description hold, and
   what the bytes between the DXIL header and "NOBC" are.
+
+## 2026-11-26 - the game's shader programs can be walked; what they are made of (boots b86-b87; measured)
+
+- New: `shell/shader_walk.*`, a reader of instruction lengths for every format of the console's instruction
+  set, written from the public description of the formats, with a test built from hand-made words.
+- The graphics library walks every distinct program block named by a slot 57 or slot 67 request once, in
+  memory, and counts instructions. Numbers only; nothing of a program is written to a file or to the log.
+- Result for the first 1,024 distinct programs of a run: 997 are read from their first word exactly to their end
+  word (106,163 instructions, 222 different format-and-opcode pairs, longest program 2,802 instructions). This
+  is the check that the length rules are right and that a program starts at its block's first byte.
+- 27 programs contain words of no public instruction format (top six bits 111111), always first met right
+  after the same instruction, followed by 3 to 60 words the walk cannot read. Unknown; not guessed at.
+- The count of instructions by use is in docs/SHADER-TRANSLATOR.md section 13. The first 16 pairs are about two
+  thirds of all instructions, the first 64 about 94%.
+- Found while doing this: the older instruction reader (`shell/shader_isa.*`) disagrees with the public format
+  description in places (it recognises one two-source vector opcode only, reads scalar-move fields from the
+  wrong bits, and looks for scalar memory loads under an older generation's format number). Its test passes
+  because the test was written to the same layout. The translator built on it handles only its own test
+  shaders. The reader has to be redone on top of the walk; nothing of the game was ever translated with it.
