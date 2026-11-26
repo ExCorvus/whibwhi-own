@@ -32,8 +32,10 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   (image+0x43ad94e) with the same unwind as boot b137; the process ended after 35 s.
 - **Textures:** a texture's bytes in the game's memory are in the shell's own untiled layout (xg_xs.h); the
   device tells the game that size when asked. A texture the game places at an address of its own memory is a
-  real texture in the PC device's memory - its pixels are not at that address. Nothing copies a texture's bytes
-  from the game's memory into a PC texture yet, so no texture with starting data can be sampled.
+  real texture in the PC device's memory - its pixels are not at that address. Since boot b152 a texture that
+  exists only as memory gets a PC texture filled from that memory when a view names it, and since boot b157 the
+  textures the game writes through Map are carried to their PC textures at each submission (entries of those
+  boots at the end).
 - **Network:** every imported function that could open a socket, resolve a name or make an HTTP request is
   connected to a refusal (docs/console-libs/network.md). No run so far has called one.
 - **Shaders (measured, boots b81-b108):** every pipeline request names shader containers with the public
@@ -60,10 +62,13 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   to the graphics device (docs/SHADER-TRANSLATOR.md sections 26 to 29). Nearly every request comes from the game's worker
   threads (tens of thousands in the first seconds); three come from the thread that created the device.
   Details: docs/SHADER-TRANSLATOR.md sections 13, 15 and 16, docs/exe-map/SHADER-PATH.md sections 10 to 12.
-- **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
-  slots 57, 62, 67 and 86; each request is read, its shaders are translated and a PC root signature is built
-  (49,533 whole requests prepared in boot b137), but none is given to the device yet, so every draw is held. The
-  command-list methods at slots 70, 71, 72, 74, 75, 126, 131, 132, 142 and 146 (what they are is not known).
+- **Pipelines (boots b160-b166):** device slot 86 requests are translated and built into real PC pipeline
+  states on the thread that asks, side by side (rule 7 as changed on 2026-11-26). Boot b166 built 34,679 in
+  200 s with no failure; each shader is translated once and kept in memory. The game's start-up waits for these
+  builds and presents only one frame in that time (entry "pipelines built side by side" at the end).
+- **Not built:** anything that draws the game's picture. Device slots 57, 62 and 67 (the other pipeline
+  requests) are still refused. The command-list methods at slots 71, 72, 74, 75, 131, 132 and 146 (what they
+  are is not known; slots 70, 126 and 142 are read, see their entries).
   The primitive topology number 0x11 (not a PC topology). Device slot 70 (views) is answered for buffers and
   for textures the game placed through slot 133; views of textures that exist only as memory and a tiling
   description (most of them) are not written yet (boot b144).
@@ -1578,3 +1583,24 @@ layout.
 **Measured (b157, 40 s, no exception, game folder unchanged).** Both textures mapped, Unmap seen, both carried
 into their PC textures once (2 copies). b153 and b154 stopped at the game's own watchdog at image+0x2215c35 before
 graphics started (the known slow start; the new code was not reached).
+
+## 2026-11-26 - pipelines built side by side; the game's start-up waits for them (measured, boots b158-b166)
+
+- After ExCorvus withdrew the thread ban of rule 7, device slot 86 builds each prepared request on the thread
+  that asks. One at a time (boots b160, b161): about 4,800 real PC pipeline states in 30 s, no failure, no
+  driver fault; four workers waited on the shell's lock while one compiled. Side by side (boot b163, 90 s):
+  23,041 built, no failure. In boots b158 and b159 the game's watchdog fired first: the shell's own diagnostic
+  logging read every pipeline description eight bytes at a time; it now looks at the first 64 requests of each
+  kind only (env `WHIWHI_PIPELINE_CENSUS=1` for all).
+- ExCorvus's hint that the shaders were "getting retranslated" was right: the shell translated both shaders of
+  every request again. They are now translated once and kept in memory by their bytes. Boot b166 (200 s):
+  34,679 pipelines built, no failure, all 34,679 PC pipeline streams different from each other; 714
+  translations made, 69,842 taken from memory. The time now goes to the PC driver compiling the pipelines.
+- The game still presents one frame in that time. Measured with the run tool's thread report (env
+  `WHIWHI_THREAD_REPORT_AT=30,60,...`, observation only): the main thread polls a semaphore at image+0x23ca9f9
+  that the game's render thread releases once per finished frame (fn 0x23cf210, release at its end through
+  fn 0x1f6e8e0); the render thread waits at fn 0xf9fbd0 for a free entry of a pool of 32 (counter at
+  image+0x75e8ea8, filled at start-up by fn 0x24781d0), and entries come back when a worker's pipeline request
+  (fn 0x2479f10, which calls the slot-86 caller fn 0x2479760) is done. So the render thread waits for pipeline
+  builds (inferred from the code and the measured stacks). In b141, where every request was refused at once,
+  the game asked about 50,000 times before it moved on.
