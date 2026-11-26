@@ -125,6 +125,38 @@ The console-only slots above 43 are answered as not provided today (logged once 
 of them, slot 48. After it, the ones the shell must answer for a frame are 73 (command list) and 78-81 (frame
 events).
 
+### 2.2c The game's device table set against the normal one
+
+The normal table is read from the Windows SDK header (`d3d12.h`, 10.0.26100.0, the C vtable of ID3D12Device11,
+the interface the game asks for): 80 methods, index 0 to 79 (**M**). Up to index 43 (GetAdapterLuid) the game's
+calls match it by index and shape (§2.1). From index 44 on they do not: the console device's table goes on to at
+least slot 133, and at each slot the game uses the normal table has a method of another shape. So above 43 the
+console table is its own, and each slot has to be matched by its shape, not by its number.
+
+| console slot | what the game passes (§2.2, measured at the call sites) | normal method at that index | normal method of the same shape (**I** = inferred from shape only) |
+|---|---|---|---|
+| 48 | 16-byte queue description, queue identifier, out | 48 OpenExistingHeapFromAddress | 8 CreateCommandQueue (**I**) |
+| 49 | (0x11f, 1), called only when a system version the game reads (fn 0x55dea0c) is at least 10.0.26100.9628 (the constant 0x000a000065f4259c at 0x2478667, compared at 0x2478677; it also sets byte image+0x765a6d9 = 1; where fn 0x55dea0c takes the version from is not read yet) | 49 OpenExistingHeapFromFileMapping | none found |
+| 55 | stored pipeline, count, list of 0x14c-byte records, pipeline identifier, out | 55 CreateReservedResource1 | none (console-only: a variant of a stored pipeline) |
+| 57 | record (first word a pointer), pipeline identifier, out | 57 CreateLifetimeTracker | not read yet |
+| 61 | one call in the shader system | 61 CreateMetaCommand | not read yet |
+| 62 | description {pointer at +0, count 1 at +0x18}, identifier, out | 62 CreateStateObject | not read yet |
+| 67 | stream description, called on a cache miss | 67 CreateProtectedResourceSession1 | 47 CreatePipelineState (**I**) |
+| 70 | view from raw descriptor words (6 callers) | 70 CreatePlacedResource1 | not read yet |
+| 71 | second view path | 71 CreateSamplerFeedbackUnorderedAccessView | not read yet |
+| 73 | 16-byte list description, allocator, 0, identifier, out | 73 CreateShaderCacheSession | 12 CreateCommandList / 51 CreateCommandList1 (**I**, partly) |
+| 74 | pool registration: pool address, pages, out | 74 ShaderCacheControl | none (console-only) |
+| 78-81 | frame interval, frame events, frame statistics | 78 CreateReservedResource2, 79 CreateSampler2, then nothing | none (console-only frame clock) |
+| 86 | {0x2b0, stream}, pipeline identifier, out | none (past the end) | 47 CreatePipelineState (**I**): same three arguments |
+| 119, 132, 133 | §2.2 | none (past the end) | not read yet |
+
+The game's pipeline path (fn 0x2479760, **M**): it first looks the pipeline up by its hash in a store of its own
+(fn 0x2479f40, store object at image+0x75ddb90). A stored pipeline with the same second key is taken as it is
+(only AddRef is called on it). A stored pipeline with another second key is made into a variant through slot 55.
+Only when nothing is stored does the game call slot 86; on success it keeps the result at +0x38 of its request and
+sets bit 0x80 of byte +0x1d. The device pointer the game calls these on (image+0x8759d00) is the same value as the
+one at image+0x75df000 (both written in fn 0x2478440).
+
 ### 2.2a Argument order of methods that return a structure (measured)
 
 At its three calls of slot 26 (0x247870d, 0x2478731, 0x2478758) the image passes the place for the returned
