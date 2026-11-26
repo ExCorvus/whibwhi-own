@@ -20,7 +20,6 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
-#include <map>
 #include <utility>
 
 static_assert(sizeof(WhiwhiXgDescription) == 0x38, "the description is 0x38 bytes");
@@ -212,24 +211,6 @@ void refuse(const char* what, const Computer* self, const char* why, void* retur
     }
 }
 
-// Texture memory this library has copied into: where it starts, the description it was laid out by, and a number
-// that grows with every copy into it (so a reader can tell that the bytes have changed since it last looked).
-struct Written {
-    WhiwhiXgDescription description;
-    unsigned long long generation;
-};
-SRWLOCK g_written_lock = SRWLOCK_INIT;
-std::map<std::uintptr_t, Written> g_written;
-unsigned long long g_generation = 0;
-
-void remember_written(const void* texture_memory, const WhiwhiXgDescription& description) {
-    AcquireSRWLockExclusive(&g_written_lock);
-    Written& w = g_written[reinterpret_cast<std::uintptr_t>(texture_memory)];
-    w.description = description;
-    w.generation = ++g_generation;
-    ReleaseSRWLockExclusive(&g_written_lock);
-}
-
 long method_release(Computer* self) {
     delete self;
     return kOk;
@@ -291,7 +272,6 @@ long method_copy_in(Computer* self, void* texture_memory, unsigned plane, unsign
         return kFail;
     }
     std::memcpy(destination, rows, static_cast<std::size_t>(mip->bytes));
-    remember_written(texture_memory, self->description);
     if (g_copy_lines.fetch_add(1) < 12) {
         note("copied subresource %u (%llu bytes) from %p into texture memory %p + 0x%llx [texture %llu x %u, format "
              "code %u]",
@@ -491,23 +471,6 @@ unsigned long long whiwhi_xg_total_bytes(const WhiwhiXgDescription* description)
     }
     const unsigned long long samples = description->samples ? description->samples : 1;
     return plan.slice_stride * plan.slices * samples;
-}
-
-int whiwhi_xg_written_at(unsigned long long address, WhiwhiXgDescription* description,
-                         unsigned long long* generation) {
-    AcquireSRWLockShared(&g_written_lock);
-    const auto found = g_written.find(static_cast<std::uintptr_t>(address));
-    const bool known = found != g_written.end();
-    if (known) {
-        if (description) {
-            *description = found->second.description;
-        }
-        if (generation) {
-            *generation = found->second.generation;
-        }
-    }
-    ReleaseSRWLockShared(&g_written_lock);
-    return known ? 1 : 0;
 }
 
 } // extern "C"
