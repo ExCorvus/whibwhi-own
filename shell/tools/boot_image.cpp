@@ -15,6 +15,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <tlhelp32.h>
 
 #include <atomic>
 #include <cstdint>
@@ -99,6 +100,95 @@ void dump_vtable(std::uintptr_t rcx) {
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+}
+
+// Where every other thread is at the moment a run ends inside the image (for example when the image's own hang
+// watchdog stops it): each thread is suspended, its stack unwound a few frames, then resumed; the frames are
+// printed after all threads run again, so no suspended thread can hold a lock the printing needs. Observation
+// only: nothing in the image changes and the watchdog is not touched.
+void report_other_threads() {
+    static std::atomic<bool> done{false};
+    if (done.exchange(true) || !g_loaded || !g_loaded->base) {
+        return;
+    }
+    constexpr int kThreads = 128, kFrames = 14;
+    static DWORD ids[kThreads];
+    static DWORD64 frames[kThreads][kFrames];
+    static int depth[kThreads];
+    int count = 0;
+    const DWORD self = GetCurrentThreadId();
+    const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    for (BOOL more = Thread32First(snap, &entry); more && count < kThreads; more = Thread32Next(snap, &entry)) {
+        if (entry.th32OwnerProcessID != GetCurrentProcessId() || entry.th32ThreadID == self) {
+            continue;
+        }
+        const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                                         FALSE, entry.th32ThreadID);
+        if (!thread) {
+            continue;
+        }
+        if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
+            CONTEXT c{};
+            c.ContextFlags = CONTEXT_FULL;
+            int n = 0;
+            if (GetThreadContext(thread, &c)) {
+                frames[count][n++] = c.Rip;
+                while (n < kFrames) {
+                    DWORD64 imgbase = 0;
+                    auto* fn = RtlLookupFunctionEntry(c.Rip, &imgbase, nullptr);
+                    if (fn) {
+                        void* handler = nullptr;
+                        DWORD64 est = 0;
+                        RtlVirtualUnwind(0, imgbase, c.Rip, fn, &c, &handler, &est, nullptr);
+                    } else {
+                        c.Rip = *reinterpret_cast<const DWORD64*>(c.Rsp);  // a leaf function
+                        c.Rsp += 8;
+                    }
+                    if (!c.Rip) {
+                        break;
+                    }
+                    frames[count][n++] = c.Rip;
+                }
+            }
+            ResumeThread(thread);
+            ids[count] = entry.th32ThreadID;
+            depth[count++] = n;
+        }
+        CloseHandle(thread);
+    }
+    CloseHandle(snap);
+    const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(g_loaded->base);
+    std::fprintf(stderr, "[boot] where the other %d thread(s) were when the run ended (innermost frame first):\n",
+                 count);
+    for (int t = 0; t < count; ++t) {
+        std::fprintf(stderr, "[boot]   thread %lu:", ids[t]);
+        for (int i = 0; i < depth[t]; ++i) {
+            const DWORD64 at = frames[t][i];
+            if (at >= base && at < base + g_loaded->size) {
+                std::fprintf(stderr, " +0x%llx", static_cast<unsigned long long>(at - base));
+                continue;
+            }
+            HMODULE module = nullptr;
+            char name[MAX_PATH] = "?";
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<const char*>(at), &module) &&
+                GetModuleFileNameA(module, name, sizeof name)) {
+                const char* slash = std::strrchr(name, '\\');
+                std::fprintf(stderr, " %s+0x%llx", slash ? slash + 1 : name,
+                             static_cast<unsigned long long>(at - reinterpret_cast<DWORD64>(module)));
+            } else {
+                std::fprintf(stderr, " [0x%llx]", static_cast<unsigned long long>(at));
+            }
+        }
+        std::fprintf(stderr, "\n");
+    }
+    std::fflush(stderr);
 }
 
 } // namespace
@@ -193,6 +283,12 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
         std::fprintf(stderr, "\n");
     }
     std::fflush(stderr);
+    if (g_loaded && g_loaded->base && (code == 0xC0000005 || code == 0x80000003)) {
+        const std::uintptr_t image = reinterpret_cast<std::uintptr_t>(g_loaded->base);
+        if (rip >= image && rip < image + g_loaded->size) {
+            report_other_threads();
+        }
+    }
     if (code == 0x80000003) {
         // The image installs an unhandled-exception filter of its own, so a run that ends at one of its
         // breakpoints may never come back through ours: the report is printed at the first breakpoint inside
@@ -442,6 +538,7 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lock(g_log);
             std::fprintf(stderr, "[boot] still running after %us - the image is alive; ending the boot\n", seconds);
             std::fflush(stderr);
+            report_other_threads();
             end_of_run_report();
             TerminateProcess(GetCurrentProcess(), 0);
         }
