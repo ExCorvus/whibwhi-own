@@ -6,31 +6,36 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 
 ## Current state (2026-11-26)
 
-- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 15 tests pass.
+- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 17 tests pass.
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
-- **Running:** the game's entry point is started. The furthest run (boot b64) goes through the game's memory
+- **Running:** the game's entry point is started. The furthest run (boot b74) goes through the game's memory
   start-up, loads the game runtime library, opens all of the game's package files (read-only, through the
   package drive the shell answers), creates a real graphics device (Direct3D 12 on Vulkan, through vkd3d-proton,
-  on the RX 9070 XT), and completes the game's graphics start-up function: five command queues, fences,
-  command allocators and lists, a frame clock, descriptor heaps at the addresses the game chose, two
-  3840 x 2160 display surfaces, command signatures, and two pieces of the game's own memory opened on the
-  device without a copy (a 174 MiB buffer and the 6.2 GiB page pool).
-- **Where it stops:** when the game creates its first texture (256 x 128, one mip, format code 61) it asks the
-  texture layout library (`xg_xs.dll`) for a layout computer. The shell's library refuses and clears the
-  result. The game does not check that answer and uses the object at once (a read at address 0 at
-  image+0x16f71ea).
+  on the RX 9070 XT) and completes the game's graphics start-up. It then reads its whole shader package through
+  the storage library (4,199 compressed pieces, each decoded by the shell's own zlib decoder into the game's
+  memory), creates its first textures and render targets, hands command lists to its threads, starts calling
+  command-list methods and submits its first lists to the queue.
+- **Where it stops:** the game asks a fence for the address of its completed value (fence method slot 12, a
+  console-only method). The shell answers "not provided", and the game uses that answer as an address (a read
+  at 0x80004001 at image+0x4fb0b03).
+- **Textures:** a texture's bytes in the game's memory are in the shell's own untiled layout (xg_xs.h); the
+  device tells the game that size when asked. A texture the game places at an address of its own memory is a
+  real texture in the PC device's memory - its pixels are not at that address. Nothing copies a texture's bytes
+  from the game's memory into a PC texture yet, so no texture with starting data can be sampled.
 - **Network:** every imported function that could open a socket, resolve a name or make an HTTP request is
   connected to a refusal (docs/console-libs/network.md). No run so far has called one.
-- **Not built:** anything that draws. The texture layout library. Pipeline states (the shader translator
-  handles only straight-line compute test shaders). Command-list methods above slot 26, except indirect
-  execution. Views made from raw descriptor words (device slot 70), device slots 61 and 86, presentation
-  (nothing is shown). The queue's page-mapping call (slot 31) is recorded exactly, but nothing reads the record
-  yet and no run has reached that call. The game runtime library answers every interface query with "no such
-  interface". The audio device and the ray-tracing builder are skeletons that answer failure.
-- **Answers that are less than the full work** are listed in the entry "answers that say yes" below; each one
-  is a place to look first when the game behaves wrongly later.
+- **Not built:** anything that draws. Pipeline states: the game asks for them through device slots 57, 62, 67
+  and 86 and all are refused (the shader translator handles only straight-line compute test shaders). Almost
+  all command-list methods: the ones the game has called so far and that are not answered are slots 32, 52, 71,
+  72, 74, 131, 132 and 146. Queue submission (slot 35) and the queue's fence signal (slot 16). Views made from
+  raw descriptor words (device slot 70) and samplers (slot 61). Presentation (nothing is shown). The queue's
+  page-mapping call (slot 31) is recorded but nothing reads the record. The game runtime library answers every
+  interface query with "no such interface". The audio device and the ray-tracing builder are skeletons that
+  answer failure. PC command allocators are never reset.
+- **Answers that are less than the full work** are listed in the entry "answers that say yes" below, and in the
+  newest entries; each one is a place to look first when the game behaves wrongly later.
 - **Nothing has been drawn on screen.**
 
 ## 2026-11-25 - the project restarts as its own shell
@@ -615,3 +620,83 @@ docs/console-libs/network.md).
 slot 61 creates a sampler at a position in the game's descriptor memory from a console-layout description;
 slot 70 writes a view at such a position from two description blocks; slot 86 is the public pipeline-state
 creation from a stream (its identifier is the public pipeline-state identifier). None is answered yet.
+
+## 2026-11-26 - the game reads its shaders, makes its textures and starts recording commands (boots b67-b74)
+
+Each run left the game folder unchanged.
+
+- **Objects the game is given.** Every graphics object now starts with 4 KiB the game may read and write (the
+  console's objects have fields the game uses directly), and the shell's own fields come after. Two values in
+  that area are the shell's choice, not measured console values: the device's byte at +0x18 is 1, which makes
+  the game send descriptor copies through the device instead of copying 32-byte records itself; and a command
+  list's write position (+0x18) equals its end (+0x30), which makes the game call a method for every command
+  instead of writing hardware command words into the list. At the end of a run the graphics library reports
+  what the game wrote into those areas; so far nothing.
+- **Texture layout library (xg_xs.dll).** The description both functions take is the game's resource
+  description: the same block, from the same builder, is what the game hands the device when it asks how much
+  memory a texture needs, and it has the public resource description's fields in the public order (the field
+  at +0x24 is samples per pixel, +0x2c a console tiling number - the game itself writes 0x105 there for a
+  volume). The library answers with an untiled layout of its own: rows packed one after another, mips one
+  after another, array slices after that; formats from the public format list only. The object's methods at
+  +0x40 and +0x48 copy rows into and out of texture memory (arguments measured: object, memory, 0,
+  subresource, rows, bytes per row, bytes per two-dimensional slice; +0x48 has the buffer second and the
+  memory sixth). XGSuggestSwizzleMode is refused; the game carries on.
+- **How the game makes a texture (measured, fn 0x193de10).** With starting data and no memory given: it asks
+  the device for the size and alignment (slot 25, or slot 108 = the same question with a longer description
+  and a 24-byte record), takes that much of its own memory (fn 0x2474690), has the layout object copy the
+  rows in, and creates NO resource object: the texture is memory plus a description, named later by address
+  in a view (device slot 70). A surface that can be displayed: a committed resource (slot 127). Anything else
+  (render targets, depth, textures without data): a resource placed at an address of its own memory (slot
+  133) whose fourth argument is the public initial-layout number (6 and 3 were seen).
+- **Size and alignment (slots 25 and 108).** The game asks with alignment 0x1000 when its own estimate is at
+  most 0x80007 bytes and asks again without it unless the answer's alignment is 0x1000; it stops itself when
+  the size needs more than 32 bits. With the console tiling number 0x105 in the description the PC device
+  answered failure, which stopped the game (boot b68, image+0x344196). The shell now answers for textures
+  itself: the total of its own untiled layout, rounded up to 0x1000 when asked, to 64 KiB otherwise. Buffers
+  still go to the PC device.
+- **Textures placed at an address (slot 133).** Answered with a real PC texture of the same description, kept
+  as standing at that address. Seen: 1 x 1 render targets and depth targets, 2560 x 1440 format 10 with flags
+  0x300005, 1280 x 720 format 42 with flags 0x300004 and tiling number 0x102. Console-only flag bits seen and
+  dropped: 0x300000, 0xc00000, 0x4800000. **The pixels are in the PC device's memory, not at the game's
+  address**; Map on such a texture is refused.
+- **Buffers placed at any address (slot 133).** The game placed a 16-byte buffer at an address ending in
+  0x6fc0; the PC device places resources only on 64 KiB boundaries and refused (boot b72). The PC buffer now
+  starts at the boundary below and the distance is added wherever the game names an offset inside the buffer
+  (buffer copies, indirect execution). Map on such a buffer answers the game's own address.
+- **Storage library.** The request the game fills is eight 64-bit words: options (0 = copy file bytes, 1 =
+  the bytes are one zlib stream), destination, zero, destination bytes, file object, file offset, source bytes,
+  zero. Read off a run and confirmed by behaviour: all 4,199 pieces of the shader package decoded to exactly
+  65,536 bytes each. The decoder is the shell's own (shell/inflate.*, from the public format description).
+  The queue's method at +0x20 is given the status array and an entry number (the public EnqueueStatus); a
+  request that is not carried out now answers a failure and the next status entry carries it. The queue's
+  method at +0x30 is called with (a pointer, 0x7ffffffffffffffc, 0) from image+0xe894a; what it is has not
+  been read, it answers "not provided" and the game carries on.
+- **Structure-returning methods, corrected.** Two orders are measured: the device takes the place for the
+  structure first and itself second (slots 25, 26, 108); a resource takes itself first and the place second
+  (slot 10, its 56-byte description, image+0x501f80b). A descriptor heap's 8-byte start is asked with the
+  heap alone and read from the register. An earlier version answered every object-first call in the register,
+  which left the resource's description unwritten.
+- **The queue's method order is not the public one.** Measured: slot 18 is called with the address of one
+  64-bit number and its result is checked as a success code (the public timestamp frequency, public slot 16);
+  slot 16 is called with a fence and a value (the public Signal, public slot 14); slot 35 is called with a
+  count, an array of lists, the frame token and a 32-bit 0 (submission; image+0x2482689). Until boot b73 the
+  shell forwarded queue slots 8 to 17 by the public order, so the game's Signal call would have reached the PC
+  queue's frequency method with a fence where a number's address belongs. No queue slot is forwarded by the
+  public order any more.
+- **Command allocator slot 9** (console-only): the game names one of its functions (image+0x555df10) and its
+  rendering context. That function cuts memory out of the context's frame memory: on the console the
+  allocator gets its command-buffer memory from the game. The shell keeps it on record and never calls it.
+- **Command list slot 139** (console-only): (list, allocator, 0, 0), a negative result stops the game. It is
+  how a list starts recording; answered with the PC list's Reset. The game never resets its allocators, so
+  the PC allocators grow for as long as it runs - not handled yet.
+- **Command list slot 32** was called with a count of 2 and an array of two descriptor heaps: the public
+  SetDescriptorHeaps, which the public list has at slot 28. Together with the earlier measurements this puts
+  console slots 32 to 52 four above the public ones (33/34 root signatures, 35/36 descriptor tables, 47/48
+  index and vertex buffers, 50 render targets, 52 clearing a render target - slot 52 was called with a
+  descriptor address, a pointer to four numbers, 0 and 0). Not installed yet.
+- **Fence slot 12** (console-only): called with the fence alone; the game reads a 64-bit number THROUGH the
+  result, compares it with -1 and with the value it waits for. So it returns the address of the fence's
+  completed value. This is where boot b74 stops.
+- **Pipeline states.** After reading the shaders the game asks for pipeline states through device slots 67,
+  62 and 57 (and 86 at start-up), each with the public pipeline-state identifier. All refused; the game
+  carries on without them.
