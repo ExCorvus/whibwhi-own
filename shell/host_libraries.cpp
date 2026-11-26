@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include <cctype>
+#include <cstdio>
 #include <string>
 
 namespace whiwhi::shell {
@@ -69,8 +70,12 @@ void* HostLibraries::resolve(const std::string& library, const ImportedFunction&
         SetErrorMode(old_mode);
         if (!module) {
             failed_[key] = error;
+            std::fprintf(stderr, "[libraries] %s: does not load here (error %lu)\n", library.c_str(), error);
             return nullptr;
         }
+        char file[MAX_PATH * 4] = {};
+        GetModuleFileNameA(module, file, sizeof(file));
+        std::fprintf(stderr, "[libraries] %s: loaded from %s\n", library.c_str(), file);
         it = loaded_.emplace(key, module).first;
     }
     const auto module = static_cast<HMODULE>(it->second);
