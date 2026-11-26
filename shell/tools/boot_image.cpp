@@ -492,10 +492,10 @@ int main(int argc, char** argv) {
         ResumeThread(thread);
         std::fprintf(stderr, "[boot] entry thread resumed\n");
         std::fflush(stderr);
-        // The image's watchdog compares the time of the last progress report (image+0x71b6338, written by one
-        // function of the image only; docs/exe-map/MAP.md section 2.2) once a second and stops the image after
-        // about 30 passes without a new one. That value is only read here, every half second, to show how long it
-        // went unchanged - how close the image's loop came to the watchdog's limit. Nothing is written.
+        // The image's watchdog thread compares the time of the last progress report (image+0x71b6338, written by
+        // one function of the image only; docs/exe-map/MAP.md sections 2.2 and 4) once a second; when about 30
+        // passes go by without a new one (300 s while a watch scope is open), the image stops itself. That value is
+        // only read here, every half second, to show how long it went unchanged. Nothing is written.
         const auto* progress = reinterpret_cast<const volatile unsigned long long*>(loaded.base + 0x71b6338);
         const ULONGLONG started = GetTickCount64();
         ULONGLONG changed_at = started;
@@ -516,7 +516,7 @@ int main(int argc, char** argv) {
             }
         }
         std::fprintf(stderr, "[boot] the watchdog's progress stamp (read only): %llu new reports, longest unchanged "
-                             "%.1f s (the watchdog stops the image after about 30 s)\n",
+                             "%.1f s (the image stops itself after about 30 s, or 300 s inside a watch scope)\n",
                      changes, static_cast<double>(longest) / 1000.0);
         std::fflush(stderr);
         if (wait == WAIT_TIMEOUT) {
