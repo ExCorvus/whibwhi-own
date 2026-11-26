@@ -3351,11 +3351,42 @@ void interface_statements(const std::uint8_t* container, std::uint32_t bytes,
         std::uint64_t attributes = 0;
         unsigned channels_of[64] = {};
         unsigned interpolations = 0;
+        // Which forms the program uses: the two steps (opcodes 0, 1) read a vector register each; the move
+        // (opcode 2) carries a selector in the same field. Counted so the reading of the field is measured.
+        unsigned steps = 0, moves = 0;
+        std::set<unsigned> first_step_sources, second_step_sources, selectors;
         for (const Instruction& i : code) {
             if (i.format == WalkFormat::kVintrp && i.opcode <= 2 && i.vintrp.attr < 64) {
                 ++interpolations;
                 attributes |= 1ull << i.vintrp.attr;
                 channels_of[i.vintrp.attr] |= 1u << (i.vintrp.attrchan & 3);
+                if (i.opcode == 2) {
+                    ++moves;
+                    selectors.insert(i.vintrp.vsrc);
+                } else {
+                    ++steps;
+                    (i.opcode == 0 ? first_step_sources : second_step_sources).insert(i.vintrp.vsrc);
+                }
+            }
+        }
+        if (interpolations) {
+            const auto list = [](const std::set<unsigned>& values, const char* prefix) {
+                std::string out;
+                char one[16];
+                for (unsigned v : values) {
+                    std::snprintf(one, sizeof(one), " %s%u", prefix, v);
+                    out += one;
+                }
+                return out.empty() ? std::string(" none") : out;
+            };
+            say.push_back(steps && moves ? "interpolation forms: steps and moves"
+                                         : steps ? "interpolation forms: steps only" : "interpolation forms: moves only");
+            if (steps) {
+                say.push_back("interpolation steps read: first step through" + list(first_step_sources, "v") +
+                              "; second step through" + list(second_step_sources, "v"));
+            }
+            if (moves) {
+                say.push_back("interpolation moves: selector value(s)" + list(selectors, ""));
             }
         }
         if (!interpolations) {
