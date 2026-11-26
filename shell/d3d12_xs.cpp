@@ -1651,6 +1651,111 @@ HRESULT __stdcall w_device_pipeline(Wrap*, void*, void*, void** out, void*, void
     return 0x80004001L;  // E_NOTIMPL
 }
 
+// Device slots 86 and 67: (device, {stream size, stream}, identifier, out), the three arguments of the public
+// CreatePipelineState (docs/exe-map/GRAPHICS-CALLS.md section 2.2c). Handed to the PC device's CreatePipelineState
+// unchanged, except that a root signature of this library's is replaced by the PC object behind it. The shaders in
+// the stream are the game's own; what the PC device answers is logged. A test of what the normal call says.
+template <typename T>
+void stream_shape(std::size_t& payload_at, std::size_t& whole) {
+    payload_at = (4 + alignof(T) - 1) / alignof(T) * alignof(T);
+    whole = (payload_at + sizeof(T) + 7) / 8 * 8;
+}
+
+bool stream_subobject(unsigned type, std::size_t& payload_at, std::size_t& whole) {
+    switch (type) {
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE: stream_shape<void*>(payload_at, whole); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS: stream_shape<D3D12_SHADER_BYTECODE>(payload_at, whole); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT: stream_shape<D3D12_STREAM_OUTPUT_DESC>(payload_at, whole); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND: stream_shape<D3D12_BLEND_DESC>(payload_at, whole); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS: stream_shape<UINT>(payload_at, whole); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER: stream_shape<D3D12_RASTERIZER_DESC>(payload_at, whole); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL: stream_shape<D3D12_DEPTH_STENCIL_DESC>(payload_at, whole); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT: stream_shape<D3D12_INPUT_LAYOUT_DESC>(payload_at, whole); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS: stream_shape<D3D12_RT_FORMAT_ARRAY>(payload_at, whole); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC: stream_shape<DXGI_SAMPLE_DESC>(payload_at, whole); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO: stream_shape<D3D12_CACHED_PIPELINE_STATE>(payload_at, whole); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1: stream_shape<D3D12_DEPTH_STENCIL_DESC1>(payload_at, whole); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING: stream_shape<D3D12_VIEW_INSTANCING_DESC>(payload_at, whole); return true;
+    default: return false;
+    }
+}
+
+HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const GUID* riid, void** out, void*, void*,
+                                           void*, void*, void*) {
+    static std::atomic<unsigned long long> asked{0}, made{0}, refused{0};
+    const unsigned long long n = ++asked;
+    if (out) {
+        *out = nullptr;
+    }
+    unsigned long long size = 0;
+    const std::uint8_t* stream = nullptr;
+    if (desc && can_read(desc, 16)) {
+        std::memcpy(&size, desc, 8);
+        std::memcpy(&stream, static_cast<const std::uint8_t*>(desc) + 8, 8);
+    }
+    std::string types;
+    HRESULT hr = 0x80070057L;  // E_INVALIDARG
+    std::vector<std::uint8_t> copy;
+    if (out && stream && size >= 8 && size <= 0x10000 && can_read(stream, static_cast<std::size_t>(size))) {
+        copy.assign(stream, stream + static_cast<std::size_t>(size));
+        bool walked = true;
+        for (std::size_t at = 0; at < copy.size();) {
+            unsigned type = 0;
+            std::memcpy(&type, copy.data() + at, 4);
+            types += (types.empty() ? "" : " ") + std::to_string(type);
+            std::size_t payload_at = 0, whole = 0;
+            if (!stream_subobject(type, payload_at, whole) || at + whole > copy.size()) {
+                walked = false;
+                break;
+            }
+            if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE) {
+                void* signature = nullptr;
+                std::memcpy(&signature, copy.data() + at + payload_at, 8);
+                signature = to_pc(signature);
+                std::memcpy(copy.data() + at + payload_at, &signature, 8);
+            }
+            at += whole;
+        }
+        if (walked) {
+            ID3D12Device2* device = nullptr;
+            hr = static_cast<IUnknown*>(self->pc)->QueryInterface(__uuidof(ID3D12Device2),
+                                                                 reinterpret_cast<void**>(&device));
+            if (hr == 0 && device) {
+                const D3D12_PIPELINE_STATE_STREAM_DESC pc_desc = {copy.size(), copy.data()};
+                ID3D12PipelineState* state = nullptr;
+                hr = device->CreatePipelineState(&pc_desc, __uuidof(ID3D12PipelineState),
+                                                 reinterpret_cast<void**>(&state));
+                device->Release();
+                if (hr == 0 && state) {
+                    *out = wrap_kind(state, kPipeline);
+                }
+            }
+        } else {
+            types += " (a type the public list does not have, or past the end)";
+        }
+    }
+    const unsigned long long count = hr == 0 ? ++made : ++refused;
+    if (n <= 8 || (count & (count - 1)) == 0) {
+        logf("device slot 86/67 (normal CreatePipelineState, stream unchanged) #%llu: %llu bytes, subobject types %s "
+             "-> 0x%08lx; %llu made, %llu refused by the PC device so far (returns to %p)\n",
+             n, size, types.c_str(), static_cast<unsigned long>(hr), made.load(), refused.load(), _ReturnAddress());
+    }
+    (void)riid;
+    return hr;
+}
+
 // Device slot 14, CreateDescriptorHeap(description, identifier, out). The description is the public 16-byte one
 // (type, count, flags, node mask; measured at the image's call). See "descriptor heaps" above for the address
 // the image sees. Heap type 4 exists only on the console and is refused.
@@ -3209,6 +3314,8 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {41, reinterpret_cast<void*>(&w_device_slot41)},
          {43, reinterpret_cast<void*>(&struct_return_thunk<43, 8>)},  // GetAdapterLuid
          {48, reinterpret_cast<void*>(&w_device_slot48)},
+         {67, reinterpret_cast<void*>(&w_device_stream_pipeline)},
+         {86, reinterpret_cast<void*>(&w_device_stream_pipeline)},
          {73, reinterpret_cast<void*>(&w_device_slot73)},
          {74, reinterpret_cast<void*>(&w_device_slot74)},
          {127, reinterpret_cast<void*>(&w_device_slot127)},
