@@ -129,11 +129,70 @@ events).
 
 At its three calls of slot 26 (0x247870d, 0x2478731, 0x2478758) the image passes the place for the returned
 structure in rcx and the device in rdx, then the method's arguments (r8d = 1, r9d = heap type 1, 2, 3). A PC
-object takes the object in rcx and the place in rdx. The shell's wrapper swaps the two for the
-structure-returning methods (device 25, 26, 43; descriptor heap 8, 9, 10; queue 18). Only slot 26 is measured;
-the others are given the same order by inference and need checking at their call sites.
+object takes the object in rcx and the place in rdx. Device slot 25 was seen in a run with the same order.
+A method that returns a structure of 8 bytes is different: descriptor heap slot 9 (the heap's start handle) was
+seen in a run with the object first and the value expected back in the register. The shell's wrapper looks at
+which of its first two arguments is one of its own objects and answers accordingly.
 
 The device is asked for with the public identifier of ID3D12Device11 ({5405c344-d457-444e-b4dd-2366e45aee39}).
+
+### 2.2b What the runs showed of the device start-up (boots b54-b64)
+
+In the order the image calls them inside fn 0x2478440 and the functions it calls. "Seen" means logged by the
+shell's graphics library in a run.
+
+| slot | what the image passes | what the shell does |
+|---|---|---|
+| 8 | main queue: description {0, 0, 0, 1}, the public queue identifier | a real PC queue |
+| 36 | fences, with the "shared" flag | real PC fences (the PC library says it ignores that flag) |
+| 48 | four queues, descriptions {2, 0, 1, 0}, {2, 0, 2, 0}, {2, 0, 3, 0}, {2, 0, 0, 1} | real PC queues of type = first number, priority = second; the third and fourth numbers are not understood and not applied |
+| 9 | command allocators | real PC allocators |
+| 73 | at 0x2478b71: (device, 16-byte description, allocator, 0, identifier, out). Descriptions {0, 2, 1, 0}, four times {2, 2, 1, 0} with compute allocators, then {0, 6, 1, 0}. The identifier is {c3827890-4024-474c-98cf-645b51dc4874}, not a public one | real PC command lists of type = first number; the other three numbers are not understood and not applied |
+| 78 | SetFrameIntervalX at 0x247abd8: (device, 0, interval in microseconds from the table at 0x61ece60 - 33333 in the runs, period 3, flags 0) | the shell's frame clock takes the interval |
+| 79 | ScheduleFrameEventX at 0x247abfc (type 0) and 0x2478de4 (type 2; a failure stops the image) | the clock keeps an offset per event type |
+| 80 | WaitFrameEventX at 0x2482405, 0x2482448, 0x2484637: (type, timeout in milliseconds, 0, flags, place for a 64-bit frame token) | waits on the clock and writes a token; not reached by a run yet |
+| 133 | at 0x1e8684c: (device, address, public resource description, 0xffffffff, no clear value, public resource identifier, out) for a buffer of 182,452,224 bytes inside the five-piece range of MAP.md | the span is opened as a heap over the image's own memory (the PC library does this with a host-memory import) and a real PC buffer is placed on it: no copy. Flag bit 0x20000 is console-only and dropped |
+| 15 | descriptor sizes for heap types 0..4 | PC values; type 4 is not a type a PC device has |
+| 14 | descriptor heaps. For the large type-0 heap the image first registers an allocation routine that answers an address of its own choice, and afterwards stops itself unless the heap's start is that address (fn 0x1cf3280) | see "allocation routines" below |
+| 70 | called through fn 0x4ecc800 with two local blocks and an address inside the type-0 heap | not provided; the image does not check the result |
+| 25 | allocation info, with flag bits 0x300000 | PC values; those bits are console-only and dropped |
+| 127 | at 0x193e1b4: the argument list of the public CreateCommittedResource3. Two surfaces of 3840 x 2160, format 28, heap flag 8 (can be displayed), flags 0x300005, initial layout 3 | two real PC surfaces; see "display surfaces" below |
+| 39, 27 | a query heap, a committed resource | real PC objects |
+| 41 | five command signatures: draw (stride 16), indexed draw (20), argument type 105 (12), dispatch (12), mesh dispatch (12) | four real PC signatures; type 105 is not a type a PC device has: kept as a description only |
+| 16 | a root signature | real PC object |
+| 61 | (a local block, the start of a type-1 descriptor heap, 1, 1), returns to 0x12b981e | not provided |
+| 74 | the 6,236 MiB page pool (99,776 pages) | the pool's memory is opened as a heap on the PC device (no copy) |
+| 86 | (a local block, an identifier at 0x61e06b8, a local block), returns to 0x2479a8d | not provided |
+
+With these the image's graphics start-up function returns success (boot b64).
+
+**Allocation routines.** The image exports one symbol, `__XMemAllocationHooks__`: a table whose first two
+entries are an allocate routine and a free routine inside the image. The allocate routine takes the request's
+allocator class from bits 16-23 of the attributes and walks a chain of routines registered for that class and
+thread; the chains end in XMemAllocDefault / XMemFreeDefault. From the name and this structure it is inferred
+that the console's XMemAlloc and XMemFree call these routines, and that the console's graphics library gets a
+descriptor heap's memory through XMemAlloc with allocator class 0x80 and 4 in the low bits. The shell does
+both, and the image's check of the heap's start passes - the inference is confirmed by that behaviour, not by
+reading the console's libraries.
+
+**Display surfaces.** The function that creates them (fn 0x247ad10) registers an allocation routine
+(fn 0x56a2a60) for requests with allocator class 0x80 and the value 2 in attribute bits 14-15, hands them out of
+one 64 MiB block, and afterwards stops itself unless less than 2 MiB of the block is left. The shell's library
+therefore asks XMemAlloc for width x height x bytes per pixel for each such surface (33,177,600 bytes each),
+with attributes 0x00808000. The exact size and low attribute bits the console's library uses are not known; the
+image accepts a range of sizes that contains this one. The pixels are in the PC device's memory, not in that
+block; nothing is stored in the block.
+
+### 2.2c The command list: which slots are known
+
+The shell forwards command-list slots 3..26 by the public order: the image's calls of slot 9 (Close), slot 15
+(the five arguments of CopyBufferRegion) and slot 26 (ResourceBarrier) agree with it. One call does not: the
+image executes its command signatures through slot 61 with exactly the arguments of ExecuteIndirect (at
+0x248cdef and in fn 0x94360), which the public list has at slot 59. So the order above slot 26 is not taken
+from the public list; every other slot is answered "not provided" and logged with its arguments until the
+image's own calls show what it is. Slots 131 and 132 are called on the first lists with numbers that look like
+sizes ((0x700000, 0, 0, ...) and (0xc3c0, 0x80020000, 0, ...)); their results are not checked.
+docs/exe-map/COMMAND-LIST.md has the list of call sites.
 
 ### 2.3 Queue slots
 
