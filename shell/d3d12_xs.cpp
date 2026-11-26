@@ -6211,6 +6211,7 @@ ID3D12Heap* span_heap(Wrap* device, unsigned long long address, unsigned long lo
 Wrap* wrap_kind(void* pc, int kind);
 unsigned public_resource_flags(unsigned flags, const char* where);
 void note_placed_buffer(Wrap* buffer);
+void note_placed_texture(Wrap* texture);
 
 // The image writes console tiling numbers (0x100 and up; 0x105 for a volume) where the public description has
 // its texture layout. A PC device chooses the layout of its own textures, so such a number is replaced by the
@@ -6282,6 +6283,7 @@ HRESULT placed_texture(Wrap* self, unsigned long long address, const D3D12_RESOU
     }
     Wrap* wrapped = wrap_kind(resource, kResource);
     wrapped->title_address = address;
+    note_placed_texture(wrapped);
     *out = wrapped;
     if (show) {
         logf("device slot 133: a real PC texture stands for the one the image placed at 0x%llx; its pixels are in "
@@ -6967,6 +6969,18 @@ void note_placed_buffer(Wrap* buffer) {
     ReleaseSRWLockExclusive(&g_placed_lock);
 }
 
+// 2b. Textures the image placed at an address of its own memory (PC textures standing for them), by that address.
+std::map<unsigned long long, Wrap*> g_placed_textures;  // under g_placed_lock
+
+void note_placed_texture(Wrap* texture) {
+    AcquireSRWLockExclusive(&g_placed_lock);
+    g_placed_textures[texture->title_address] = texture;
+    ReleaseSRWLockExclusive(&g_placed_lock);
+}
+
+// The PC buffer behind each entry of g_pc_ranges, by its start (under g_pc_ranges_lock).
+std::map<unsigned long long, ID3D12Resource*> g_pc_range_owners;
+
 void note_pc_range(Wrap* resource, unsigned long long start) {
     if (!start || resource->pc_range_start) {
         return;
@@ -6979,6 +6993,7 @@ void note_pc_range(Wrap* resource, unsigned long long start) {
     if (!resource->pc_range_start) {
         resource->pc_range_start = start;
         g_pc_ranges[start] = start + desc.Width;
+        g_pc_range_owners[start] = static_cast<ID3D12Resource*>(resource->pc);
     }
     ReleaseSRWLockExclusive(&g_pc_ranges_lock);
 }
@@ -6987,7 +7002,16 @@ void forget_resource_addresses(Wrap* resource) {
     if (resource->pc_range_start) {
         AcquireSRWLockExclusive(&g_pc_ranges_lock);
         g_pc_ranges.erase(resource->pc_range_start);
+        g_pc_range_owners.erase(resource->pc_range_start);
         ReleaseSRWLockExclusive(&g_pc_ranges_lock);
+    }
+    if (resource->title_address && !resource->over_image_memory) {
+        AcquireSRWLockExclusive(&g_placed_lock);
+        const auto found = g_placed_textures.find(resource->title_address);
+        if (found != g_placed_textures.end() && found->second == resource) {
+            g_placed_textures.erase(found);
+        }
+        ReleaseSRWLockExclusive(&g_placed_lock);
     }
     if (resource->over_image_memory) {
         AcquireSRWLockExclusive(&g_placed_lock);
@@ -7798,6 +7822,235 @@ HRESULT __stdcall w_presentx(Wrap* self, unsigned int plane_count, const unsigne
     return hr;
 }
 
+// ---- device slot 70: a shader resource view of a resource named by its address ------------------------------
+//
+// Read in the image (docs/exe-map/DESCRIPTORS.md section B): slot 70 is (device, block A, block B, destination).
+// Block A (0x38 bytes) is the resource's tiling description; block B is 0x40 bytes whose first 0x28 bytes have
+// the layout of the public D3D12_SHADER_RESOURCE_VIEW_DESC (format, view dimension, component mapping, and at +0x10
+// the 8-byte aligned union - the copy sizes fn 0x4ecc890 uses for each view dimension are the sizes of the public
+// union members), followed by the resource's GPU address at +0x28. The same block goes to the public slot 18 on
+// the image's other path. So the answer is the public CreateShaderResourceView, with the resource found from the
+// address: a buffer over the image's memory, a PC buffer whose address the image asked for, or a texture the image
+// placed at that address. Block A is not needed for that: the PC resource already has its own description. A view
+// whose resource cannot be found, or whose description the PC device would read differently, is not written.
+unsigned buffer_format_bits(unsigned format) {
+    if (format >= 1 && format <= 4) return 128;
+    if (format >= 5 && format <= 8) return 96;
+    if (format >= 9 && format <= 18) return 64;
+    if (format >= 23 && format <= 43) return 32;
+    if (format >= 48 && format <= 59) return 16;
+    if (format >= 60 && format <= 65) return 8;
+    if (format == 85 || format == 86 || format == 115) return 16;
+    if (format >= 87 && format <= 93) return 32;
+    return 0;  // not a format a buffer view can have, or not one of the public numbers
+}
+
+// The PC buffer and the offset in it that hold [address, address + bytes) of the image's addresses.
+bool pc_buffer_resource(unsigned long long address, unsigned long long bytes, ID3D12Resource*& resource,
+                        unsigned long long& offset, int& outcome) {
+    resource = nullptr;
+    AcquireSRWLockShared(&g_pc_ranges_lock);
+    auto range = g_pc_ranges.upper_bound(address);
+    if (range != g_pc_ranges.begin() && address + bytes <= (--range)->second) {
+        const auto owner = g_pc_range_owners.find(range->first);
+        if (owner != g_pc_range_owners.end()) {
+            resource = owner->second;
+            offset = address - range->first;
+        }
+    }
+    ReleaseSRWLockShared(&g_pc_ranges_lock);
+    if (resource) {
+        outcome = kAddressPcBuffer;
+        return true;
+    }
+    AcquireSRWLockShared(&g_placed_lock);
+    auto buffer = g_placed_buffers.upper_bound(address);
+    if (buffer != g_placed_buffers.begin()) {
+        const Wrap* w = (--buffer)->second;
+        if (address >= w->title_address && address + bytes <= w->title_address + w->title_bytes) {
+            resource = static_cast<ID3D12Resource*>(w->pc);
+            offset = w->placed_delta + (address - w->title_address);
+        }
+    }
+    ReleaseSRWLockShared(&g_placed_lock);
+    if (resource) {
+        outcome = kAddressPlacedBuffer;
+        return true;
+    }
+    unsigned long long pc = 0;
+    if (!pc_buffer_address(address, bytes, pc, outcome)) {
+        return false;
+    }
+    AcquireSRWLockShared(&g_windows_lock);
+    for (const auto& item : g_windows) {
+        const Window& w = item.second;
+        if (w.buffer && pc >= w.pc && pc + bytes <= w.pc + w.bytes) {
+            resource = w.buffer;
+            offset = pc - w.pc;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_windows_lock);
+    return resource != nullptr;
+}
+
+SRWLOCK g_slot70_lock = SRWLOCK_INIT;
+std::map<std::string, unsigned long long> g_slot70_refused;  // by reason
+std::atomic<unsigned long long> g_slot70_buffers{0}, g_slot70_textures{0};
+
+HRESULT slot70_refuse(const std::string& why, unsigned format, unsigned dimension, unsigned long long address) {
+    static std::atomic<int> shown{0};
+    AcquireSRWLockExclusive(&g_slot70_lock);
+    const bool first = ++g_slot70_refused[why] == 1;
+    ReleaseSRWLockExclusive(&g_slot70_lock);
+    if (first || few(shown, 8)) {
+        logf("device slot 70: view NOT written (%s): format %u, dimension %u, resource address 0x%llx\n", why.c_str(),
+             format, dimension, address);
+    }
+    return 0x80004001L;  // E_NOTIMPL
+}
+
+void log_slot70(const char* when) {
+    AcquireSRWLockShared(&g_slot70_lock);
+    const auto refused = g_slot70_refused;
+    ReleaseSRWLockShared(&g_slot70_lock);
+    const unsigned long long buffers = g_slot70_buffers.load(), textures = g_slot70_textures.load();
+    if (!buffers && !textures && refused.empty()) {
+        return;
+    }
+    logf("device slot 70 (%s): %llu buffer view(s) and %llu texture view(s) written on the PC device\n", when, buffers,
+         textures);
+    for (const auto& item : refused) {
+        logf("device slot 70 (%s): %llu x not written: %s\n", when, item.second, item.first.c_str());
+    }
+}
+
+HRESULT __stdcall w_device_slot70(Wrap* self, const void* block_a, const std::uint8_t* block_b,
+                                  unsigned long long destination, void*, void*, void*, void*, void*) {
+    static_assert(sizeof(D3D12_SHADER_RESOURCE_VIEW_DESC) == 0x28, "the public view description is 0x28 bytes");
+    static std::atomic<int> shown{0};
+    if (!block_b || !can_read(block_b, 0x30) || (block_a && !can_read(block_a, 0x38))) {
+        return slot70_refuse("a description block cannot be read", 0, 0, 0);
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+    std::memcpy(&desc, block_b, sizeof(desc));
+    unsigned long long address = 0;
+    std::memcpy(&address, block_b + 0x28, 8);
+    const unsigned format = static_cast<unsigned>(desc.Format);
+    const unsigned dimension = static_cast<unsigned>(desc.ViewDimension);
+    unsigned long long pc_handle = 0;
+    unsigned heap_type = 0;
+    if (!cpu_handle_in_heap_type(destination, pc_handle, heap_type)) {
+        return slot70_refuse("the destination is not a position in a descriptor heap of this library", format,
+                             dimension, address);
+    }
+    if (heap_type != static_cast<unsigned>(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)) {
+        return slot70_refuse("the destination is in a heap that does not hold views", format, dimension, address);
+    }
+    if (format > 115) {
+        return slot70_refuse("format " + std::to_string(format) + " is not one of the public numbers", format,
+                             dimension, address);
+    }
+    if (address == 0) {
+        return slot70_refuse("the resource address is 0", format, dimension, address);
+    }
+    ID3D12Resource* resource = nullptr;
+    D3D12_CPU_DESCRIPTOR_HANDLE handle{};
+    handle.ptr = static_cast<SIZE_T>(pc_handle);
+    if (desc.ViewDimension == D3D12_SRV_DIMENSION_BUFFER) {
+        D3D12_BUFFER_SRV& b = desc.Buffer;
+        const bool raw = (b.Flags & D3D12_BUFFER_SRV_FLAG_RAW) != 0;
+        if (b.Flags & ~static_cast<unsigned>(D3D12_BUFFER_SRV_FLAG_RAW)) {
+            return slot70_refuse("buffer flags other than raw", format, dimension, address);
+        }
+        if (raw && desc.Format != DXGI_FORMAT_R32_TYPELESS) {
+            return slot70_refuse("a raw buffer view whose format is not 39 (R32_TYPELESS)", format, dimension,
+                                 address);
+        }
+        if (b.StructureByteStride && desc.Format != DXGI_FORMAT_UNKNOWN) {
+            return slot70_refuse("a structure size together with a format (the PC device takes one or the other)",
+                                 format, dimension, address);
+        }
+        const unsigned element = raw ? 4u
+                                 : b.StructureByteStride ? b.StructureByteStride
+                                                          : buffer_format_bits(format) / 8u;
+        if (element == 0) {
+            return slot70_refuse("a buffer view format " + std::to_string(format) + " without a size per element",
+                                 format, dimension, address);
+        }
+        if (b.NumElements == 0) {
+            return slot70_refuse("a buffer view of no elements", format, dimension, address);
+        }
+        const unsigned long long bytes = (b.FirstElement + b.NumElements) * element;
+        unsigned long long offset = 0;
+        int outcome = kAddressNone;
+        if (!pc_buffer_resource(address, bytes, resource, offset, outcome)) {
+            return slot70_refuse(std::string("the buffer's memory is not open on the PC device: ") +
+                                     address_outcome_text(outcome),
+                                 format, dimension, address);
+        }
+        if (offset % element) {
+            return slot70_refuse("the buffer starts inside an element of the PC buffer that holds it", format,
+                                 dimension, address);
+        }
+        b.FirstElement += offset / element;
+        static_cast<ID3D12Device*>(self->pc)->CreateShaderResourceView(resource, &desc, handle);
+        const unsigned long long made = g_slot70_buffers.fetch_add(1) + 1;
+        if (few(shown, 6) || (made >= 64 && (made & (made - 1)) == 0)) {
+            logf("device slot 70: buffer view #%llu written at 0x%llx: format %u, %s%u element(s) of %u bytes from "
+                 "0x%llx (element %llu of the PC buffer)\n",
+                 made, destination, format, raw ? "raw, " : "", b.NumElements, element, address,
+                 static_cast<unsigned long long>(b.FirstElement));
+        }
+        return 0;
+    }
+    AcquireSRWLockShared(&g_placed_lock);
+    const auto found = g_placed_textures.find(address);
+    if (found != g_placed_textures.end()) {
+        resource = static_cast<ID3D12Resource*>(found->second->pc);
+    }
+    ReleaseSRWLockShared(&g_placed_lock);
+    if (!resource) {
+        return slot70_refuse("the address is not one of a texture the image placed", format, dimension, address);
+    }
+    const D3D12_RESOURCE_DESC have = resource->GetDesc();
+    D3D12_RESOURCE_DIMENSION wanted = D3D12_RESOURCE_DIMENSION_UNKNOWN;
+    switch (desc.ViewDimension) {
+    case D3D12_SRV_DIMENSION_TEXTURE1D:
+    case D3D12_SRV_DIMENSION_TEXTURE1DARRAY:
+        wanted = D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+        break;
+    case D3D12_SRV_DIMENSION_TEXTURE2D:
+    case D3D12_SRV_DIMENSION_TEXTURE2DARRAY:
+    case D3D12_SRV_DIMENSION_TEXTURE2DMS:
+    case D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY:
+    case D3D12_SRV_DIMENSION_TEXTURECUBE:
+    case D3D12_SRV_DIMENSION_TEXTURECUBEARRAY:
+        wanted = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        break;
+    case D3D12_SRV_DIMENSION_TEXTURE3D:
+        wanted = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+        break;
+    default:
+        return slot70_refuse("view dimension " + std::to_string(dimension) + " is not a texture view", format,
+                             dimension, address);
+    }
+    if (have.Dimension != wanted) {
+        return slot70_refuse("the view's dimension does not fit the texture placed at that address", format,
+                             dimension, address);
+    }
+    static_cast<ID3D12Device*>(self->pc)->CreateShaderResourceView(resource, &desc, handle);
+    const unsigned long long made = g_slot70_textures.fetch_add(1) + 1;
+    if (few(shown, 6) || (made >= 64 && (made & (made - 1)) == 0)) {
+        logf("device slot 70: texture view #%llu written at 0x%llx: format %u (texture's %d), dimension %u, of the "
+             "texture placed at 0x%llx (%llu x %u x %u, %u mips)\n",
+             made, destination, format, static_cast<int>(have.Format), dimension, address,
+             static_cast<unsigned long long>(have.Width), have.Height, static_cast<unsigned>(have.DepthOrArraySize),
+             static_cast<unsigned>(have.MipLevels));
+    }
+    return 0;
+}
+
 } // namespace
 
 extern "C" {
@@ -7897,6 +8150,7 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {61, reinterpret_cast<void*>(&w_device_slot61)},
          {62, reinterpret_cast<void*>(&w_device_slot62)},
          {67, reinterpret_cast<void*>(&w_device_pipeline_request<3, 67, 0x40>)},
+         {70, reinterpret_cast<void*>(&w_device_slot70)},
          {86, reinterpret_cast<void*>(&w_device_slot86)},
          {101, reinterpret_cast<void*>(&w_device_slot101)},
          {74, reinterpret_cast<void*>(&w_device_slot74)},
@@ -8017,6 +8271,7 @@ unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
     log_address_outcomes();
     log_sampler_places();
     log_pipeline_prep("whole run");
+    log_slot70("whole run");
     return written;
 }
 
