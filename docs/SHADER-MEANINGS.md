@@ -119,12 +119,12 @@ not-established list.
 |---|---|---|---|---|---|
 | SOP1 | 4 | `s_mov_b64` | copies a 64-bit scalar value (a register pair, or the VCC/EXEC pair) | A; L-td | tested (pair across the word boundary; VCC and EXEC) |
 | SOP1 | 3 | `s_mov_b32` | copies a 32-bit scalar value | A; L-td | tested |
-| SOP2 | 30 | `s_lshl_b32` | dst = src0 << src1 (the plain order, not reversed) | L-td pattern `(cshl_32 src0 src1)`; A | tested (counts 0, 31) |
-| SOP2 | 15 | `s_and_b64` | dst = src0 & src1 over 64 bits | L-td pattern | tested |
+| SOP2 | 30 | `s_lshl_b32` | dst = src0 << src1 (the plain order, not reversed); **SCC = the result is not zero** (corrected: this row first gave no SCC, and the interpreter left it as it was) | L-td pattern `(cshl_32 src0 src1)`; A | tested (counts 0, 31) |
+| SOP2 | 15 | `s_and_b64` | dst = src0 & src1 over 64 bits; **SCC = the result is not zero** (corrected: this row first gave no SCC, and the interpreter left it as it was) | L-td pattern | tested |
 | SOP2 | 39 | `s_bfe_u32` | the field described by src1: offset in bits [4:0], **width** in bits [22:16]; bits of the field past bit 31 are zero; width 0 is refused | Mesa's compiler writes the operand as `(width << 16) \| offset` wherever it emits the instruction (`aco_lower.cpp`; `aco_select_nir_intrinsics.cpp` has `28 \| (4 << 16)` commented "extract last 4 bits"). **Corrected:** this row first said "width - 1 in bits [10:5]", which no source supported; found when the statement was checked against the compiler. | tested (offset/width, the compiler's own example, width 1, width 32, field past bit 31, width 0 refused) |
-| SOP2 | 21 | `s_andn2_b64` | dst = src0 & ~src1 | L-td pattern `(and src0, (not src1))` | tested |
+| SOP2 | 21 | `s_andn2_b64` | dst = src0 & ~src1; **SCC = the result is not zero** (corrected: this row first gave no SCC, and the interpreter left it as it was) | L-td pattern `(and src0, (not src1))` | tested |
 | SOP2 | 11 | `s_cselect_b64` | dst = SCC ? **src0** : src1 — the **first** source is the true one (the opposite order to `v_cndmask_b32`) | L-td pattern: `(UniformSelect src0, src1)` selects into `S_CSELECT_B32` | tested (both conditions) |
-| SOP2 | 14 | `s_and_b32` | dst = src0 & src1 | L-td pattern | tested |
+| SOP2 | 14 | `s_and_b32` | dst = src0 & src1; **SCC = the result is not zero** (corrected: this row first gave no SCC, and the interpreter left it as it was) | L-td pattern | tested |
 | SOPK | 0 | `s_movk_i32` | dst = the 16-bit immediate, sign-extended | L-td (`S_MOVK_I32`) and the name | tested (0xFFFE, 0x7FFF) |
 
 ### SOPC (scalar compare; result to SCC)
@@ -186,3 +186,15 @@ not-established list.
 10. **A 64-bit move from a 32-bit inline constant** is sign-extended (`s_mov_b64 s[4:5], -1` gives all ones).
     That is the common idiom and the reading the interpreter uses; the sources read do not state it in words.
 11. **`op_sel` on a 32-bit three-operand instruction** is refused rather than ignored.
+
+## Correction: the scalar AND, AND-NOT and shift also write the condition (found by the PC shader pass's test)
+
+`s_and_b32`, `s_and_b64`, `s_andn2_b64` and `s_lshl_b32` write SCC besides their result: LLVM's
+`SOPInstructions.td` defines the logical and the shift instructions inside `let Defs = [SCC]`. The interpreter
+first left SCC untouched after them. The value it now writes is "the result is not zero". For the AND-NOT that
+meaning is what Mesa's compiler relies on: its pass that inserts the lane masks ends a program early, or clears
+the live mask, by the SCC that `s_andn2` of the live lanes and the discarded lanes leaves (`insert_exec_mask`,
+the discard and demote handling). For the plain AND and the shift the same meaning is taken from the same
+definition group; no file read for this work spells it out for those two (**taken to be so**). The mistake was
+found when random programs were run both through this interpreter and through the PC program written for them
+(`shell/tests/test_shader_pc.cpp`) and the two disagreed about SCC.
