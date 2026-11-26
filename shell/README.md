@@ -31,8 +31,12 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
   `device_address = heap_base + (game_va - flat_base)`. Not yet connected to a GPU.
 - `shader_container.hpp` / `shader_container.cpp` — recognises the two headers the game's shader bytes arrive
   with; it names no instruction stream it cannot prove.
-- `shader_isa.hpp` / `shader_isa.cpp` — reads the instruction words of a console shader. An instruction it cannot
-  classify is reported, not guessed.
+- `shader_walk.hpp` / `shader_walk.cpp` — where each instruction of a console shader program starts and how
+  many words it has, for every instruction format. Checked against the game's own programs in a run: a walk
+  that reads every length correctly lands exactly on the program's end word.
+- `shader_isa.hpp` / `shader_isa.cpp` — reads the fields of a few instructions for the translator. It is older
+  than the walk and disagrees with it in places (it knows one two-source vector opcode only, and reads
+  scalar-move fields from the wrong bits); it has to be redone on top of the walk before the translator grows.
 - `shader_translate.hpp` / `shader_translate.cpp` — translates a console shader to SPIR-V, kept in memory. Today
   it handles straight-line compute shaders of a handful of instructions and refuses everything else.
 - `spirv.hpp` / `spirv.cpp` — our own small SPIR-V writer.
@@ -77,8 +81,8 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 
 ## Tests
 
-`tests/` holds 17 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
-shader_container, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
+`tests/` holds 18 tests (hosting, image, imports, loader, thread_storage, console, xmem, d3d12_xs, shader,
+shader_container, shader_walk, offline, acpxapu, chad, xcrdapi, inflate, xg, gfx_stubs). They use made-up inputs only: no
 game files, no GPU.
 
 ## Build and test
