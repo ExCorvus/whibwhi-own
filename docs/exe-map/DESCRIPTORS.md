@@ -259,9 +259,13 @@ where noted):
 | +0x30..0x38 | | zeroed, never written | none |
 | +0x3c | 4 | 3, or -4 (0xfffffffc) when record byte +0x45 has bit 0x40 | none |
 
-**The view block is not the public `D3D12_SHADER_RESOURCE_VIEW_DESC` either**: the public union starts at +0x0c and
-a buffer's `FirstElement`/`NumElements` are 4 bytes apart, here they are at +0x10 and +0x18; the block is 8 bytes
-longer than the public struct and ends with a resource address and a small code. The same block is handed to
+**Correction (2026-11-26, boot b144):** the first 0x28 bytes of the view block **are** the public
+`D3D12_SHADER_RESOURCE_VIEW_DESC`. Its union is 8-byte aligned (the buffer member starts with an 8-byte
+`FirstElement`), so it starts at +0x10, not +0x0c, and `FirstElement`/`NumElements` are at +0x10/+0x18 as here;
++0x1c is `StructureByteStride` and +0x20 is `Flags` (1 = raw, set only with format 0x27 = R32_TYPELESS). The
+copy sizes in the table above are the sizes of the public union members. What the console adds is the
+resource address at +0x28 and the code at +0x3c. An earlier version of this section said the block was not
+the public struct; that was wrong. The same block is handed to
 **the public slot 18** in the other path (fn 0x164ee0, §D), so on the console both entry points take this same
 console-shaped description.
 
