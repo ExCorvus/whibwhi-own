@@ -7,6 +7,21 @@ module is asked for nothing in this document that needs the game started. RVAs a
 How to read the markings: **V** = read in the image's code or data, **I** = inferred from what the code does
 (reasoning stated), **U** = unknown.
 
+## 0. What the shell answers today (added after the map; seen in runs)
+
+- Every pair is answered "no such interface", except pair 6 below, the system interface
+  (`{e349bd1a-fc20-4e40-b99c-4178cc6b409f}` / `{1861cf2e-e18b-4834-a9f5-b4a4e6efb4cf}`).
+- **V** On that interface the method at `+0x20` is called from fn `0x55deaf4` with (32, a text buffer, a place
+  for a size); one caller, fn `0x3dda560`, then compares the text with `RETAIL`, `CERT`, `RKTR.99`, `CERT.DEBUG`
+  or a text beginning `RKTR` and stops at a breakpoint of its own (image+`0x3dda76b`) when none matches. This is
+  the one refusal among the pairs that did stop the game (section 3 said none does; that was wrong for this one).
+- **I** The argument list and the values are the public `XSystemGetXboxLiveSandboxId`. The shell answers the
+  sandbox name this PC stores, or `RETAIL` when it stores none, which is the default Microsoft's public page
+  documents. The methods at `+0x18` and `+0x28` (fn `0x55dd13c`, fn `0x55dd1d0`; three arguments, an error code
+  back; **U** what they are) and every other position answer "not implemented".
+- **V** Pair 7 (`{973a344e-…}`), method `+0x18`, is asked for one 32-bit number just before (fn `0x55dd264`); the
+  result is not checked. Not answered.
+
 ## 1. How the game reaches the library (measured)
 
 The library is not an import. It is loaded at run time:
