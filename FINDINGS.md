@@ -6,7 +6,7 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
 
 ## Current state (2026-11-26)
 
-- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 19 tests pass.
+- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 21 tests pass.
 - **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
   functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
   index 0.
@@ -34,15 +34,18 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   from the game's memory into a PC texture yet, so no texture with starting data can be sampled.
 - **Network:** every imported function that could open a socket, resolve a name or make an HTTP request is
   connected to a refusal (docs/console-libs/network.md). No run so far has called one.
-- **Shaders (measured, boots b81-b85):** every pipeline request names shader containers with the public
-  container's parts, but the part that would hold portable shader code holds none (its code field is the four
-  letters "NOBC"). The code the console runs is precompiled hardware code, handed over in the descriptions of
-  device slots 57 (graphics) and 67 (compute). So a translator from that hardware code is the way to a picture;
-  the PC device cannot take the game's shaders as they are. Nearly every request comes from the game's worker
+- **Shaders (measured, boots b81-b96):** every pipeline request names shader containers with the public
+  container's parts. The part that would hold portable shader code holds none (its code field is the four
+  letters "NOBC"), so the PC device cannot take the game's shaders as they are. What the part does hold is the
+  console's compiled program, zlib-packed: the shell unpacks it in memory, finds the program inside and reads
+  every instruction of it - in all 581 distinct containers of a run (567 pixel, 8 compute, 6 vertex shaders).
+  The same kind of program is also handed over ready-made in the descriptions of device slots 57 (graphics)
+  and 67 (compute); of 1,329 distinct ones in a run the shell reads 1,302 from the first word exactly to the
+  end word and decodes every one of those (27 contain words of no public instruction format).
+  A translator from that hardware code is the way to a picture. None is built: the shell can read the
+  programs and say what each expects and uses, nothing more. Nearly every request comes from the game's worker
   threads (tens of thousands in the first seconds); three come from the thread that created the device.
-  The shell can walk those programs (boots b86-b87): of the first 1,024 distinct programs, 997 are read
-  from their first word exactly to their end word; 27 contain words of no public instruction format. A count
-  of the instructions used is in docs/SHADER-TRANSLATOR.md section 13.
+  Details: docs/SHADER-TRANSLATOR.md sections 13 and 15, docs/exe-map/SHADER-PATH.md section 10.
 - **Not built:** anything that draws the game's picture. Pipeline states: the game asks for them through device
   slots 57, 62, 67 and 86; each request is read and counted, and none can be made (the shader translator
   handles only straight-line compute test shaders), so every draw is held. The
@@ -928,3 +931,87 @@ ExCorvus's: a real audio path behind the audio device object, or a silent device
   its own unhandled-exception filter, so the shell's was never reached and the report was missing from earlier
   logs.
 - Still held: every draw (no pipeline state), and the topology number 0x11.
+
+## 2026-11-26 - the shader containers do carry the console's program, packed; the shell unpacks and reads it (boots b89-b96; measured)
+
+This corrects the entry on boots b81-b85, which said the containers hold no code.
+
+**The instruction reader on the game's own programs (boot b89).** The reader rebuilt on the program walk
+(`shell/shader_isa.*`) was run in memory over the programs of the precompiled descriptions (device slots 57
+and 67): 1,329 distinct program blocks, 1,302 walks land on the end word, and the reader decoded all 1,302
+(none refused). 608 have a branch, 108 a backward branch (a loop), 8 use instructions of the two formats the
+shape pass does not follow.
+
+**What a program expects and uses (new: `shell/shader_shape.*`).** A pass over a decoded program, in stored
+order, that says which registers are read before they are written, what is exported, and where the
+descriptor of each image, sampler and buffer comes from. Stated limit: a write on a path that is skipped
+still counts as a write, so the "read before written" sets can be too small. Measured over the 1,302:
+
+- Exports: 945 programs export colour (pixel programs), 315 position and parameters (vertex programs), 21
+  nothing (compute programs), 12 position only, 5 depth, 4 other targets.
+- Every descriptor is loaded in ONE step from a table whose address is in a register the program does not
+  set itself, at an offset that is a multiple of 32 bytes. No descriptor is reached through two loads.
+  Reading (an inference from these numbers): such a register holds the address of a descriptor table in the
+  game's descriptor memory, and the program loads the 32-byte record straight from it; offset / 32 is the
+  descriptor's position in the table.
+- Which register carries which table differs between programs (pixel programs mostly s8, s9, s11, s12;
+  compute programs s4 to s7; vertex programs s0 to s2 or s4, s8) and is not established.
+
+**The containers carry the program (boots b90-b96).** Inside a container's 'DXIL' part, after the public
+24-byte program header, stands a directory: the bytes 'XDAT', a word (3), the size of the entries, then
+entries of 12 bytes {kind, offset, size}. Three entries in every container: kind 0x12 (16 bytes), kind 0x0D
+(a block), kind 0x07 (28 bytes that end in the four letters the public header names as its code). The block
+of kind 0x0D starts with 'XBCH', a word (3), the packed size, 0, the unpacked size, 0, and then one zlib
+stream. `shell/shader_program.*` reads this and unpacks the block in memory with the shell's own zlib decoder
+(`read_packed_program`); nothing is written to disk.
+
+The unpacked block is a module. Measured over all 581 distinct containers named by the pipeline requests of
+a run (boot b96; 2.7 MiB unpacked from 0.4 MiB packed):
+
+- All 581 start with the bytes 'FSSM', then the word 0x101, then the block's size minus 16; the word at
+  +0x10 is 6.
+- The header places from +0x18 to +0x70, eight bytes apart, hold a padding value except one, which holds a
+  number: at +0x40 in all 567 pixel shader modules, at +0x38 in all 6 vertex shader modules, at +0x70 in all
+  8 compute shader modules. That number plus 0x10 is the place of a record whose first word plus 0x10 is
+  where the code starts and whose third word is the code's size.
+- In all 581 a walk from the code's first word lands exactly on the block's one end-of-program word, only
+  filler words follow up to the code's end, and the instruction reader decodes the program.
+  `find_module_program` in `shell/shader_program.*` does this and refuses, with a reason, any block that is
+  laid out differently; it takes all 581.
+- What stands before the code (tables; in pixel shader modules also seven slots of short instruction
+  sequences that end in export instructions) and after it (a table of numbers, the shader's name as text)
+  is not established.
+- None of the 581 programs has the same words as a program from a precompiled description. Reading (an
+  inference, not established): the console's pipeline creation finishes the program for the pipeline at
+  hand - the seven slots look like ready-made endings for different render-target formats.
+
+**Two wrong readings on the way, corrected by the count.** A walk started in the zero words before the code,
+or at the module's first byte, also reaches the end word, because those words happen to read as one-word
+instructions. Both were first taken for the program's start. The header is the proof of the start, not a
+walk that lands. (A zero word reads as "VOP2 opcode 0"; the 429 such instructions counted in boots b86-b87
+may be zero words. Not checked.)
+
+**What the module programs expect (boot b96).** Pixel: scalar registers s8-s9 s11-s12 in 381 programs,
+s8-s12 in 83, s8 s12 in 39, s12 alone in 38; images from the table in s8 (1,061 uses) or s13 (100), samplers
+from the table in s11 (803), constant buffers from the table in s8 (436) or s13 (100). Compute: s4-s7 in all
+8; images and constant buffers from the table in s4. Vertex: s4 s8 in 5, s8-s9 in 1.
+
+**The public parts say what the shader binds.** Every container also has the public parts ISG1, OSG1 (the
+shader's inputs and outputs) and PSV0, which lists the resources the shader uses with their register and
+space. In the one pixel shader read closely, PSV0 lists a constant buffer and a 2-D texture, and the program
+takes an image from the table in s8 and a sampler from the table in s11. How registers map to the root
+signature's parameters is the next thing to establish; the module's tables and PSV0 are where to look.
+
+**A fact about the PC side (read in the source of vkd3d-proton).** The PC device takes shaders only as
+containers of its own two kinds (the older token format, or DXIL). Its one way to be handed SPIR-V is a
+debugging feature that reads files from a folder, which the shell does not use (rule 5). So a translator
+that writes SPIR-V has no way into the PC device as it is built. Either the translator writes one of the two
+container kinds, or the separately built library gets a small in-memory entry for translated shaders. Not
+decided; it touches rule 8, so it is ExCorvus's decision.
+
+**Code.** New: `shell/shader_shape.*` with its test, `shell/shader_program.*` with its test (hand-built
+containers and modules only). The graphics library counts, per run and in memory: what the precompiled
+programs and the module programs expect and use, per kind of shader. 21 tests.
+
+**Not done.** No program is translated. The mapping from a program's registers to root parameters, the
+tables of the module, control flow and the back end are all open.
