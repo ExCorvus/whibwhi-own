@@ -243,7 +243,7 @@ where noted):
 | +0x00 | 4 | format byte of the texture/buffer record | `Format`, but see the numbering note |
 | +0x04 | 4 | view dimension; values seen 1, 4, 5, 8, 9 | `ViewDimension` (public `D3D12_SRV_DIMENSION` numbering: 1 BUFFER, 4 TEXTURE2D, 5 TEXTURE2DARRAY, 8 TEXTURE3D, 9 TEXTURECUBE) — **measured values, matching numbering** |
 | +0x08 | 4 | 0x1688, or 0x1688 when `(r8d & ~0x1000) ^ 0x1924` equals 0x1688 | `Shader4ComponentMapping`; 0x1688 is `D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING` (SWIZZLE_R, G, B, A) |
-| +0x0c | 4 | never written by the image in these paths — a gap the public struct does not have | none |
+| +0x0c | 4 | never written by the image in these paths — the same alignment gap as in the public struct (see the correction below) | padding |
 | +0x10 | 4 | texture: most detailed mip; buffer: first element | `MostDetailedMip` / `FirstElement` |
 | +0x14 | 4 | texture: mip count (`record[+0x42] - mip`) | `MipLevels` |
 | +0x18 | 4 | texture: first array slice (always 0); buffer: element count | `FirstArraySlice` / `NumElements` |
@@ -254,11 +254,20 @@ where noted):
 | +0x30..0x38 | | zeroed, never written | none |
 | +0x3c | 4 | 3, or -4 (0xfffffffc) when record byte +0x45 has bit 0x40 | none |
 
-**The view block is not the public `D3D12_SHADER_RESOURCE_VIEW_DESC` either**: the public union starts at +0x0c and
-a buffer's `FirstElement`/`NumElements` are 4 bytes apart, here they are at +0x10 and +0x18; the block is 8 bytes
-longer than the public struct and ends with a resource address and a small code. The same block is handed to
-**the public slot 18** in the other path (fn 0x164ee0, §D), so on the console both entry points take this same
-console-shaped description.
+**Correction (2026-11-26, measured with the compiler on the Windows SDK 10.0.26100 header):** an earlier version of
+this paragraph said the public union starts at +0x0c. It starts at **+0x10**: the union holds the 8-byte
+`FirstElement`, so it is 8-aligned and the public struct has the same gap at +0x0c. `sizeof` is 40 (0x28). Public
+offsets: buffer `FirstElement` +0x10 (8 bytes), `NumElements` +0x18, `StructureByteStride` +0x1c, `Flags` +0x20;
+texture 2D `MostDetailedMip` +0x10, `MipLevels` +0x14, `PlaneSlice` +0x18, `ResourceMinLODClamp` +0x1c; texture 2D
+array `MostDetailedMip` +0x10, `MipLevels` +0x14, `FirstArraySlice` +0x18, `ArraySize` +0x1c, `PlaneSlice` +0x20,
+`ResourceMinLODClamp` +0x24.
+
+So **the first 0x28 bytes of the view block are the public `D3D12_SHADER_RESOURCE_VIEW_DESC`**, field for field: the
+buffer path's 1 at +0x20 with format 0x27 is the public `D3D12_BUFFER_SRV_FLAG_RAW` with `R32_TYPELESS`, and the
+texture-array path's 1 at +0x20 for format 0x16 (`X32_TYPELESS_G8X24_UINT`) is `PlaneSlice` 1, the stencil plane
+(meanings by the public header; offsets measured). The console adds two fields after the public struct: the
+resource's GPU address at +0x28 and a small code at +0x3c. The same block is handed to **the public slot 18** in the
+other path (fn 0x164ee0, §D); the PC library reads only its first 0x28 bytes there.
 
 `fn 0x4ecc8f0(record)`: returns the resource's GPU address — if record +0x20 is a non-null pointer, it calls that
 object's vtable slot 0x58; otherwise it takes the address at record +0x18 and, when it falls inside the view base
