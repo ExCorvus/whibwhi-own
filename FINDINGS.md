@@ -26,7 +26,8 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   audio device (AcpHalCreate); the shell answers "not provided", because a PC has no console audio processor;
   the game's audio start-up has no path for that failure and stops at its own breakpoint (image+0x43ad94e).
   Going further needs either a real audio path behind that object, or a decision by ExCorvus to accept a silent
-  device as a stated exception to rule 4. It is not decided and nothing was built for it.
+  device as a stated exception to rule 4. It is not decided and nothing was built for it. This is the only
+  stop left at that point (boot b80); the game has no switch of its own for running without audio hardware.
 - **Textures:** a texture's bytes in the game's memory are in the shell's own untiled layout (xg_xs.h); the
   device tells the game that size when asked. A texture the game places at an address of its own memory is a
   real texture in the PC device's memory - its pixels are not at that address. Nothing copies a texture's bytes
@@ -42,7 +43,8 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   and samplers (slot 61). Reading or writing a texture the game keeps at its own address (its Map is refused).
   Device slot 81 (a per-frame query; the game tolerates the refusal). The queue's page-mapping call (slot 31)
   is recorded but nothing reads the record. The game runtime library answers every interface query with "no
-  such interface". The audio device and the ray-tracing builder are skeletons that answer failure. PC command
+  such interface", except the system interface, where one method is answered: the sandbox name. The audio
+  device and the ray-tracing builder are skeletons that answer failure. PC command
   allocators are never reset, so memory grows while a run lasts.
 - **Answers that are less than the full work** are listed in the entry "answers that say yes" below, and in the
   newest entries; each one is a place to look first when the game behaves wrongly later.
@@ -773,3 +775,41 @@ shell's own pacing. The submission's last number and the frame token are not use
 colour space and parameters are not used, and only the first plane is shown. The surface is copied without
 tracking the state the game left it in. The window is shown by the shell. Lists are closed by the shell at
 submission. PC command allocators are never reset.
+
+## 2026-11-26 - the sandbox name is answered; audio is the one stop left (boot b80)
+
+**The second stop of boots b75 to b79, read.** Besides the audio stop, those runs hit a breakpoint at
+image+0x3dda76b. The function there (fn 0x3dda560, a method reached through an object's table from fn 0x3da1560)
+asks the game runtime library for two things and then checks one of them:
+
+- pair `{973a344e-24bf-4d0f-8457-56c534892b29}` / `{2549f142-6419-4a06-97b5-931aab7c2f34}`, method at +0x18,
+  one argument (a place for a 32-bit number). The result is not checked; the number is formatted into a text.
+  Not answered. (By its shape it could be the public XGameGetXboxTitleId; that is a guess.)
+- pair `{e349bd1a-fc20-4e40-b99c-4178cc6b409f}` / `{1861cf2e-e18b-4834-a9f5-b4a4e6efb4cf}`, method at +0x20,
+  called with (32, a text buffer, a place for a size). The game then compares the text with names it holds in
+  scrambled form in its code: `RETAIL`, `CERT`, `RKTR.99`, `CERT.DEBUG`, or anything beginning with `RKTR`, and
+  stops at the breakpoint when none matches. With the query refused the text stayed empty, hence the stop.
+
+That argument list and those values are the public `XSystemGetXboxLiveSandboxId(sandboxIdSize, sandboxId,
+sandboxIdUsed)`. Microsoft's public page for it says the sandbox ID is stored on the device and "defaults to
+'RETAIL'" when none is found.
+
+**What the shell answers.** Our runtime library now provides that one interface with that one method: it
+answers the sandbox name this PC stores, or `RETAIL` when it stores none (this PC stores none). Where a PC
+stores it is taken to be the registry value `Sandbox` under `HKLM\SOFTWARE\Microsoft\XboxLive` (the place
+Microsoft's own sandbox switching script for PCs writes; taken from memory, not re-verified). The two other
+methods the game calls on that interface (+0x18 and +0x28, three arguments each, an error code back) and every
+other position are logged and answered "not implemented". Boot b80: the name was asked for, answered `RETAIL`,
+and the game went on (it reads more files afterwards). The shell still refuses every network call, so the name
+does not put anything online.
+
+**Related, measured on the way.** The game's device-type check (fn 0x55deb88, used by the memory start-up)
+does not ask the runtime library: it reads the registry value `ConsoleMode` under
+`HKLM\Software\Microsoft\Windows NT\CurrentVersion\OEM` and answers "PC" (1) when the key is absent, which
+is the case here. The memory start-up accepts PC and the three Series device types.
+
+**Audio is the one stop left, and the game has no switch for it.** The audio set-up (fn 0x43a6420) calls the
+hardware start-up only when the byte at image+0xaa31c54 is 1. That byte has one writer in the whole image
+(fn 0x25a4c00), which stores the constant 1. So this build always starts audio hardware; there is nothing of
+the game's own to turn it off with, and the shell does not change that byte. The choices are unchanged and are
+ExCorvus's: a real audio path behind the audio device object, or a silent device accepted as a stated exception.
