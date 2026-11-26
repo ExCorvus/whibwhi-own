@@ -37,7 +37,28 @@ the tools.
 ctest --test-dir shell\build --output-on-failure
 ```
 
-17 tests, no GPU and no game files needed (all inputs are made up).
+27 tests, no GPU and no game files needed (all inputs are made up). They check pieces and are a build check
+only; they are not proof that the shell works with the game (AGENTS.md rule 11). That is the game test:
+
+## The game test (the real game, from your copy)
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\game_test.ps1 -Game <your game folder> [-Seconds 60] [-Accept]
+```
+
+It builds the shell, runs the real game from your copy inside it once (read-only; the folder is checked
+unchanged afterwards), and records what the game did:
+
+- every function the game imports, how often the game called it during the run, and whether the shell provides
+  it (the loader puts a small counting stub in each import slot; `WHIWHI_CALL_LEDGER` names the file);
+- every distinct "not provided" answer the shell gave, with the address in the game it was called from;
+- whether the game was still alive at the end, the last frame number and how many pipelines were made.
+
+It compares that with the last run you accepted (`-Accept` makes a passing run the baseline) and says PASS or
+FAIL: FAIL when the game folder changed, when the baseline was alive at its end and this run is not, or when an
+import the game called in the baseline is not provided any more. Every other difference is listed as a note.
+The records stay on your PC (`%LOCALAPPDATA%\whiwhi\game-tests`, or `-Out`); they hold names, counts and
+addresses only, nothing of the game itself.
 
 ## Run the shell against the game
 
