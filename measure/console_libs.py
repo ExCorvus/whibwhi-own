@@ -291,6 +291,13 @@ c.same("bind (#2): three calls; listen (#13): one; accept (#1): one, in fn 0x28c
        [[0x28C736C, 0x41E6742, 0x41E67A9], [0x28C737F], [(0x28C73DF, 0x28C73B0)]])
 c.same("connect (#4): two calls", ws2_calls(4), [(0x41E2E20, 0x41E2DD0), (0x58AAFC8, 0x58AAF80)])
 c.same("fn 0x41e2dd0 tolerates 10035 and 10036 after a connect", {10035, 10036} <= immediates(0x41E2DD0), True)
+# Read 2026-11-27 with Ghidra (network.md 2.1 named only the path through 0x5bf0410): a second way in, through a
+# piece without a .pdata entry.
+c.same("fn 0x5a61140 is also reached through the piece at 0x5a61130, called at 0x221ee26 in fn 0x221edc0",
+       exe.reached_by(0x5A61140, depth=1),
+       [(0x5A61130, None, 0x5A61130), (0x221EE26, 0x221EDC0, None), (0x5BF0439, 0x5BF0410, None)])
+c.same("fn 0x221edc0 is called by fn 0x1d109b0, in the runtime set-up area", exe.callers_and_jumps(0x221EDC0),
+       [0x1D109B0])
 
 # --- xgameruntime.dll, loaded at run time (xgameruntime.md section 1) ----------------------------------------------
 c.same("xgameruntime.dll is not an import", any(lib.lower() == "xgameruntime.dll" for lib, _ in exe.imports()), False)
@@ -313,5 +320,33 @@ slots_called = [poke[i - 1].operands[1].mem.disp for i, ins in enumerate(poke)
                 and poke[i - 1].mnemonic == "mov" and poke[i - 1].operands[1].type == X86_OP_MEM]
 c.same("fn 0x55ddff0 calls method +0xe8, then Release (+0x10)", slots_called, [0xE8, 0x10])
 c.same("58 of the 161 wrappers call fn 0x55ddff0", len(set(exe.callers(0x55DDFF0)) & set(wrappers)), 58)
+
+# Read 2026-11-27 with Ghidra: the three methods xgameruntime.md called "no caller at all in this build" are reached
+# through small pieces without a .pdata entry.
+c.same("the wrappers that no .pdata function calls or jumps to",
+       [w for w in wrappers if not exe.callers_and_jumps(w)], [0x55DDD30, 0x55DEFF0, 0x55E0684])
+method = {}
+for w in (0x55DDD30, 0x55DEFF0, 0x55E0684):
+    body = exe.instructions(*exe.function_of(w))
+    method[w] = [body[i - 1].operands[1].mem.disp for i, ins in enumerate(body)
+                 if ins.mnemonic == "call" and ins.operands[0].type == X86_OP_IMM and ins.operands[0].imm == 0x56A2070
+                 and body[i - 1].mnemonic == "mov" and body[i - 1].operands[1].type == X86_OP_MEM][0]
+c.same("their methods: #2 +0x30, #5 +0x70, #15 +0x138", method,
+       {0x55DDD30: 0x30, 0x55DEFF0: 0x70, 0x55E0684: 0x138})
+plus_30 = exe.reached_by(0x55DDD30, depth=1)
+c.same("#2 +0x30: the piece at 0x2213b10 jumps into it (0x2213b34) and is called from 10 functions",
+       [plus_30[0], sorted({f for _, f, _ in plus_30[1:]})],
+       [(0x2213B34, None, 0x2213B10), [0x223C950, 0x28D1130, 0x28D1A30, 0x28D26E0, 0x28D2770, 0x28D2980, 0x28D2F40,
+                                       0x28D30A0, 0x28D3660, 0x28D39A0]])
+c.same("#5 +0x70: the piece at 0x3e41b40 jumps into it (0x3e41b48), called at 0x3e410d9 in fn 0x3e40e80",
+       exe.reached_by(0x55DEFF0, depth=1), [(0x3E41B48, None, 0x3E41B40), (0x3E410D9, 0x3E40E80, None)])
+stub_138 = exe.reached_by(0x55E0684, depth=1)
+kept = [(a, f) for a, f, _ in exe.rip_references(0x2937BF0)]
+c.same("#15 +0x138: the piece at 0x2937bf0 jumps into it (0x2937c01); fn 0x1ce6f10 keeps the piece's address "
+       "(at 0x1ce6f8b) for a later call", [stub_138, kept],
+       [[(0x2937C01, None, 0x2937BF0)], [(0x1CE6F8B, 0x1CE6F10)]])
+# xgameruntime.md section 0 said "one caller, fn 0x3dda560" from a run's view.
+c.same("fn 0x55deaf4 (the method +0x20 that hands out the sandbox text) has four callers",
+       exe.callers_and_jumps(0x55DEAF4), [0x2214040, 0x2228FD0, 0x3DDA560, 0x5614A40])
 
 c.done()
