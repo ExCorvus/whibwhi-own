@@ -2217,3 +2217,18 @@ measurement the same, no network endpoint in 32 samples of the network watch.
   (one exception line, the run went on to 60 s). Whether the two are connected is not established. An error that
   shows up in the program may point away from its cause (ExCorvus); the failed reads are the weave's own and come
   first.
+Follow-up, game test 17:57 (run-20261127-175726, visible; the storage library's failure line now names the file and
+its size): PASS on the hard rules, the copy's folder unchanged. One read failed before the run ended at 54 s:
+- 10,464 bytes at offset 0x10f1e6000 of audio.rpf, which is 28,543,454,672 bytes long: the piece lies INSIDE the
+  file, yet the read was answered "end of file" (Windows error 38). So the failed reads are not reads past an end
+  the installation has; the requests may be right and the weave's read wrong.
+- The run then ended in the middle of writing that very failure line: an access violation inside the C runtime
+  (ucrtbase.dll, called from the weave's XCRDAPI.dll), read at 0x7ffb00000000.
+- The weave's read (weave/xcrdapi.cpp read_exactly) uses an OVERLAPPED structure on its own stack with no event of
+  its own, on a file handle opened for overlapped use, and waits with GetOverlappedResult. Windows' documentation
+  says that without an event the handle itself is signalled and advises against it when several operations run on
+  the same handle at once: a wait can then return for another read's completion. A read that is reported failed
+  but still completes later writes into memory that is no longer its own (the stack and, for zlib pieces, a freed
+  buffer). That would explain both an "end of file" inside the file and faults in unrelated places (here the C
+  runtime, at 17:41 the program at image+0x2942c8). This is inferred from the measured pieces and the documentation;
+  that several reads ran at once on one handle is not measured.
