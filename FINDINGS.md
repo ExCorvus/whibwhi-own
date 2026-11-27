@@ -2006,3 +2006,18 @@ again afterwards and never committed; T: is now meant to be a real drive, docs/B
   fn 0x1dec9c0 hands to its file layer): the program makes the file itself, at its full size. Its contents were
   not read.
 - Nothing else was written to T: in that run.
+## 2026-11-27 - the sound chip's two ring positions: which is which (measured, no run)
+
+Read in fn 0x78120, the program's read-out of a voice's ring (it takes the chip's decoded 16-bit samples out of the
+ring into its own, fn 0x4e64f00 with flag 1, and then sends opcode 0x12 with the number of bytes taken):
+- **Decoded up to** = bits 27-31 of record +0, in 256-byte units (shr 0x13, and 0x1f00 at 0x78214/0x7821b).
+- **Taken out up to** = low 5 bits of record +0x24, in 256-byte units (0x78205, 0x78211, 0x78218).
+- Ring size = bits 22-26 of record +0 (0x7822e/0x78231; the program writes 0x17 there = 0x1700 bytes).
+- Available = decoded - taken; when decoded is below taken the ring has wrapped: size - taken + decoded. When the
+  two are equal, the sign of the dword at record +4 (its top bit, which the program sets at voice start) decides:
+  set -> nothing to take; clear -> the whole ring is full (0x782e6 / 0x782eb).
+- The program never writes either position (earlier reading, measure/audio.py). So both are the chip's: it moves
+  "decoded up to" as it decodes, and "taken out up to" after an opcode 0x12 has told it how many bytes the program
+  took (inferred from the order of the calls); and it clears the top bit of +4 when its decoding has filled the
+  ring up to the taken-out position (inferred: the only way the "full" case can arise).
+- measure/audio.py checks the four new points (45 of 45 the same).
