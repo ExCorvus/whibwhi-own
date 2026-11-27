@@ -26,7 +26,7 @@ extern "C" {
 #endif
 
 // Returns the process-wide DirectStorage factory. `riid` is the factory interface asked for; the image passes
-// the console factory IID {62959d11-d45f-4888-a0a3-f7862ea243ae} (measured at its call site, RVA 0x1d8e4db in
+// the console factory IID {62959d11-d45f-4884-a0a3-f7862ea243ae} (measured at its call site, RVA 0x1d8e4db in
 // the retail image), which is not the PC IID_IDStorageFactory {6924ea0c-c3cd-4826-b10a-f64f4ed927c1}.
 // *factory receives the object on success and is left untouched on failure.
 WHIWHI_XCRDAPI_API long __stdcall DStorageGetFactory(const GUID* riid, void** factory);
