@@ -1929,3 +1929,36 @@ word 0x9ae98c8, the audio areas 0x9ae98a8 and 0x9ae9908, the watchdog's progress
 and the "one caller" claims of MAP.md 1.1, 1.2 and 1.6.
 
 Nothing in the weave was changed. Whether any of the newly reachable places is reached in a run is not measured.
+## 2026-11-27 - the frame rhythm and the frame pacer, read in the executable; the weave's own pacer removed (game test 12:42, measured)
+
+- The program sets its frame rate itself. One object of the program, the frame pacer (named by what it does; no
+  class name is in the executable), takes a target frame rate, turns it into an interval of 1,000,000 / fps
+  microseconds (fn 0x1e0fb30, kept at 0x98f84ac) and, through fn 0x1d70c40 -> fn 0x22434a0, also sets how many frames
+  back the program waits (0xa94390c). Its methods sit side by side in one method table (.rdata near 0x6194d58).
+  The graphics set-up (fn 0x2478440) hands that interval to the console clock: SetFrameIntervalX with 33,333
+  microseconds (30 a second) through fn 0x247ab10, which three more places call when the clock changes.
+- Each frame (fn 0x2481e90, reached through a table) the program asks for the current frame start (WaitFrameEventX
+  event 0, no wait), keeps the frame token in its own timing table (0x75de4b0, 16 entries), waits without a time
+  limit for event 2 of the frame it names from that table, and asks the frame statistics (device slot 81, in
+  Microsoft's public samples GetFrameStatisticsX). Public samples (Xbox-GDK-Samples, FramePacing) give the names and
+  the argument order of these four calls; the numbers of the event types and flags are not public.
+- A frame ledger (every call of slots 78 to 81 with time, thread, return place, token in and out, time held; first
+  1,500 calls) showed in run 12:19: the program passed its frame loop about every 1.1 ms (about 900 times a second);
+  991 of 997 waits were answered at once, because on the weave's frame clock the frame a token named was always
+  already past (the weave read token t as frame t - 1, a rule of its own). Slot 81 is asked on every pass and is not
+  answered.
+- Changed in weave/d3d12_xs.cpp: the present pacer of the weave's own (one picture per interval, cut C5) is
+  removed - the program keeps its own timing; the weave no longer shows the program's window when the program has
+  left it hidden; a wait for token t now lasts until frame t has come on the clock; the frame ledger and a logged
+  answer for slot 81 (still not implemented) were added. weave/xcrdapi.*: the console storage factory IID is
+  {62959d11-d45f-4884-...} as the executable holds it (the map had -4888-).
+- Game test 12:42 (visible, Windows spatial sound switched on before the run): PASS - alive at the end, the copy's
+  folder unchanged, every measurement the same. The watchdog's progress stamp was renewed 5 times (runs before: once),
+  the longest it stood still was 1.5 s (before: about 6 s; once 96 s). The frame calls fell to 292 in 60 s; waits are
+  held up to 30.5 ms. The sound device stop (int3 at image+0x43ad94e after AcpHalCreate) is still logged.
+- What this is: an observation. The fast frame loop was a symptom of parts of the web that are missing (ExCorvus:
+  "it clocked 900 times because it was missing important parts of the web"); the run does not show that the wait
+  rule was the cause. Still missing: the frame statistics, and the sound device.
+- Also measured today, read-only: the program creates Windows' own spatial audio stream itself (ISpatialAudioClient
+  in fn 0x1e7f580, set up from the audio engine start); both console sound chips only decode, and the program copies
+  the decoded samples out and mixes itself. The weave must not make a sound output of its own.
