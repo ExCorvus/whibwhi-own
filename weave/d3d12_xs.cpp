@@ -54,6 +54,7 @@
 #undef D3D12CreateRootSignatureDeserializer
 
 #include <dxgi1_2.h>  // the swap chain description the PC library takes
+#include <dxgi1_4.h>  // Windows' adapter by its LUID, for the device's IDXGIDevice
 #include <intrin.h>
 
 #include <algorithm>
@@ -379,15 +380,228 @@ void* __stdcall struct_return_thunk(void* a1, void* a2, void* a3, void* a4, void
     return nullptr;
 }
 
+// ---- the device's IDXGIDevice: the display, answered by Windows in the console's shape ----------------------
+//
+// Measured in the image (fn 0x2481ca0, FINDINGS 2026-11-27 20:05), in the same order as Microsoft's public sample
+// Simple120Hz: device QueryInterface(IDXGIDevice) -> +0x38 GetAdapter -> adapter +0x38 EnumOutputs(0) -> output
+// +0xa8 GetDisplayModeListX(format, flags, &count, list) twice (count first, then the list), 32-byte entries
+// whose refresh numerator (+8) it compares with 120; then it sets its frame interval. A PC D3D12 device does not
+// give IDXGIDevice, so the weave gives these three objects, each with the method order the image calls, and every
+// answer comes from Windows' own adapter (the one the device runs on, by its LUID) and its output.
+// The weave's choice (stated): the image passes format 0, for which Windows lists no modes (measured on the user's
+// PC); the modes are then asked for in format 28 (R8G8B8A8_UNORM), the format of the picture the image presents
+// (measured). An entry is Windows' DXGI_MODE_DESC (28 bytes) followed by a flags word, 0 (console mode flags such
+// as variable refresh are not given).
+namespace dxgi_way_back {
+
+constexpr int kSlots = 32;
+constexpr GUID kIdxgiDevice = {0x54ec77fa, 0x1377, 0x44e6, {0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c}};
+constexpr DXGI_FORMAT kFormatForZero = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+enum Kind { kDxgiDevice, kDxgiAdapter, kDxgiOutput };
+const char* const kKindNames[] = {"IDXGIDevice", "IDXGIAdapter", "IDXGIOutput"};
+
+struct Object {
+    void** vt = nullptr;
+    std::atomic<long> refs{1};
+    Kind kind = kDxgiDevice;
+    IUnknown* pc = nullptr;   // the device's PC object (device), Windows' adapter or Windows' output
+};
+
+void** table_of(Kind kind);
+
+Object* make(Kind kind, IUnknown* pc) {
+    auto* o = new Object;
+    o->kind = kind;
+    o->pc = pc;
+    o->vt = table_of(kind);
+    return o;
+}
+
+HRESULT __stdcall qi(Object* self, const GUID* riid, void** pp) {
+    if (!riid || !pp) {
+        return 0x80004003L;
+    }
+    *pp = nullptr;
+    static const GUID unknown = {0, 0, 0, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
+    if (std::memcmp(riid, &unknown, sizeof(GUID)) == 0 ||
+        (self->kind == kDxgiDevice && std::memcmp(riid, &kIdxgiDevice, sizeof(GUID)) == 0)) {
+        self->refs.fetch_add(1);
+        *pp = self;
+        return 0;
+    }
+    logf("%s (the weave's, for the display): asked for interface {%08lx-%04x-%04x-...}; refused\n",
+         kKindNames[self->kind], riid->Data1, riid->Data2, riid->Data3);
+    return 0x80004002L;
+}
+
+ULONG __stdcall addref(Object* self) {
+    return static_cast<ULONG>(self->refs.fetch_add(1) + 1);
+}
+
+ULONG __stdcall release(Object* self) {
+    const long r = self->refs.fetch_sub(1) - 1;
+    if (r == 0) {
+        if (self->pc && self->kind != kDxgiDevice) {
+            self->pc->Release();
+        }
+        delete self;
+    }
+    return static_cast<ULONG>(r < 0 ? 0 : r);
+}
+
+template <int K, int S>
+HRESULT __stdcall missing(Object*) {
+    static std::atomic<int> said{0};
+    if (said.fetch_add(1) == 0) {
+        logf("%s (the weave's, for the display): method slot %d (offset 0x%x) called - not provided, answered not "
+             "implemented (returns to %p)\n",
+             kKindNames[K], S, S * 8, _ReturnAddress());
+    }
+    return 0x80004001L;
+}
+
+// IDXGIDevice +0x38: GetAdapter. Windows' adapter the device runs on (by the device's LUID).
+HRESULT __stdcall get_adapter(Object* self, void** out) {
+    if (!out) {
+        return 0x887A0001L;  // DXGI_ERROR_INVALID_CALL
+    }
+    *out = nullptr;
+    auto* device = static_cast<ID3D12Device*>(self->pc);
+    const LUID luid = device->GetAdapterLuid();
+    using Create = HRESULT(WINAPI*)(REFIID, void**);
+    const HMODULE dxgi = LoadLibraryA("dxgi.dll");
+    const auto create = dxgi ? reinterpret_cast<Create>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
+    IDXGIFactory4* factory = nullptr;
+    HRESULT hr = create ? create(__uuidof(IDXGIFactory4), reinterpret_cast<void**>(&factory)) : 0x80004005L;
+    IDXGIAdapter* adapter = nullptr;
+    if (hr == 0) {
+        hr = factory->EnumAdapterByLuid(luid, __uuidof(IDXGIAdapter), reinterpret_cast<void**>(&adapter));
+        factory->Release();
+    }
+    logf("IDXGIDevice (the weave's, for the display): GetAdapter - Windows' adapter of LUID %08lx:%08lx, 0x%08lx\n",
+         static_cast<unsigned long>(luid.HighPart), luid.LowPart, static_cast<unsigned long>(hr));
+    if (hr != 0 || !adapter) {
+        return hr ? hr : 0x80004005L;
+    }
+    *out = make(kDxgiAdapter, adapter);
+    return 0;
+}
+
+// IDXGIAdapter +0x38: EnumOutputs. Windows' own answer for the same index.
+HRESULT __stdcall enum_outputs(Object* self, UINT index, void** out) {
+    if (!out) {
+        return 0x887A0001L;
+    }
+    *out = nullptr;
+    IDXGIOutput* output = nullptr;
+    const HRESULT hr = static_cast<IDXGIAdapter*>(self->pc)->EnumOutputs(index, &output);
+    DXGI_OUTPUT_DESC desc{};
+    if (hr == 0 && output) {
+        output->GetDesc(&desc);
+    }
+    logf("IDXGIAdapter (the weave's, for the display): EnumOutputs(%u) - Windows answered 0x%08lx%s%ls\n", index,
+         static_cast<unsigned long>(hr), hr == 0 ? ", " : "", hr == 0 ? desc.DeviceName : L"");
+    if (hr != 0 || !output) {
+        return hr ? hr : 0x887A0002L;  // DXGI_ERROR_NOT_FOUND
+    }
+    *out = make(kDxgiOutput, output);
+    return 0;
+}
+
+// IDXGIOutput +0xa8: GetDisplayModeListX. Windows' mode list, in the console's 32-byte entries.
+HRESULT __stdcall display_modes(Object* self, DXGI_FORMAT format, UINT flags, UINT* count, unsigned char* list) {
+    if (!count) {
+        return 0x887A0001L;
+    }
+    const DXGI_FORMAT asked = format == DXGI_FORMAT_UNKNOWN ? kFormatForZero : format;
+    auto* output = static_cast<IDXGIOutput*>(self->pc);
+    UINT n = 0;
+    HRESULT hr = output->GetDisplayModeList(asked, flags, &n, nullptr);
+    std::vector<DXGI_MODE_DESC> modes(n);
+    if (hr == 0 && n) {
+        hr = output->GetDisplayModeList(asked, flags, &n, modes.data());
+        modes.resize(n);
+    }
+    if (hr != 0) {
+        logf("IDXGIOutput (the weave's, for the display): GetDisplayModeListX(format %d, flags 0x%x) - Windows "
+             "answered 0x%08lx\n",
+             static_cast<int>(format), flags, static_cast<unsigned long>(hr));
+        return hr;
+    }
+    constexpr std::size_t kEntry = 32;
+    UINT written = 0;
+    if (list) {
+        written = std::min<UINT>(*count, n);
+        for (UINT i = 0; i < written; ++i) {
+            std::memset(list + i * kEntry, 0, kEntry);
+            std::memcpy(list + i * kEntry, &modes[i], sizeof(DXGI_MODE_DESC));
+        }
+    }
+    const HRESULT answer = list && *count < n ? static_cast<HRESULT>(0x887A0003L) : 0;  // DXGI_ERROR_MORE_DATA
+    *count = list ? written : n;
+    std::set<std::pair<UINT, UINT>> rates;
+    for (const DXGI_MODE_DESC& m : modes) {
+        rates.emplace(m.RefreshRate.Numerator, m.RefreshRate.Denominator);
+    }
+    std::string text;
+    for (const auto& r : rates) {
+        if (text.size() < 200) {
+            text += " " + std::to_string(r.first) + "/" + std::to_string(r.second);
+        }
+    }
+    logf("IDXGIOutput (the weave's, for the display): GetDisplayModeListX(format %d -> asked Windows in format %d, "
+         "flags 0x%x, %s) - %u modes, %u written, 0x%08lx; refresh rates:%s\n",
+         static_cast<int>(format), static_cast<int>(asked), flags, list ? "the list" : "the count", n, written,
+         static_cast<unsigned long>(answer), text.c_str());
+    return answer;
+}
+
+template <int K, std::size_t... Is>
+void fill(void** t, std::index_sequence<Is...>) {
+    ((t[Is] = reinterpret_cast<void*>(&missing<K, static_cast<int>(Is)>)), ...);
+}
+
+void** table_of(Kind kind) {
+    static void* tables[3][kSlots] = {};
+    static std::once_flag once;
+    std::call_once(once, [] {
+        fill<kDxgiDevice>(tables[kDxgiDevice], std::make_index_sequence<kSlots>{});
+        fill<kDxgiAdapter>(tables[kDxgiAdapter], std::make_index_sequence<kSlots>{});
+        fill<kDxgiOutput>(tables[kDxgiOutput], std::make_index_sequence<kSlots>{});
+        for (auto& t : tables) {
+            t[0] = reinterpret_cast<void*>(&qi);
+            t[1] = reinterpret_cast<void*>(&addref);
+            t[2] = reinterpret_cast<void*>(&release);
+        }
+        tables[kDxgiDevice][7] = reinterpret_cast<void*>(&get_adapter);
+        tables[kDxgiAdapter][7] = reinterpret_cast<void*>(&enum_outputs);
+        tables[kDxgiOutput][21] = reinterpret_cast<void*>(&display_modes);
+    });
+    return tables[kind];
+}
+
+}  // namespace dxgi_way_back
+
 // QueryInterface. The console has one object per kind that carries all of that kind's methods, so when the PC
 // object has the interface asked for, the answer is this same wrapper (never the bare PC object, which has a
 // different method order above the shared part). An identifier the PC object does not know is logged and
-// refused.
+// refused - except the device's IDXGIDevice, which the weave gives (dxgi_way_back above).
 HRESULT __stdcall w_qi(Wrap* self, const GUID* riid, void** pp) {
     if (!riid || !pp) {
         return 0x80004003L;  // E_POINTER
     }
     *pp = nullptr;
+    if (self->kind_id == kDevice && self->pc &&
+        std::memcmp(riid, &dxgi_way_back::kIdxgiDevice, sizeof(GUID)) == 0) {
+        *pp = dxgi_way_back::make(dxgi_way_back::kDxgiDevice, static_cast<IUnknown*>(self->pc));
+        static std::atomic<int> said{0};
+        if (said.fetch_add(1) == 0) {
+            logf("device: asked for IDXGIDevice - the weave's object for the display, answered from Windows' "
+                 "adapter and output\n");
+        }
+        return 0;
+    }
     void* pc_interface = nullptr;
     using Fn = HRESULT(__stdcall*)(void*, const GUID*, void**);
     const HRESULT hr = self->pc ? reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][0])(self->pc, riid,
