@@ -2301,3 +2301,25 @@ the audio part of the weave.
   thread that faulted was the program's own window thread (the thread of the window PresentX presents to). Its last
   imports were memcpy, __stdio_common_vsprintf, memcpy, memcpy. The 60-second runs end before 70 s, which may be why
   this fault was seen only once before (18:32). Not followed further.
+## 2026-11-27 - the refused pipelines hold no ray test; the display's refresh rate is asked through the device (game test 20:05, measured)
+
+- Count in device slot 86 (weave/d3d12_xs.cpp, 'ray census'): per pipeline request, whether one of its shaders holds
+  the GPU's ray test against an acceleration structure (MIMG opcode 0xe6 image_bvh_intersect_ray or 0xe7
+  image_bvh64_intersect_ray on this GPU generation, LLVM AMDGPU MIMGInstructions.td, gfx10 column), and a fingerprint
+  per shader. Run 20:05 (PASS, copy's folder unchanged, every measurement the same; ended at 74 s at the fault
+  image+0x161b994 on the window thread, as at 19:37 and 19:50): after 32,768 requests, 714 different shaders were read
+  and NONE holds the ray test. Made: 2,052 requests from 42 different shaders. The largest refusal ('a sampler taken
+  from a table at a place computed at run time') is 29,608 requests from 638 different shaders - the same shaders are
+  asked for many times (about 46 requests per shader). The program's own compute shaders (device slot 62, not
+  translated) are not in this count; whether ray tracing sits there is not measured. Limit: a shader whose walk stops
+  early is read only up to that point.
+- What vkd3d hands back to the program, read in the executable (one point of a longer list): the interface the
+  program asks the device for and is refused, {54ec77fa-1377-44e6-8c32-88fd5f44c84c}, is the public IID of
+  IDXGIDevice. fn 0x2481ca0 (only caller fn 0x247ab10, the frame-interval setter that calls SetFrameIntervalX and
+  ScheduleFrameEventX) asks device -> IDXGIDevice -> GetAdapter (+0x38) -> EnumOutputs(0) (+0x38) -> the output's
+  method +0xa8 (format 0, flags 0, count, list) twice, list entries 32 bytes; an entry whose refresh numerator (+8) is
+  120 sets a byte (0x760e660) and the refresh 120/1 at 0xa9438d4, else 60/1. fn 0x247ab10 then takes the frame
+  interval from a table at 0x61ece60 by that byte and a divider (refresh / target frames per second, at most 4). Any
+  failure skips the store. So today the program chooses its frame interval without the display's refresh rate. On a
+  PC an ID3D12Device does not give IDXGIDevice; which method sits at +0xa8 of the console's output object is not
+  established (on a PC, +0xa8 of IDXGIOutput1 is GetDisplaySurfaceData1).
