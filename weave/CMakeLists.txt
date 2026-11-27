@@ -35,9 +35,21 @@ target_link_libraries(XboxBvhBuilder PRIVATE onecore)
 
 # The console's audio libraries, provided as skeletons: every imported name exists, every one of them answers
 # "not provided" (a negative HRESULT, a 0 count, a null address) and says so once on stderr. No device is faked.
-add_library(AcpHal SHARED acp_hal.cpp)
+add_library(AcpHal SHARED acp_hal.cpp acp_chip.cpp)
 target_compile_definitions(AcpHal PRIVATE WHIWHI_ACP_HAL_BUILD)
 target_link_libraries(AcpHal PRIVATE onecore)
+# The sound chip decodes XMA2 through FFmpeg, built separately by scripts/setup_ffmpeg.ps1 and loaded at run time.
+# Only FFmpeg's headers are needed here; without them AcpHalCreate answers not implemented.
+set(WHIWHI_FFMPEG_INCLUDE "$ENV{LOCALAPPDATA}/whiwhi/ffmpeg-build/install/include" CACHE PATH
+    "FFmpeg headers from scripts/setup_ffmpeg.ps1")
+if(EXISTS "${WHIWHI_FFMPEG_INCLUDE}/libavcodec/avcodec.h")
+    target_include_directories(AcpHal PRIVATE "${WHIWHI_FFMPEG_INCLUDE}")
+    target_compile_definitions(AcpHal PRIVATE WHIWHI_HAVE_FFMPEG=1)
+    message(STATUS "AcpHal: FFmpeg headers from ${WHIWHI_FFMPEG_INCLUDE}")
+else()
+    target_compile_definitions(AcpHal PRIVATE WHIWHI_HAVE_FFMPEG=0)
+    message(STATUS "AcpHal: no FFmpeg headers - no sound chip (scripts/setup_ffmpeg.ps1)")
+endif()
 
 add_library(xapu SHARED xapu.cpp)
 target_compile_definitions(xapu PRIVATE WHIWHI_XAPU_BUILD)
