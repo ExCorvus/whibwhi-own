@@ -1829,3 +1829,20 @@ ExCorvus asleep; read-only work on the copy, no game or GPU run.
   descriptor tables, which are not followed tonight.
 - Not repeated: the device byte's other places found on 2026-11-26 (they were written only in a working note,
   not in FINDINGS or the map).
+## 2026-11-27 - the device's creation and the builder library made repeatable: measure/graphics_calls.py, and a correction (measured, no run)
+
+`measure/graphics_calls.py` repeats docs/exe-map/GRAPHICS-CALLS.md sections 1.2 and 4 on the copy, read-only:
+27 of 27 the same after the corrections below.
+
+- Held as written: fn 0x2478440 is the only function that asks for the device, through a jump at 0x5f3fd80 to the
+  D3D12XboxCreateDevice import, after the program has registered, created and shown its own window; the 64-byte
+  creation block (cleared, then 0x20004 at +0, 0x100000 at +8, two settings bytes at +0x20 and +0x24, 1 at +0x28,
+  0x20 at +0x3c); the arguments (no adapter, the block, the interface id, the device arriving at 0x75df048); custom
+  heap properties for heap types 1, 2, 3; one pool queue; the builder object of 0x18 bytes made with the device and
+  false and kept in global 0x75df0a8; the seven builder methods and every call site the map names.
+- Corrected in the map (GRAPHICS-CALLS.md 1.2): device slot 48 is called **four** times (the map said five), and
+  slot 41 (command signatures) **five** times, each without a root signature (the map said one; its description
+  fits the first of the five). Slot 49 is the first of these calls, made only when a settings byte is 1 and a
+  version is 10.0.26100.9628 or newer. Besides global 0x8759d00 the device is copied into ten more globals.
+- Not read here: what the other four command signatures describe, what the objects of slot 48 are, what slot 49
+  does.
