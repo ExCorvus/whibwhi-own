@@ -32,12 +32,19 @@ mix by the CPU.
 What the letters "chad" stand for is **not established**: no string in the image explains the name, so this
 document does not guess.
 
-## 2. XDspActivate — dead in this build (call site 0x11d475d)
+## 2. XDspActivate — live, through fn 0x11d4720 (call site 0x11d475d; first read as dead, corrected below)
 
-The only call is inside fn 0x11d4750..0x11d4781, a 49-byte wrapper. That wrapper has **no referrer at all**: no
-direct call lands on it, no direct jump lands on it, and the only place its RVA appears in the file is its own
-`.pdata` entry. It is unreachable code in this build, so nothing in the shipping game depends on this function
-being live — but the wrapper still shows the shape the game expects:
+The only call is inside fn 0x11d4750..0x11d4781, a 49-byte wrapper.
+
+**Corrected 2026-11-27 (measure/console_libs.py):** this section first said the wrapper has no referrer at all and
+is dead code. That is wrong. The wrapper is reached by one jump, at 0x11d4740, which ends a small function at
+0x11d4720 that has no `.pdata` entry (so a search over the `.pdata` functions does not see it). That function picks
+a record of 0x4c8 bytes at +0x488 of its first argument by the index in its second, rearranges the other arguments
+and jumps into the wrapper. It is called twice: at 0x3b97e in fn 0x3b770 (which hands the address of the stream's
++0x70, uses the index at +0xac and keeps the result at +0x60) and at 0x43b3966 in fn 0x43b3920 (which hands the
+address of +0x38 and keeps the result at +0x28). Those are fields that section 3 (+0x60, +0x70, +0xac) and section 5
+(+0x38) read, so XDspActivate is live; whether a run reaches those two functions is not measured, and what the
+arguments mean is still not read. The wrapper's shape, which holds:
 
 - four register arguments; the wrapper passes the first two through and swaps its third and fourth before the
   call;
@@ -48,13 +55,15 @@ The counter at 0x9aea514 is read nowhere else in the image.
 
 **Proposed PC behaviour:** a stream could not be started, because the meaning of all four arguments is unknown.
 Keep answering 0 (failure) until a live call site exists to read the arguments from. The skeleton logs the four
-values, which is what a future live site would need.
+values, which is what a future live site would need. (2026-11-27: the live sites exist, see the correction above.
+Whether this proposal changes is ExCorvus's decision; nothing was changed in the weave.)
 
 **Unknown:** everything except the register shape: what the four arguments are, and what a started stream is.
 
 ## 3. XDspDeactivate — fn 0x1165f80, call at 0x1165fd7
 
-Chain: 0x1165fd7 → stub jmp at 0x1166010 → import thunk 0x1166020 → `chad.dll!XDspDeactivate`.
+Chain: 0x1165fd7 → stub jmp at 0x1166010 → jmp at 0x1166020 → import thunk 0x5f3ff10 → `chad.dll!XDspDeactivate`
+(the hop through 0x5f3ff10 added 2026-11-27; measure/console_libs.py).
 
 Caller fn 0x1165f80..0x1166004 ("stop one stream"), itself called from fn 0x46030 and fn 0x161cc50. In order it:
 
@@ -73,7 +82,9 @@ yet, so 0 (failure) is honest; the game does not read it, so it costs nothing. W
 must retire the stream and wake the channel worker.
 
 **Unknown:** where +0x70 is first filled. The function that would plausibly produce it (XDspActivate or a command
-answer) is not reachable in this build, so the handle's origin is not established.
+answer) is not reachable in this build, so the handle's origin is not established. (2026-11-27: XDspActivate is
+reachable after all, and fn 0x3b770 hands it the address of +0x70 and keeps its result at +0x60 (section 2). That
+XDspActivate writes the handle there is inferred from this, not read.)
 
 ## 4. XDspConnectWithMaximumStreamLimit — fn 0x5b52600, call at 0x5b5262e
 
@@ -194,7 +205,8 @@ built `chad.dll` beside the weave is what the image will bind to.
 
 ## 7. What is left
 
-1. XDspActivate has no live call site; nothing can be answered beyond failure until one appears.
+1. XDspActivate has no live call site; nothing can be answered beyond failure until one appears. (Corrected
+   2026-11-27: it has two, through fn 0x11d4720 - section 2.)
 2. The connect the game actually makes fails today, and the game answers that with `int3` at 0x43ad94e. Building
    the channel (§4) is the first real step; it needs the audio worker that xapu and AcpHal already imply.
 3. The submit block's floats, the meaning of the output page and the completion id are open; the three callers
