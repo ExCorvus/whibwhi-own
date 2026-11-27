@@ -1,8 +1,9 @@
-// Tests for the two audio libraries we provide as skeletons: AcpHal.dll and xapu.dll.
+// Tests for the two audio libraries: AcpHal.dll and xapu.dll.
 //
-// The DLLs beside this test must export every name the image imports from "AcpHal.dll" and "xapu.dll", and
-// every one of them must answer "not provided" - a negative HRESULT, a 0 count, a null address - without
-// writing through the pointers it was handed. No image, no game data, no device.
+// The DLLs beside this test must export every name the image imports from "AcpHal.dll" and "xapu.dll". The
+// stream channel (xapu.dll) must connect, answer each command the image was read sending with the result type
+// the image expects, and refuse anything else without writing through the pointers it was handed. Hand-made
+// blocks only: no image, no game data, no device (these checks are not proof with the program, rule 11).
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -144,24 +145,11 @@ void test_xapu(const XApu& api) {
     unsigned char config[0x18] = {};
     unsigned char buffers[0x200] = {};
     void* client = reinterpret_cast<void*>(kSentinel);
-    CHECK(api.connect(config, buffers, &client) < 0);
-    CHECK(client == reinterpret_cast<void*>(kSentinel)); // no client handle was invented
     CHECK(api.connect(nullptr, nullptr, nullptr) < 0);
+    CHECK(api.connect(config, buffers, &client) == 0);
+    CHECK(client != reinterpret_cast<void*>(kSentinel) && client != nullptr); // a client handle was written
 
-    // One command as the image builds it: opcode 1, stream id 7, a dword of payload at +0x18.
-    struct Command {
-        unsigned opcode;
-        unsigned stream;
-        unsigned zero[4];
-        unsigned value;
-    } command{};
-    command.opcode = 1;
-    command.stream = 7;
-    command.value = 0x5DC0;
-    CHECK(api.enqueue_command(nullptr, &command, 0) < 0);
-    CHECK(api.enqueue_command(client, &command, 0) < 0); // the handle it kept is not needed to answer
-
-    // The count is the one answer that must be 0: the image loops over it.
+    // The count is 0 before any command: the image loops over it.
     CHECK(api.get_result_count(client) == 0);
 
     struct Result {
@@ -172,11 +160,66 @@ void test_xapu(const XApu& api) {
     } result{};
     static_assert(offsetof(Result, payload) == 0x34, "the result payload dword is at +0x34");
     result.event = 0xA5A5A5A5;
-    CHECK(api.dequeue_result(client, &result) < 0);
+    CHECK(api.dequeue_result(client, &result) < 0); // nothing waiting: nothing written
     CHECK(result.event == 0xA5A5A5A5 && result.stream == 0 && result.payload == 0);
+
+    // Commands as the image builds them (64-byte blocks): opcode at +0, stream id at +4.
+    unsigned char command[0x40] = {};
+    const auto put = [&command](std::size_t offset, unsigned value) { std::memcpy(command + offset, &value, 4); };
+    const auto put_pointer = [&command](std::size_t offset, const void* pointer) {
+        const auto value = reinterpret_cast<unsigned long long>(pointer);
+        std::memcpy(command + offset, &value, 8);
+    };
+    const auto take = [&](unsigned event, unsigned stream, unsigned payload) {
+        Result taken{};
+        CHECK(api.dequeue_result(client, &taken) == 0);
+        CHECK(taken.event == event && taken.stream == stream && taken.payload == payload);
+    };
+    CHECK(api.enqueue_command(nullptr, command, 0) < 0);
+
+    put(0, 1); // open stream 7, a dword at +0x18
+    put(4, 7);
+    put(0x18, 0x5DC0);
+    CHECK(api.enqueue_command(client, command, 0) == 0);
+    CHECK(api.get_result_count(client) == 1);
+    take(1, 7, 0);
+
+    // A submitted packet that is not one libopus reads (a single byte announcing more frames than it holds) is
+    // not decoded: the answer is 0 bytes written, and the output is left as it was.
+    const unsigned char packet[1] = {0xFF};
+    float output[960 * 2];
+    for (float& value : output) {
+        value = 7.0f;
+    }
+    std::memset(command, 0, sizeof(command));
+    put(0, 3);
+    put(4, 7);
+    put(0x24, 960);
+    put(0x28, sizeof(packet));
+    put_pointer(0x2c, packet);
+    put(0x34, 2 * 0xf00);
+    put_pointer(0x38, output);
+    CHECK(api.enqueue_command(client, command, 0) == 0);
+    take(3, 7, 0);
+    CHECK(output[0] == 7.0f && output[960 * 2 - 1] == 7.0f);
+
+    std::memset(command, 0, sizeof(command));
+    put(0, 5); // reset
+    put(4, 7);
+    put(0xc, 4);
+    CHECK(api.enqueue_command(client, command, 0) == 0);
+    put(0, 2); // close
+    CHECK(api.enqueue_command(client, command, 0) == 0);
+    CHECK(api.get_result_count(client) == 2);
+    take(5, 7, 0);
+    take(2, 7, 0);
+
+    put(0, 9); // an opcode the image was not read sending: refused, no result
+    CHECK(api.enqueue_command(client, command, 0) < 0);
+    CHECK(api.get_result_count(client) == 0);
+
     CHECK(api.dequeue_result(nullptr, nullptr) < 0);
-    CHECK(api.disconnect(client) < 0);
-    CHECK(api.disconnect(nullptr) < 0);
+    CHECK(api.disconnect(client) == 0);
 }
 
 } // namespace
@@ -190,7 +233,7 @@ int main() {
     test_acp_hal(acp_hal);
     test_xapu(xapu);
     if (failures == 0) {
-        std::printf("all checks passed (9 AcpHal.dll exports, 5 xapu.dll exports, all answering not-provided)\n");
+        std::printf("all checks passed (9 AcpHal.dll exports, 5 xapu.dll exports)\n");
     }
     return failures ? 1 : 0;
 }
