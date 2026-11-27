@@ -3228,6 +3228,55 @@ void sleep_until_us(long long target_us) {
     }
 }
 
+// The times Windows measured for each frame the program presented, kept for the frame statistics (device slot 81).
+// For a frame token: when its picture was handed to the swap chain (QueryPerformanceCounter at the present), and -
+// when the PC library reports it - when that present was shown (the swap chain's own frame statistics, also in
+// QueryPerformanceCounter ticks). A time that was not measured stays 0 and is not handed out.
+struct FrameTime {
+    unsigned long long token = 0;
+    unsigned long long present_count = 0;
+    unsigned long long presented_qpc = 0;
+    unsigned long long shown_qpc = 0;
+};
+constexpr int kFrameTimes = 64;
+SRWLOCK g_frame_times_lock = SRWLOCK_INIT;
+FrameTime g_frame_times[kFrameTimes];
+unsigned g_frame_times_next = 0;
+
+void note_frame_presented(unsigned long long token, unsigned long long present_count, unsigned long long qpc) {
+    AcquireSRWLockExclusive(&g_frame_times_lock);
+    FrameTime& t = g_frame_times[g_frame_times_next++ % kFrameTimes];
+    t = FrameTime{token, present_count, qpc, 0};
+    ReleaseSRWLockExclusive(&g_frame_times_lock);
+}
+
+// The swap chain names only its newest shown present; that present's frame gets the time.
+void note_frame_shown(unsigned long long shown_count, unsigned long long shown_qpc) {
+    if (shown_count == 0 || shown_qpc == 0) {
+        return;
+    }
+    AcquireSRWLockExclusive(&g_frame_times_lock);
+    for (FrameTime& t : g_frame_times) {
+        if (t.present_count == shown_count && t.shown_qpc == 0) {
+            t.shown_qpc = shown_qpc;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_frame_times_lock);
+}
+
+bool frame_time_of(unsigned long long token, FrameTime& out) {
+    bool found = false;
+    AcquireSRWLockShared(&g_frame_times_lock);
+    for (const FrameTime& t : g_frame_times) {
+        if (t.token == token && t.presented_qpc != 0) {
+            out = t;
+            found = true;
+        }
+    }
+    ReleaseSRWLockShared(&g_frame_times_lock);
+    return found;
+}
+
 // The frame ledger: a measurement only. Every frame call (slots 78 to 81) is written as one line - time on the
 // frame clock, thread, where in the program the call returns to, the values going in and coming out, and how long
 // the weave held the call - so the program's frame numbers can be set beside the weave's. Answers do not change.
@@ -3302,21 +3351,50 @@ HRESULT __stdcall w_schedule_frame_event(Wrap*, void* type_arg, void* offset_arg
 }
 
 // Device slot 81 (GetFrameStatisticsX in Microsoft's public samples: frame token, a set of statistics types, a
-// place for the count, the statistics). Not provided yet: answered as before (not implemented), and written into the
-// frame ledger with what the program passed, so the program's frame numbers here can be set beside the others.
+// place for the count, the statistics). What the program does with the answer (measured, fn 0x24826a0): it asks for
+// the frame 4 passes back with the types 0x11100 and room for 6 records 0x38 bytes apart; it takes the answer only when
+// the call returns 0 and the count is not 0; of each record it reads the type (dword +0), a byte at +8 that must be 0
+// and a time at +0x18; type 0x1000 becomes stage 9 and type 0x10000 stage 10 of its frame record, which keeps its other
+// stages in QueryPerformanceCounter ticks. By the order of Microsoft's public type list (inferred, the numbers are not
+// public) 0x1000 is the present and 0x10000 the display. So: a 0x1000 record with the time the frame was handed to the
+// swap chain, a 0x10000 record only when the swap chain reported that present as shown. Type 0x100 is not answered.
+// A frame with no measured time: no records, S_FALSE ("not available yet" in the public samples).
 HRESULT __stdcall w_device_slot81(Wrap*, void* token_arg, void* types_arg, unsigned* count, void* stats, void*,
                                   void*, void*, void*) {
-    static std::once_flag once;
     void* const returns_to = _ReturnAddress();
-    std::call_once(once, [returns_to] {
-        logf("device: method slot 81 (offset 0x288) called - not provided yet, answered not implemented (returns to "
-             "%p)\n", returns_to);
+    const unsigned long long token = static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(token_arg));
+    const unsigned types = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(types_arg));
+    constexpr unsigned kPresent = 0x1000, kDisplay = 0x10000;
+    constexpr std::size_t kRecordBytes = 0x38;
+    if (!count || !stats) {
+        return 0x80070057L;  // E_INVALIDARG
+    }
+    const unsigned room = *count;
+    FrameTime t{};
+    unsigned written = 0;
+    if (frame_time_of(token, t)) {
+        auto* records = static_cast<unsigned char*>(stats);
+        auto put = [&](unsigned type, unsigned long long time) {
+            if (written >= room || !(types & type) || time == 0) {
+                return;
+            }
+            unsigned char* r = records + written * kRecordBytes;
+            std::memset(r, 0, kRecordBytes);
+            std::memcpy(r, &type, sizeof(type));
+            std::memcpy(r + 0x18, &time, sizeof(time));
+            ++written;
+        };
+        put(kPresent, t.presented_qpc);
+        put(kDisplay, t.shown_qpc);
+    }
+    *count = written;
+    static std::once_flag once;
+    std::call_once(once, [returns_to, types, room] {
+        logf("device slot 81 (frame statistics, returns to %p): types 0x%x, room for %u - answered with the times "
+             "Windows measured (present, and display when the swap chain reported it)\n", returns_to, types, room);
     });
-    frame_ledger("statistics", returns_to, static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(types_arg)),
-                 count ? *count : 0xFFFFFFFFu, 0,
-                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(token_arg)),
-                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(stats)), 0);
-    return 0x80004001L;  // E_NOTIMPL
+    frame_ledger("statistics", returns_to, types, room, written, token, t.shown_qpc ? 2 : (written ? 1 : 0), 0);
+    return written ? 0 : 1;  // S_OK, or S_FALSE: nothing measured for this frame yet
 }
 
 HRESULT __stdcall w_wait_frame_event(Wrap*, void* type_arg, void* timeout_arg, void* fence, void* flags_arg,
@@ -4331,6 +4409,21 @@ struct VkSwapChainInterface : IUnknown {
     virtual HRESULT __stdcall Present(UINT interval, UINT flags, const DXGI_PRESENT_PARAMETERS* parameters) = 0;
 };
 
+// The same swap chain's second interface (IDXGIVkSwapChain1): all methods of the first, then the present count and
+// the frame statistics (the newest shown present and the QueryPerformanceCounter time it was shown).
+const GUID kVkSwapChain1Id = {0x785326d4, 0xb77b, 0x4826, {0xae, 0x70, 0x8d, 0x08, 0x30, 0x8e, 0xe6, 0xd1}};
+struct VkFrameStatistics {
+    unsigned long long present_count;
+    unsigned long long present_qpc_time;
+};
+struct VkSwapChain1Interface : VkSwapChainInterface {
+    virtual UINT __stdcall CheckColorSpaceSupport(DXGI_COLOR_SPACE_TYPE space) = 0;
+    virtual HRESULT __stdcall SetColorSpace(DXGI_COLOR_SPACE_TYPE space) = 0;
+    virtual HRESULT __stdcall SetHDRMetaData(const void* metadata) = 0;
+    virtual void __stdcall GetLastPresentCount(unsigned long long* count) = 0;
+    virtual void __stdcall GetFrameStatistics(VkFrameStatistics* statistics) = 0;
+};
+
 struct VkSwapChainFactoryInterface : IUnknown {
     virtual HRESULT __stdcall CreateSwapChain(VkSurfaceFactoryInterface* surface, const DXGI_SWAP_CHAIN_DESC1* desc,
                                               VkSwapChainInterface** out) = 0;
@@ -4432,6 +4525,8 @@ struct Presenter {
     bool given_up = false;  // set when the swap chain could not be made; said once
     HWND window = nullptr;
     VkSwapChainInterface* chain = nullptr;
+    VkSwapChain1Interface* chain1 = nullptr;  // for the frame statistics; null when the PC library has none
+    bool chain1_asked = false;
     unsigned long long width = 0;
     unsigned height = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
@@ -4629,6 +4724,25 @@ HRESULT __stdcall w_presentx(Wrap* self, unsigned int plane_count, const unsigne
     hr = p.chain->Present(0, 0, &none);
     if (hr == 0) {
         ++p.shown;
+        LARGE_INTEGER presented{};
+        QueryPerformanceCounter(&presented);
+        if (!p.chain1_asked) {
+            p.chain1_asked = true;
+            void* second = nullptr;
+            if (p.chain->QueryInterface(kVkSwapChain1Id, &second) == 0 && second) {
+                p.chain1 = static_cast<VkSwapChain1Interface*>(second);
+            }
+            logf("PresentX: the swap chain %s its frame statistics (when a present was shown)\n",
+                 p.chain1 ? "reports" : "does not report");
+        }
+        unsigned long long present_count = 0;
+        if (p.chain1) {
+            p.chain1->GetLastPresentCount(&present_count);
+            VkFrameStatistics shown{};
+            p.chain1->GetFrameStatistics(&shown);
+            note_frame_shown(shown.present_count, shown.present_qpc_time);
+        }
+        note_frame_presented(token, present_count, static_cast<unsigned long long>(presented.QuadPart));
     }
     if (hr != 0 || (p.shown & (p.shown - 1)) == 0) {
         logf("PresentX: frame token %llu - the image's surface (%llu x %u) copied and presented to the window when "
