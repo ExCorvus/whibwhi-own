@@ -1897,3 +1897,35 @@ int3, the 32 MiB call and the guard's six callers; the texture library's four pl
 and callers; the network import counts, WSAStartup's single site with its int3 and its start-up chain, the socket,
 bind, listen, accept and connect sites; and the runtime loader, its six cached exports, the query helper's 161
 callers and the 58 wrappers that poke the runtime first.
+## 2026-11-27 - the maps checked with Ghidra: four "no caller" claims were wrong, and why (measured, no run)
+
+ExCorvus asked for the executable to be read with REA (Ghidra 12.2, the copy's file read-only) to see whether the
+agents who wrote the maps made mistakes. Every claim in docs/ of the kind "no caller at all", "dead", "one
+caller", "only reader", "only store" was checked against Ghidra's references, which also see small pieces of code
+that have no `.pdata` entry and function addresses kept as data.
+
+**The mistake, and its one cause:** every claim that did not hold was a reachability claim made from a search that
+saw only the functions listed in the executable's `.pdata` table, or from what one run showed. The executable has
+small pieces of code without a `.pdata` entry - a null check and a tail jump, or an argument shuffle and a tail
+jump - and every caller behind one of them was invisible to that search. measure/pe_image.py had the same blind
+spot; it now has `reached_by`, which follows such pieces, and measure/console_libs.py checks each case (61 of 61
+the same on this copy; every other measurement re-run unchanged).
+
+Corrected in the maps:
+- xgameruntime.md: the three runtime methods it called "no caller at all in this build" (#2 `+0x30`, #5 `+0x70`,
+  #15 `+0x138`) are all reached, each through such a piece: `+0x30` from ten functions through 0x2213b10, `+0x70`
+  from fn 0x3e40e80 through 0x3e41b40, `+0x138` through 0x2937bf0, whose address fn 0x1ce6f10 keeps for a later
+  call. Of the 161 runtime wrappers these three are exactly the ones a `.pdata`-only search cannot reach.
+- xgameruntime.md section 0: the method that hands out the sandbox text (fn 0x55deaf4) has four callers, not one.
+  Only fn 0x3dda560 compares the text with RETAIL and the others; what the other three do is not read.
+- network.md 2.1: the one WSAStartup assertion has a second way in (through 0x5a61130 from fn 0x221edc0, which the
+  runtime set-up fn 0x1d109b0 calls).
+- (Found the night before by measure/console_libs.py, the same cause: chad.md's "XDspActivate is dead code".)
+
+Held as written: every "only store / only reader" claim about a global that was checked - the descriptor size
+global 0x75e7000 (with three more readers not listed in DESCRIPTORS.md C.1), 0x75e7010, 0x75df188, the sound status
+word 0x9ae98c8, the audio areas 0x9ae98a8 and 0x9ae9908, the watchdog's progress stamp 0x71b6338 and crash callback
+0x71b6348, the two null descriptor sets, the frame-list table 0x75e72a0..0x75e7318, the chad counter 0x9aea514 -
+and the "one caller" claims of MAP.md 1.1, 1.2 and 1.6.
+
+Nothing in the weave was changed. Whether any of the newly reachable places is reached in a run is not measured.
