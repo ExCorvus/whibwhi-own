@@ -2285,3 +2285,19 @@ the audio part of the weave.
   alive at 60 s, no fault, frame token 1755. The channel opened and its handle was written; in the 60 s the program
   activated no chad stream and submitted no page, opened no stream on the stream channel and started no voice on
   the sound chip. So the round trip itself is not tested yet: the program has not got to playing sound.
+## 2026-11-27 - the presented picture is not in the program's memory; the window thread's fault at about 70 s (game tests 19:37 and 19:50, measured)
+
+- The game test now checks that its work folder holds exactly the build it is recorded for, file by file, and runs
+  nothing otherwise. Measured at 19:37: the work folder still held an older copy of d3d12_xs.dll (from 15:14),
+  because removing the old files failed without stopping the script; that run used the older library. Every other
+  file matched. The 19:37 run is therefore not counted for the picture measurement.
+- New measurement in PresentX (weave/d3d12_xs.cpp): the exact pixel values of the picture the program presents, counted
+  where it lies, with the window's focus. Run 19:50 (3 minutes asked, PASS, copy's folder unchanged, every
+  measurement the same, no network): every presented picture (1, 2, 3, 4, 8, ... 128) is a texture of 3840 x 2160,
+  format 28 (R8G8B8A8_UNORM), that the program asks for as a committed resource (device slot 127, heap type 1). It
+  lies in the PC library's memory, not in the program's, so its values were not counted. The window never had the
+  focus at any present.
+- Both 3-minute runs ended at about 70 s (69 and 72 s) at the fault image+0x161b994 (a read at 0x8), and in both the
+  thread that faulted was the program's own window thread (the thread of the window PresentX presents to). Its last
+  imports were memcpy, __stdio_common_vsprintf, memcpy, memcpy. The 60-second runs end before 70 s, which may be why
+  this fault was seen only once before (18:32). Not followed further.
