@@ -28,10 +28,26 @@ The last line says how many statements are the same as FINDINGS.md; the exit cod
 | --- | --- |
 | `pe_image.py` | not a measurement: the shared reader (sections, functions from the executable's own `.pdata`, callers, rip-relative references, the number or offset in one instruction) |
 | `audio.py` | FINDINGS 2026-11-27, "the program's audio setup" and its follow-ups: the 350 sound records, the setup/start/stop/data commands, the XMA2 packet walk, what the device writes back, the stream channel's float output turned into 16-bit samples |
-
 | `topology.py` | FINDINGS 2026-11-27, the topology entries: the renderer's topology field, the places that set rectangle lists (0x11) and quad lists (0x13), the rectangle drawn from three vertices, the class the draw path makes for the pipeline key |
-
 | `dxil_bitcode.py` | not a measurement: the shared reader of shader containers and of the LLVM bitcode inside them (record kinds, declared functions, metadata text) |
 | `builder_shaders.py` | FINDINGS 2026-11-26/27 about the installation's `XboxBvhBuilder.dll`: its 52 shaders, their parts, the root signature bits 0x3000000, stages and thread groups, insertvalue, the 33 console shader compiler functions, the 32-lane switch. Takes the library's path, not the executable's. Not yet repeated here: the operation numbers of those functions |
+| `builder_pipelines.cpp` | FINDINGS 2026-11-27, "the builder's 52 shaders made with their own root signatures" (game test 01:34): all 52 compute pipelines made on one PC device, each with its own root signature, in the builder's measured order; no error line of the PC library; with `--validate`, no message of the Vulkan validation layer. Needs a PC and its graphics card (see below) |
+
+## The one that needs the graphics card
+
+`builder_pipelines.cpp` is a small C++ program, because it has to talk to the PC graphics library. It hands the
+builder's shaders to your graphics driver to be compiled into pipelines, and runs none of them. It needs:
+
+- the vkd3d-proton fork built as in [docs/BUILD-AND-RUN.md](../docs/BUILD-AND-RUN.md), and its `d3d12.dll`
+  (renamed `d3d12_vk.dll`) and `d3d12core.dll` beside the built program;
+- for `--validate`, the Vulkan SDK (its validation layer).
+
+```
+cl /std:c++17 /EHsc /O2 measure\builder_pipelines.cpp
+builder_pipelines.exe "<your game folder>\XboxBvhBuilder.dll" --validate
+```
+
+The same program run beside an unchanged vkd3d-proton (71cae09) makes 9 of the 52: the 9 shaders that use none of
+the console shader compiler's own functions. That is the check that it can tell a difference.
 
 More scripts are added as the earlier results are turned into repeatable steps.
