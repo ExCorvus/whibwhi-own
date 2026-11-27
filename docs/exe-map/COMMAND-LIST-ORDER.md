@@ -72,13 +72,13 @@ Measured fields of the object the image records into (all offsets inside the lis
 
 | offset | what the image does with it | where |
 |---|---|---|
-| `+0x18` | current write pointer; the image stores command records here | 0x3258a, 0x32876, 0x32978, 0x32a48, 0x248c327, 0x248c4ed … |
+| `+0x18` | current write pointer; the image stores command records here | 0x3258a, 0x32876, 0x32978, 0x248c327, 0x248c4ed … (corrected 2026-11-27: 0x32a48, listed here before, reads a renderer field `ctx+0x12640` instead) |
 | `+0x30` | end of the buffer; `cmp [obj+0x18],[obj+0x30]; jb` → write inline, else call the method | same sites |
-| `+0x140` | byte the image sets to 1 when the record's type value is below `0x40000000` | 0x32251, 0x32940, 0x248c44c, 0x248c641 |
-| `+0x141` | byte copied from bit 20 of a state block | 0x248c650 |
+| `+0x140` | byte the image sets to 1. After a test that the record's first word is below `0x40000000` (`cmp 0x40000000`, or `cmp 0x3fffffff` + `ja`) at 5 places in each of fn 0x32130, 0x248c2a0 and 0x248c6b0; **without a test** at 4 places: after the 28-byte record that also copies bit 20 into `+0x141` (0x33c01, 0x248c641, 0x248c9f5) and after a run of records in fn 0x32520 (0x33c55) (corrected 2026-11-27, `measure/command_lists.py`) | 0x32251 … in fn 0x32130; 0x248c445 … in fn 0x248c2a0; 0x248c805 … in fn 0x248c6b0; 0x33c01, 0x33c55 in fn 0x32520 (0x32940 and 0x248c44c, listed here before, are the branch and the record store next to two of them) |
+| `+0x141` | byte copied from bit 20 of a state block | 0x248c650, 0x33c11, 0x248ca04 |
 | `+0x144` | dword table indexed by **root-parameter type** (0..4); the value becomes the first dword of the record | 0x32242, 0x32297 (`[rdi+rdx*4+0x144]`) |
 | `+0x344` | dword table indexed by **render-state byte** (0..0x20); same role | 0x248c436, 0x248c49c, 0x248c4fc, 0x248c57a, 0x248c65b |
-| `+0x544`, `+0x554` | two 16-byte state blocks copied in before the "state block changed" record | 0x248c312, 0x248c31f, 0x3278b, 0x32799 |
+| `+0x544`, `+0x554` | two 16-byte state blocks copied in before the "state block changed" record | 0x248c312, 0x248c31f, 0x3278b, 0x32799, and in fn 0x248c6b0 0x248c705, 0x248c712 (added 2026-11-27) |
 | `+0x548` | flag byte tested (`and 3`) before several records | 0x32276, 0x32373, 0x324dd |
 
 The records themselves are written with literal first dwords (**V**): `0xc000b600` followed by
@@ -110,7 +110,7 @@ wrapper `[wrapper+0x18]` is `kind_id` (=3) and `[wrapper+0x30]` is `title_bytes`
 *writes* from that path. But two things still go wrong:
 
 - **Unconditional 32-byte writes at `list+0x544` and `list+0x554`** (0x248c312/0x248c31f in fn 0x248c2a0, and
-  0x3278b/0x32799 in fn 0x32520). On a `Wrap` of 0x50 bytes that is an out-of-bounds write 1.3 KiB past the
+  0x3278b/0x32799 in fn 0x32520, and 0x248c705/0x248c712 in fn 0x248c6b0). On a `Wrap` of 0x50 bytes that is an out-of-bounds write 1.3 KiB past the
   object, before any buffer check. This will corrupt whatever the allocator put there. It is the first thing that
   will break when the image reaches its first recorded draw.
 - The image *tests* `[list+0x548]` and *reads* `[list+0x18]`/`[list+0x30]`; both are outside our wrapper.
@@ -129,7 +129,7 @@ field of the rendering context, `L48` = from a context's `+0x48` (the accessor f
 
 | offset | slot | sites | arguments as the image builds them | identification | confidence |
 |---|---|---|---|---|---|
-| `+0x48` | 9 | 0x17f6d48, 0x2478bcd, 0x2478cc2 (all right after creation) | none beyond the object; result (HRESULT) checked at 0x2478bd5 only | **Close** | **I** — no-argument method called once per list immediately after creation; a `Close` on a fresh list is legal and is what the shape allows. It could equally be a console "begin recording" (U). |
+| `+0x48` | 9 | 0x17f6d48, 0x2478bcd, 0x2478cc2 (all right after creation) | none beyond the object; the result (HRESULT) is tested after all three calls (corrected 2026-11-27; this said "checked at 0x2478bd5 only"): at 0x17f6d4b a negative result returns, at 0x2478bd0 and 0x2478cc5 it stops the program with `int3` (0x2478bd4, 0x2478cc9) | **Close** | **I** — no-argument method called once per list immediately after creation; a `Close` on a fresh list is legal and is what the shape allows. It could equally be a console "begin recording" (U). |
 | `+0x78` | 15 | 0x249073f via L48, plus 3 more in the whole image | `(dstResource = [desc+0x20], dstOffset = [desc+0x14] if flags&0x2040 else 0, srcResource, srcOffset = [rsp+0x20], numBytes = [rsp+0x28])` — `r9` and two stack slots | **CopyBufferRegion** | **V/I**, high: five arguments with exactly this meaning; no other public list method has (resource, offset, resource, offset, size). |
 | `+0xd0` | 26 | 12 sites in 6 functions: 0x24901a5, 0x24902d2, 0x24906c0, 0x24907a1, 0x249081f, 0x24909f7, 0x2490c81 … | `(count = 1, &block)`; the block is built as `{type = 2 (UAV), flags = 0, pResource}` — 24 bytes at `rbp-0x68`, zeroed with `vmovups` first | **ResourceBarrier** | **V/I**, high. Note the console record is **24 bytes**; the PC `D3D12_RESOURCE_BARRIER` is 32 (8 header + 24 transition payload). Any wrapper must translate, not forward the array. |
 | `+0x1e8` | 61 | 10 sites: 0x248cbba (fn 0x248ca90), 0x248cd09 (0x248cbe0), 0x248cdef (0x248cd20), 0x248d198 (0x248d000), 0x248d33a (0x248d1b0), 0x248d4e8 (0x248d350), 0x248d68a (0x248d500), 0x4e33f91, 0x555e976, 0x94445 | `(signature = [0x75e75d8/…e0/…e8/…f0], MaxCommandCount = 1, pArgumentBuffer = [desc+0x20] or a global, ArgumentBufferOffset = index + [desc+0x14] − base, pCountBuffer = 0, CountBufferOffset = 0)` — six arguments, the last two zeroed with `vpxor`/`vmovdqu` to `[rsp+0x28]` | **ExecuteIndirect** | **V/I**, high: six arguments, in the public order, with the count buffer explicitly null. The identification is certain; only the *slot number* is surprising (see §3). |
@@ -240,7 +240,8 @@ shape, which is weak evidence that they are *not* the public methods at all.
 
 The first dword of every inline record comes from a per-list table (`+0x144` for root-parameter types 0..4,
 `+0x344` for render-state bytes 0..0x20). The image reads those tables and copies the value into the record, and
-it tests the value against `0x40000000` to set `list+0x140` (**V**). Nothing in the image writes those tables, so
+it tests the value against `0x40000000` to set `list+0x140` (**V**; four other places set `list+0x140` without
+that test, see §1). Nothing in the image writes those tables, so
 they are filled by whatever creates the list — the console graphics library, i.e. our wrapper. They are therefore
 *ours to define*, and anything we put there must satisfy the image's `0x40000000` test. This is the deepest open
 design question of the whole command-list path and it is a scope decision, not a measurement: either
