@@ -60,6 +60,54 @@ class Image:
     def float32(self, rva):
         return struct.unpack("<f", self.read(rva, 4))[0]
 
+    def cstring(self, rva, limit=512):
+        raw = self.read(rva, limit)
+        return raw[:raw.index(b"\0")].decode("ascii", "replace") if b"\0" in raw else raw.decode("ascii", "replace")
+
+    # ---- imports, from the import directory ----------------------------------------------------------------
+    def imports(self):
+        """[(library name as written, [function names, or '#n' for an import by number])], in table order."""
+        pe = struct.unpack_from("<I", self.data, 0x3C)[0]
+        rva = struct.unpack_from("<I", self.data, pe + 24 + 112 + 8)[0]
+        result = []
+        if not rva:
+            return result
+        while True:
+            lookup, _time, _chain, name, address = struct.unpack("<IIIII", self.read(rva, 20))
+            if name == 0:
+                break
+            functions = []
+            entry = lookup or address
+            while True:
+                value = struct.unpack("<Q", self.read(entry, 8))[0]
+                if not value:
+                    break
+                functions.append(f"#{value & 0xFFFF}" if value >> 63 else self.cstring((value & 0x7FFFFFFF) + 2))
+                entry += 8
+            result.append((self.cstring(name), functions))
+            rva += 20
+        return result
+
+    def import_at(self, slot):
+        """(library, function) whose address the loader writes into the import slot at rva slot, or None."""
+        pe = struct.unpack_from("<I", self.data, 0x3C)[0]
+        rva = struct.unpack_from("<I", self.data, pe + 24 + 112 + 8)[0]
+        while rva:
+            lookup, _time, _chain, name, address = struct.unpack("<IIIII", self.read(rva, 20))
+            if name == 0:
+                break
+            entry, index = lookup or address, 0
+            while True:
+                value = struct.unpack("<Q", self.read(entry + 8 * index, 8))[0]
+                if not value:
+                    break
+                if address + 8 * index == slot:
+                    function = f"#{value & 0xFFFF}" if value >> 63 else self.cstring((value & 0x7FFFFFFF) + 2)
+                    return self.cstring(name), function
+                index += 1
+            rva += 20
+        return None
+
     # ---- functions, from .pdata --------------------------------------------------------------------------
     def _functions(self):
         raw = self.read(self.exception_rva, self.exception_size)
@@ -176,9 +224,26 @@ class Image:
                 out.add(f[0])
         return sorted(out)
 
+    def callers_and_jumps(self, target):
+        """Starts of the functions that call target (E8 rel32) or end by jumping to it (E9 rel32, a tail call).
+        Each site is confirmed by disassembling its function."""
+        va, b = self._code()
+        rel = (b[1:-3].astype(np.int64) | (b[2:-2].astype(np.int64) << 8) | (b[3:-1].astype(np.int64) << 16)
+               | (b[4:].astype(np.int64) << 24))
+        rel = np.where(rel >= 1 << 31, rel - (1 << 32), rel)
+        site = np.arange(len(rel), dtype=np.int64) + va
+        hit = np.nonzero(((b[:-4] == 0xE8) | (b[:-4] == 0xE9)) & (site + 5 + rel == target))[0]
+        out = set()
+        for h in hit.tolist():
+            f = self.function_of(va + h)
+            if f and any(ins.address == va + h for ins in self.instructions(*f)):
+                out.add(f[0])
+        return sorted(out)
+
     def rip_references(self, target):
         """(instruction address, function start, instruction) for every instruction that addresses target
-        rip-relatively. Candidates come from a byte scan; each is confirmed by disassembling its function."""
+        rip-relatively. Candidates come from a byte scan; each is confirmed by disassembling its function.
+        Only code covered by .pdata is seen: a leaf function without an entry there is not."""
         va, b = self._code()
         disp = (b[:-3].astype(np.int64) | (b[1:-2].astype(np.int64) << 8) | (b[2:-1].astype(np.int64) << 16)
                 | (b[3:].astype(np.int64) << 24))
