@@ -218,7 +218,7 @@ gap, and OUR layer's long blocks are what it sees. Everything below is from `fun
 | 0x71b6330 | byte | pause the checks | fn 0x22161b0 (0) | fn 0x2215a60 |
 | 0x71b6331 | byte | the kick: one pass's checks are skipped | **none** (every 4-byte disp32 and the imm32 scans come back empty; the watchdog only reads it and clears it) | fn 0x2215a60 |
 | 0x71b6334 | dword | open watch scopes (atomic) | fn 0xb5b6b0 (+1), fn 0xb5b6f0 (-1), fn 0x22161b0 (0) | fn 0x2215a60 |
-| 0x71b6338 | qword | QPC of the last progress report | **fn 0x22159f0 only** | fn 0x2215a60 |
+| 0x71b6338 | qword | QPC of the last progress report | **fn 0x22159f0 only**, besides the watchdog itself, which stores it 4 times when it re-arms (corrected 2026-11-27, measure/watchdog.py) | fn 0x2215a60 |
 | 0x71b6340 | byte | stop: the thread leaves | fn 0x22161b0 (1) | fn 0x2215a60 |
 | 0x71b6348 | qword | the crash callback | fn 0x22161f0 (4.5) | fn 0x2215a60 |
 | 0x6844a20 | 64 x 72 B | the watch-scope table (4.4) | fn 0x55aa250 / fn 0xb5b6b0 / fn 0xb5b6f0 | fn 0x2215a60 |
@@ -257,12 +257,13 @@ gap, and OUR layer's long blocks are what it sees. Everything below is from `fun
   fail-fast marker) and restores the previous value on the way out.
 - fn 0x1c82b20 is one of the engine's **run-loop wrappers**: it installs that handler, sets byte 0xab731e0 = 1, and
   loops { fn 0x22159f0 (progress), fn 0x1474e00, fn 0x9d8ec0, fn 0x54f5080, `Sleep(fn 0x258b010())`, fn 0x1f8ae00
-  (continue?) }, then clears the flag and restores the handler. 23 functions call it — the game modes that run the
+  (continue?) }, then clears the flag and restores the handler. 23 functions call it (20 calls and 6 tail jumps,
+  measure/watchdog.py) — the game modes that run the
   loop. **I** its `Sleep` is a frame-time sleep, so this is the loop where the cap and the progress report meet.
 
 ### 4.6 Who reports progress (V)
-- fn 0x22159f0 is the whole reporter: `QueryPerformanceCounter` and one store into 0x71b6338. 18 bytes, no lock,
-  no TLS.
+- fn 0x22159f0 is the whole reporter: `QueryPerformanceCounter` and one store into 0x71b6338. 35 bytes (this
+  line said 18 until 2026-11-27; measured by measure/watchdog.py), no lock, no TLS.
 - Its call sites: 0x1c82b67 and 0x1c82bc1 (inside the run loop above), 0x120799 (fn 0x120790, a callback that also
   touches the D3D query/state block reached from TEB+0x12a8) and 0xc9e368 (fn 0xc9e350).
 - **I** Those are the only things that keep the watchdog quiet. A 30 s gap in them is a fire — and a long block of
