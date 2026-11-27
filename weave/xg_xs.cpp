@@ -84,6 +84,10 @@ unsigned bits_per_pixel(unsigned format) {
     if (format == 85 || format == 86) return 16;   // B5G6R5, B5G5R5A1
     if (format >= 87 && format <= 93) return 32;   // B8G8R8A8, B8G8R8X8, R10G10B10 XR bias
     if (format >= 94 && format <= 99) return 8;    // BC6H, BC7
+    // The console's own format numbers, from the program's own table of bits per pixel (fn 0x4d9f3c0, table at
+    // 0x61ed5b8; measure/texture_formats.py). 118 is asked for as a depth-stencil texture (FINDINGS 2026-11-27).
+    // 121 to 124 and 127 are in that table too but left out: whether they are block formats is not measured.
+    if (format >= 118 && format <= 120) return 16;
     return 0;
 }
 
