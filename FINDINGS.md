@@ -1478,3 +1478,9 @@ shaders were also passed only by the simplification; then TypedLoad is taught th
   library is not identified - the run did not record library start addresses). Answered "not provided".
 - Also in the log, as before: the weave's own shader translator refuses some pixel shaders ("a texel read whose
   values go to an instruction the pass cannot type"). Not looked at.
+Correction, game test 01:39 (PASS, same counts in kind; frame token 1,473, 8,865 pipelines): the 1,264-byte console
+shader for device slot 62 does **not** come from a library outside the executable. The address in the 01:34 line
+was read inside the routine that logs only once, so it named that routine's caller, not the program's call. Read
+at the call itself, it is the executable: image+0x247fe6d, right after the call at 0x247fe66 in fn 0x247fd30, the
+program's own compute-pipeline path (docs/exe-map/SHADER-PATH.md, row 62). So the next stop is the program's own
+compute shaders, which carry the console part (PRIV); the weave does not make those yet.
