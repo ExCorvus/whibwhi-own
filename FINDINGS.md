@@ -2340,3 +2340,23 @@ the audio part of the weave.
   120-Hz row 8333 8333 16667 25000 33333, by the 120-Hz byte and a divider. 33,333 us is in both rows (60 Hz divider
   2, 120 Hz divider 4) - the image's target is 30 frames per second either way (inferred; which row it took is not
   read at run time).
+## 2026-11-27 - the fault at about 70 s: in the program's user interface, while it reports progress (game tests 20:49, 21:01, 21:12, measured)
+
+- weave/tools/boot_image.cpp: the fault report now lists every general register and what it points at (text when it
+  starts with printable characters, else four words), and the watchdog's progress stamp is logged as it changes
+  (each new report with its time, and when it has been unchanged 10, 20, 25, 29 s). Read only, as before.
+- Run 20:49: at the fault image+0x161b994 two registers point at the text "flash.display.Sprite", one at a pointer
+  written as text ("000001CCDC3F5FA0"). The program is creating an object of the user-interface class
+  flash.display.Sprite (Flash-based user interface; the class name is in the executable once, at 0x678094b, near
+  '.swf' at 0x678026a and 'ttpf' at 0x67802a0). Read in the exe (fn 0xea8c90 -> fn 0xeadcd0 -> piece fn 0x161b910 ->
+  fn 0x161b950): the object worked on carries a name as text at +0x10 (or +0xa0); for one type the program hands
+  its part at +0x128 on, and that part's +0x20 is empty.
+- Run 21:01 (timeline): the progress stamp first changes at 55.6 s, then every half second up to the fault at about
+  60 s of the run. The watchdog was nowhere near its 30 s: the program was running normally when it fell over. A
+  second stop follows on another thread, a breakpoint in the program at image+0x344196 (not followed).
+- Run 21:12 (file trace, WHIWHI_FILE_TRACE=1): the program checks and opens 12 archives, two pack archives
+  (pack\core_bvh4, pack\core_licenses), and the texture database files under data\ttdb\ (92 lines naming .ttpf
+  files), among them data\ttdb\ui\ttdb_ui.ttpf and data\ttdb\ui\platform.ttpf - all found and opened, well before the
+  fault. No storage read failed. Not found (and not in the installation): data\data\effects\animimgfilters.zmt; the
+  program also lists D:\decorations\presets\* and D:\decorations\compressed_textures\* (D: on the console is the
+  development scratch drive), not there. Correction to the 13:37 entry: that trace ended before these opens.
