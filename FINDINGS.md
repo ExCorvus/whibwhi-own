@@ -1397,3 +1397,18 @@ is handed to the PC device, by size and the first 8 bytes of the container's che
   every one of them as supported.
 - What sets it apart: its translated code is 34,003 words long, more than twice the largest of the 31 (16,304).
   Whether size or something in its content leads the driver's compiler into the fault was not measured.
+Follow-up, 2026-11-27 ~01:30 - the driver fault reproduced outside the program (a test tool, not in the repository):
+- A small tool reads the builder library fresh from the copy into memory and makes its compute pipelines the way
+  the builder does in a game run: one device of the same graphics library build (the fork's, from 00:49), the
+  builder's one root signature (as recorded at 23:07: version 1.1, flags 0x3000000, root SRV, root UAV, 16
+  constants), the shaders in the order the builder made them at 00:54 (32 measured, the other 20 in file order -
+  the tool's choice). Nothing is dispatched; nothing of the shaders is written anywhere.
+- Result, seven runs: the first 4 pipelines are made; making the 5th (29,996 bytes) faults in the driver at
+  amdvlk64.dll+0xf0a3d4, reading address 0x6e6f69746f5d - the same instruction and the same address as in the game
+  runs (00:24 on the 5th; 00:40, 00:49 and 00:54 on the 32nd). The address's bytes are text ("]otion"); that text
+  is not in the builder library, its shader, the driver file or the graphics library file.
+- Not the reason (each tried, same fault on the 5th): the root signature taken from each shader's own RTS0 part
+  instead of the builder's (each shader's RTS0 part differs byte for byte from the builder's serialized one, same
+  meaning not checked); feature level 12_0 or 12_1; a 64 MiB stack for the thread that makes them.
+- Open: why the game runs since 00:28 get past the 5th and the tool does not. Differences left: what the program
+  and the weave have made on the device before the builder, and the driver's own cache per program (guess).
