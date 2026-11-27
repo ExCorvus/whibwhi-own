@@ -1694,4 +1694,12 @@ back, before any answer. Read in fn 0x43aec40 (the setup) and the places that us
   that the stream channel's ring and the voice's source ring are the same ring is NOT shown - the two objects'
   layouts differ). Picture so far: the stream channel decodes (960 samples per packet) and hands float samples
   back; the program turns them into 16-bit samples and gives them to the sound device's voices, whose mixing
-  and output are the device's (not read). Nothing in the program reads mixed sound back.
+  and output are the device's (not read). Nothing in the program reads mixed sound back.- Follow-up: the remaining commands. Opcode 5 (fn 0x43a73e0, magic 0xf6f6f6f6, block {voice}) is sent by fn
+  0x78120 when a voice has not started, and the voice's table entry +0x10 is then set to 2: start a voice.
+  Opcode 7 (fn 0x925e0, r8d = voice + 1, block {voice}; called by fn 0x78120, fn 0x92580, fn 0x50f2ae0) sets
+  entry +0x10 to 0 and +0x18 to 1 (the value the setup gives a free voice): stop and free a voice. Opcode 2
+  (setup) carries one constant, 0xc0; what it means is not readable from the program's side. The command door's
+  form is the same everywhere: (object, opcode, magic or value, -1, pointer to a small block, 0). Nothing the
+  program sends (commands, the 64-byte records, the setup) carries a volume, a mix or an output channel layout -
+  in what was read the program gives the device no mixing instructions. fn 0x785d0 also writes device
+  addresses of two more buffers into record +0x14 / +0x18 on one of its paths; what they are is not read.
