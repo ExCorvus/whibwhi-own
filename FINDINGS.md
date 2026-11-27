@@ -1484,3 +1484,15 @@ was read inside the routine that logs only once, so it named that routine's call
 at the call itself, it is the executable: image+0x247fe6d, right after the call at 0x247fe66 in fn 0x247fd30, the
 program's own compute-pipeline path (docs/exe-map/SHADER-PATH.md, row 62). So the next stop is the program's own
 compute shaders, which carry the console part (PRIV); the weave does not make those yet.
+## 2026-11-27 - what the program's own compute shaders carry (game tests 01:44 and 01:46, measured)
+
+- Device slot 62 now names, for each console compute shader, its parts and the numbers in the DXIL part's header
+  (numbers only). In both runs every console compute shader (10 and more per run, fewer than 100) carries the same
+  seven parts: SFI0, ISG1, OSG1, PSV0, HASH, DXIL, PRIV. There is no RTS0 part.
+- The DXIL part states a compute program (kind 5) of shader model 6.6, magic "DXIL", DXIL version 1.6. Its header
+  says the code is 4 bytes long, and those 4 bytes are the letters "NOBC". So the PC part does not carry the
+  program's LLVM code: where it would be, the shader says "no bitcode". In the 1,460-byte example the DXIL part
+  is 816 bytes; what the roughly 790 bytes between its header and "NOBC" are is not read yet.
+- What this means: the PC part of these shaders is a description without the program. A PC translator, LLVM
+  included, has nothing to translate in it. Where the program's code for these shaders is, is not known: the
+  220-byte PRIV part is too small to be it by size alone, which is an inference, not a reading.
