@@ -11,6 +11,29 @@ This is a plain C++17 project. Any editor and any MSVC toolchain work; nothing h
 - Your own copy of the game, installed at `C:\XboxGames\GTA6.Xbox.v1.0.2.1` (the default). The game folder is
   read-only for this project: the weave only reads it. Point elsewhere with the `WHIWHI_GAME_DIR` environment
   variable.
+- A drive **T:** of 2 GB (see the next section).
+
+## The console's temporary drive T:
+
+The program keeps files of its own on drive T: (measured: its telemetry cache, crash reports and a studio cache;
+FINDINGS.md, 2026-11-27). On the console T: is the title's temporary local storage: 2 GB of its own on the
+console's SSD, written while the program runs (Microsoft's public page "Local storage on Xbox console"). The weave
+does not redirect T: to a folder: the program's T: calls go to Windows as they are, so the PC needs a real drive
+T:. Make it once, as a 2 GB partition on an SSD that is not your Windows drive (an NVMe SSD comes closest to the
+console's). In a PowerShell opened as administrator, with your data drive's letter instead of `D`:
+
+```powershell
+$d = Get-Partition -DriveLetter D
+$d | Resize-Partition -Size ($d.Size - 2GB)
+New-Partition -DiskNumber $d.DiskNumber -Size 2GB -DriveLetter T |
+    Format-Volume -FileSystem NTFS -NewFileSystemLabel "T" -Confirm:$false
+```
+
+The first command makes that partition 2 GB smaller at its end (the files on it stay); the second makes a new
+2 GB partition with the letter T: in the freed space. Shrinking a partition is an ordinary Windows operation, but
+it changes your disk: back up what you cannot lose first. If Windows cannot shrink the partition (files that cannot
+be moved at its end), choose another data drive. On the console the system empties T: after the program ends; on
+a PC nothing does that yet (open).
 
 ## Build
 
