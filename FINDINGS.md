@@ -1640,4 +1640,14 @@ back, before any answer. Read in fn 0x43aec40 (the setup) and the places that us
   executable.
 - No codec name (Opus, XMA, AAC) appears in the executable's text.
 - Also corrected: the table in section 6 of acp-xapu.md is older than the weave: AcpHalAllocateShapeContexts,
-  ApuCreateHeap, ApuAlloc and the address functions are answered with real memory now (weave/acp_hal.cpp).
+  ApuCreateHeap, ApuAlloc and the address functions are answered with real memory now (weave/acp_hal.cpp).- Follow-up (same day): fn 0x55cbd10, called by the per-packet feed (fn 0x785d0) with a buffer and its size
+  before the records are filled, walks the data in packets of 2048 bytes. Per packet it requires the low 3 bits
+  of byte +2 to be 1, takes the top 6 bits of byte +0 times 512 as a sample count, and steps
+  (byte +3 + 1) x 2048 bytes to the next packet. Every one of these fields is where the public XMA2 packet
+  header has it (frame count 6 bits, 512 samples per frame, packet metadata 3 bits = 1, packet skip count), so
+  the data this path hands the audio processor is XMA2 (measured against the public format). ExCorvus knows the
+  audio library to be Opus; the stream channel (xapu, opcode 3) submits blocks of 960, which is 20 ms of Opus
+  at 48 kHz - not measured yet. So both formats may be in use (her view: music and voice lines may differ).
+- Downloaded for that, outside the repository (rule 8), source only, nothing built yet: libopus (xiph.org,
+  BSD, E:\third_party\opus at fed7c79) and FFmpeg, whose libavcodec has the public XMA1/XMA2 decoder (LGPL,
+  E:\third_party\ffmpeg at 420f158).
