@@ -10,11 +10,11 @@
 //     with EXEC into both halves of its mask. Scalar instructions always run.
 //   * Control flow comes from shader_emit_flow.*: its items are written one to one (if / else / endif, loop,
 //     break, continue, the "next block" variable).
-//   * The starting scalar registers the module's first table names are read from the weave's arguments buffer
-//     (weave_layout below). Loads of descriptors are not carried out as loads: a load through a register that
-//     holds a descriptor table's address or the sampler heap's becomes a fact about the registers it fills
-//     ("a texture / constant buffer / buffer / sampler, at the place in the weave's heap computed here"); the
-//     instruction that later uses those registers is written against the weave's heap at that place.
+//   * The starting scalar registers the module's first table names come from the program's own root
+//     arguments, named as program_layout below says. Loads of descriptors are not carried out as loads: a load
+//     through a register that holds a descriptor table's address becomes a fact about the registers it fills
+//     ("a texture / constant buffer / buffer / sampler, at place k of root parameter p"); the instruction that
+//     later uses those registers is written against register k of space p.
 //   * Inputs and outputs follow the links measured on the game's programs (docs/SHADER-TRANSLATOR.md section
 //     23 and 26): a pixel program's second interpolation step yields the input at the n-th register (n = the
 //     attribute number, counted over the registers of the elements that are not system values) component
@@ -53,46 +53,35 @@ namespace whiwhi::weave {
 
 enum class PcStage : std::uint8_t { kPixel, kVertex };
 
-// The weave's layout: where every written shader finds what the console's system would have handed the console
-// program. It is this project's own and the same for every shader and every pipeline; the game's root signature
-// objects play no part in it. On the console, the system puts each root argument in the starting scalar
-// registers the shader's module names (its first table: the register, and whether it is constants, a buffer's
-// address, a descriptor table's address or the sampler heap), and the program loads its descriptors itself from
-// the descriptor memory those addresses point into. Here:
-//   * the starting scalar registers come from one constant buffer (the arguments buffer), word n = s<n>, which
-//     the weave fills from the game's root arguments when it draws;
-//   * a descriptor the program loads from a table is taken from the weave's resource heap by its place: the
-//     address the program computed, less the heap's address (a word of the arguments buffer), counted in units
-//     of kDescriptorUnit bytes; the weave keeps the PC descriptor for that address at that place;
-//   * a sampler from the sampler heap likewise, from the weave's sampler heap;
-//   * a buffer whose address the program has in scalar registers n and n + 1 is the raw buffer at register n of
-//     the address space, which the weave points at that address.
-// Each kind of resource is one range without an upper end in a register space of its own, so one root signature
-// (made by the weave, weave_layout_root_signature in d3d12_xs.cpp) serves every pipeline.
-namespace weave_layout {
-constexpr std::uint32_t kSpace = 0x5748;                 // "WH", outside what a game declares
-constexpr std::uint32_t kSamplerSpace = kSpace;          // s0 onward: the weave's sampler heap
-constexpr std::uint32_t kArgumentsSpace = kSpace + 1;    // b0: the arguments buffer
-constexpr std::uint32_t kConstantBufferSpace = kSpace + 2;  // b0 onward: constant buffers in the resource heap
-constexpr std::uint32_t kRawBufferSpace = kSpace + 3;    // t0 onward: buffers in the resource heap
-constexpr std::uint32_t kTextureSpace = kSpace + 0x10;   // plus the dxbc::ResourceDimension number: t0 onward
-constexpr std::uint32_t kAddressSpace = kSpace + 0x20;   // t<n>: the buffer at the address in s<n>, s<n + 1>
-constexpr std::uint32_t kArgumentRegisters = 64;         // words 0..63 of the arguments buffer: s0..s63
-constexpr std::uint32_t kResourceBaseWord = 64;          // 0 minus the low word of the resource heap's address
-constexpr std::uint32_t kSamplerBaseWord = 65;           // 0 minus the low word of the sampler heap's address
-constexpr std::uint32_t kArgumentWords = 68;
-constexpr std::uint32_t kDescriptorUnit = 16;            // bytes of descriptor address per place in a weave heap
-constexpr std::uint32_t kAddressRegisters = 16;          // s0..s15 may hold a buffer's address
-}  // namespace weave_layout
+// Where every written shader finds what the console's system hands the console program: the program's own root
+// signature, the one its pipeline names. On the console the system puts each root argument in the starting scalar
+// registers the shader's module names (its first table: the register, which root parameter, and whether it is
+// constants, a buffer's address or a descriptor table's address), and the program loads its descriptors itself
+// from the table at that address, by place (the program fills its tables one 32-byte record per place;
+// docs/exe-map/DESCRIPTORS.md C.2). Measured (FINDINGS 2026-11-27, game test 02:04): the ranges of the program's
+// named root signatures do not say where its shaders' table resources sit; the shaders' own tables do. So the
+// written shader names everything by root parameter and place (program_layout):
+//   * root constants of parameter p: constant buffer b0 of register space p, word n = the n-th constant;
+//   * a buffer whose address is root parameter p: b0 (a constant buffer) or t0 (a buffer) of space p;
+//   * the resource at place k of the descriptor table of parameter p: register k of space p (b, t or s by what
+//     it is), place k = the word offset the module gives, over the 8 words of a 32-byte record (a sampler's
+//     table: over the 4 words of a 16-byte sampler, the size the program's sampler loads read).
+// The weave makes, for each root signature the program creates, the PC one with the same parameters in the same
+// order whose tables give each register space one range of each kind from register 0 (d3d12_xs.cpp, device
+// slot 16), so the program's root arguments are passed on as they are.
+namespace program_layout {
+// Place k of a descriptor table, from a word offset inside it.
+constexpr std::uint32_t kRecordWords = 8;
+constexpr std::uint32_t kSamplerWords = 4;
+}  // namespace program_layout
 
 constexpr std::uint32_t kPcNoRootParameter = 0xFFFFFFFFu;
 
 enum class PcBindingKind : std::uint8_t {
-    kArguments,       // the arguments buffer
-    kConstantBuffer,  // the constant buffers of the resource heap, taken by place
-    kTexture,         // the textures of one dimension in the resource heap, taken by place
-    kRawBuffer,       // the buffers of the resource heap taken by place, or the buffer at an address (unbounded false)
-    kSamplerHeap,     // the weave's sampler heap, taken by place
+    kConstantBuffer,  // root constants, a root constant buffer, or a constant buffer in a table
+    kTexture,         // a texture in a table
+    kRawBuffer,       // a buffer in a table, or a root buffer
+    kSampler,         // a sampler in a sampler table
 };
 
 const char* pc_binding_kind_name(PcBindingKind kind);
@@ -102,12 +91,13 @@ struct PcBinding {
     PcBindingKind kind = PcBindingKind::kTexture;
     std::uint32_t id = 0;               // the declaration's number within its class (CBn, Tn, Sn)
     std::uint32_t shader_register = 0;  // the first register declared
-    std::uint32_t space = 0;
-    bool unbounded = false;             // the declared range has no upper end
-    std::uint32_t root_parameter = kPcNoRootParameter;  // the game's root parameter number, when the module names one
+    std::uint32_t space = 0;            // the root parameter's number (program_layout)
+    bool unbounded = false;             // the declared range has no upper end (not used by program_layout)
+    std::uint32_t root_parameter = kPcNoRootParameter;  // the program's root parameter number
     std::uint32_t scalar_register = 0;  // the machine register the program reaches it through
     std::uint32_t offset_words = 0;     // its place inside the descriptor table, in 32-bit words
-    std::uint32_t values = 0;           // kConstants: how many 32-bit values
+    std::uint32_t values = 0;           // root constants: how many 32-bit values (0 for any other buffer)
+    bool root_constants = false;        // kConstantBuffer: the root parameter is root constants
     std::uint32_t dimension = 0;        // kTexture: the dxbc::ResourceDimension number
     bool indexed = false;               // kConstantBuffer: some read takes its 16-byte element at run time
 };
