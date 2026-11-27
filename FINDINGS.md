@@ -1496,3 +1496,11 @@ compute shaders, which carry the console part (PRIV); the weave does not make th
 - What this means: the PC part of these shaders is a description without the program. A PC translator, LLVM
   included, has nothing to translate in it. Where the program's code for these shaders is, is not known: the
   220-byte PRIV part is too small to be it by size alone, which is an inference, not a reading.
+Follow-up, game test 01:50 (PASS): the roughly 790 bytes in the DXIL part are the same directory the graphics
+shaders carry (weave/shader_program.hpp, docs/exe-map/SHADER-PATH.md). Read with the weave's existing reader, three
+console compute shaders (1,356, 1,264 and 1,460 bytes) each have three entries (kinds 0x12, 0x0D and 0x07, of 16,
+roughly 550-700, and 28 bytes); the 0x0D block is packed (525-674 bytes) and unpacks to a module of 1,435-1,675
+bytes laid out like the graphics modules, with its number at +0x70 (the place seen before in a compute module).
+In it stands the program in the console's instruction set: 35, 49 and 66 instructions (196-380 bytes), each walk
+ending exactly on the end-of-program word. So the program's own compute shaders carry their code as console GPU
+instructions, the same form as its graphics shaders, and no PC code.
