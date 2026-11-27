@@ -2232,3 +2232,25 @@ its size): PASS on the hard rules, the copy's folder unchanged. One read failed 
   buffer). That would explain both an "end of file" inside the file and faults in unrelated places (here the C
   runtime, at 17:41 the program at image+0x2942c8). This is inferred from the measured pieces and the documentation;
   that several reads ran at once on one handle is not measured.
+Follow-up, game test 18:20 (run-20261127-182007, visible; the storage library now counts, per file, the reads open
+at the same moment and names the reading thread): PASS on the hard rules, the copy's folder unchanged, the run
+alive at 60 s (frame token 1711, 6 progress reports).
+- Several reads ARE open on one file at once: two on audio.rpf (the first time at request #1, thread 40812).
+- 14 reads failed, all on audio.rpf, every piece inside the file, and every one that kept its own numbers started
+  while another read was open on the same file.
+- The trace of the cause is in the failure lines themselves: in most of them the two numbers printed last are not
+  the line's own - "0 bytes asked for at the destination" and a "thread" number that is exactly the size of the
+  piece (33984, 14816, 766160, ...). Those are the two words Windows writes into an OVERLAPPED structure when a read
+  completes (its status, 0, and the bytes moved). So the read reported as "end of file" did finish later and wrote
+  its completion into stack memory the weave had already given to the next function - the inference of 17:57 is
+  measured now.
+- The fix (weave/xcrdapi.cpp read_exactly): each reading thread has its own event, every read names it, and its
+  result is always taken through GetOverlappedResult, which then waits for that read alone. To be tested.
+Follow-up, game test 18:32 (run-20261127-183211, visible, the build with the read fix): PASS, the copy's folder
+unchanged, every measurement the same, the run alive at 60 s (frame token 1680, 9 progress reports, 196 imports
+called). Two reads were again open at once on audio.rpf and on data.rpf, and NO read failed (14 before the fix,
+21 at 17:41). The fix holds for this run.
+- The one exception line of the run, at 57.6 s: a read at address 0x8 at image+0x161b994 (unwind +0x161b943,
+  +0xeae076, +0xea8d14, +0xea8144, +0xea778b, +0x6c52a9, ...); the run went on to 60 s. Not followed yet. The
+  faults of 17:41 (image+0x2942c8) and 17:57 (inside the C runtime) did not come back.
+- The stream channel still opened no stream in the 60 s.
