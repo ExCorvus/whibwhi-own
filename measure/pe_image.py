@@ -240,6 +240,53 @@ class Image:
                 out.add(f[0])
         return sorted(out)
 
+    def stub_start(self, address, reach=64):
+        """For an address in code without a .pdata entry: the start of the small piece it belongs to, taken as the
+        first byte after the int3 filler before it (a ret inside the piece is not a boundary: pieces may return
+        early), confirmed by decoding from there onto the address. None when no such start is found."""
+        va, b = self._code()
+        h = address - va
+        for back in range(1, reach):
+            if h - back < 0:
+                return None
+            if b[h - back] == 0xCC:
+                start = address - back + 1
+                if any(ins.address == address for ins in self.instructions(start, address + 16)):
+                    return start
+        return None
+
+    def reached_by(self, target, depth=3):
+        """Who reaches target by a direct call or jump, also through small pieces of code that have no .pdata entry
+        (a check and a tail jump, or an argument shuffle and a tail jump). callers_and_jumps sees only .pdata
+        functions and misses those; this was the mistake behind several "no caller at all" claims in the maps
+        (FINDINGS 2026-11-27). Returns [(site, function start or None, piece start or None)]: a site in a .pdata
+        function gives its start; a site in a piece without an entry gives the piece and, followed up to depth
+        times, the sites that reach that piece in turn (as more entries)."""
+        va, b = self._code()
+        rel = (b[1:-3].astype(np.int64) | (b[2:-2].astype(np.int64) << 8) | (b[3:-1].astype(np.int64) << 16)
+               | (b[4:].astype(np.int64) << 24))
+        rel = np.where(rel >= 1 << 31, rel - (1 << 32), rel)
+        site = np.arange(len(rel), dtype=np.int64) + va
+        hits = np.nonzero(((b[:-4] == 0xE8) | (b[:-4] == 0xE9)) & (site + 5 + rel == target))[0]
+        out = []
+        for h in hits.tolist():
+            try:
+                ins = self.at(va + h)
+            except ValueError:
+                continue
+            if ins.mnemonic not in ("call", "jmp"):
+                continue
+            f = self.function_of(va + h)
+            if f:
+                if any(i.address == va + h for i in self.instructions(*f)):
+                    out.append((va + h, f[0], None))
+                continue
+            piece = self.stub_start(va + h)
+            out.append((va + h, None, piece))
+            if piece is not None and depth > 0:
+                out.extend(self.reached_by(piece, depth - 1))
+        return out
+
     def rip_references(self, target):
         """(instruction address, function start, instruction) for every instruction that addresses target
         rip-relatively. Candidates come from a byte scan; each is confirmed by disassembling its function.
