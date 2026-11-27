@@ -4769,6 +4769,72 @@ bool presenter_start(Presenter& p, Wrap* queue, const D3D12_RESOURCE_DESC& surfa
     return true;
 }
 
+// Measurement (ExCorvus, 2026-11-27: the program may expect a particular first picture, down to the exact shade):
+// for the first presents and then at 2, 4, 8, ... presents, the exact values of the picture the program presented
+// are counted where it lies, in the program's own memory: the five most frequent pixel values with their counts and
+// the number of different values (counted up to 65,536). Numbers only; nothing of the picture is kept or written.
+// The window's focus at that moment is logged with it.
+void log_picture_numbers(Wrap* surface, const D3D12_RESOURCE_DESC& desc, unsigned long long token,
+                         unsigned long long shown, HWND window) {
+    unsigned bytes_per_pixel = 0;
+    switch (desc.Format) {
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        bytes_per_pixel = 8;
+        break;
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+    case DXGI_FORMAT_R11G11B10_FLOAT:
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        bytes_per_pixel = 4;
+        break;
+    default:
+        break;
+    }
+    const HWND front = GetForegroundWindow();
+    const char* focus = front == window ? "has the focus" : "does not have the focus";
+    const unsigned long long pixels = desc.Width * desc.Height;
+    const unsigned long long bytes = pixels * bytes_per_pixel;
+    const auto* base = reinterpret_cast<const unsigned char*>(surface->title_address);
+    if (!bytes_per_pixel || !base || !can_read(base, bytes)) {
+        logf("[picture] present %llu (frame token %llu): format %u, %s - the picture's values are not counted (%s)\n",
+             shown, token, static_cast<unsigned>(desc.Format), focus,
+             !bytes_per_pixel ? "a format not counted here"
+             : !base         ? "the surface does not lie in the program's memory"
+                             : "its memory cannot be read");
+        return;
+    }
+    std::unordered_map<unsigned long long, unsigned long long> counts;
+    counts.reserve(4096);
+    bool capped = false;
+    for (unsigned long long i = 0; i < pixels; ++i) {
+        unsigned long long value = 0;
+        std::memcpy(&value, base + i * bytes_per_pixel, bytes_per_pixel);
+        auto found = counts.find(value);
+        if (found != counts.end()) {
+            ++found->second;
+        } else if (counts.size() < 65536) {
+            counts.emplace(value, 1);
+        } else {
+            capped = true;
+        }
+    }
+    std::vector<std::pair<unsigned long long, unsigned long long>> top(counts.begin(), counts.end());
+    std::partial_sort(top.begin(), top.begin() + std::min<std::size_t>(5, top.size()), top.end(),
+                      [](const auto& a, const auto& b) { return a.second > b.second; });
+    char line[512] = {};
+    int at = 0;
+    for (std::size_t i = 0; i < top.size() && i < 5; ++i) {
+        at += std::snprintf(line + at, sizeof(line) - at, "%s0x%0*llx x %llu", i ? ", " : "",
+                            static_cast<int>(bytes_per_pixel * 2), top[i].first, top[i].second);
+    }
+    logf("[picture] present %llu (frame token %llu): %llu x %u, format %u, %s; %s%zu different values; most "
+         "frequent: %s (of %llu pixels)\n",
+         shown, token, desc.Width, desc.Height, static_cast<unsigned>(desc.Format), focus, capped ? "at least " : "",
+         counts.size(), line, pixels);
+}
+
 HRESULT __stdcall w_presentx(Wrap* self, unsigned int plane_count, const unsigned char* planes,
                              const void* parameters) {
     static std::atomic<int> refused{0}, more_planes{0};
@@ -4903,6 +4969,9 @@ HRESULT __stdcall w_presentx(Wrap* self, unsigned int plane_count, const unsigne
             note_frame_shown(shown.present_count, shown.present_qpc_time);
         }
         note_frame_presented(token, present_count, static_cast<unsigned long long>(presented.QuadPart));
+        if (p.shown <= 3 || (p.shown & (p.shown - 1)) == 0) {
+            log_picture_numbers(static_cast<Wrap*>(surface), desc, token, p.shown, p.window);
+        }
     }
     if (hr != 0 || (p.shown & (p.shown - 1)) == 0) {
         logf("PresentX: frame token %llu - the image's surface (%llu x %u) copied and presented to the window when "
