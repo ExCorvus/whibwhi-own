@@ -167,21 +167,67 @@ SystemObject* system_object() {
     return &object;
 }
 
+// ---- Windows' own runtime -------------------------------------------------------------------------------------
+//
+// Windows has the runtime itself (System32\xgameruntime.dll). Measured on this PC without the program: it starts with
+// the program's own start values and hands out the runtime's base object, whose methods lie in Windows' library, with
+// no network endpoint opened. So the start and the base object are Windows' answers, passed through unchanged; the
+// weave adds nothing to them.
+const GUID kBaseObject = {0x073b7dcb, 0x1fcf, 0x4030, {0x94, 0xbe, 0xe3, 0xc9, 0xeb, 0x62, 0x34, 0x28}};
+
+HMODULE windows_runtime() {
+    static HMODULE module = [] {
+        HMODULE m = LoadLibraryExA("C:\\Windows\\System32\\xgameruntime.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        char path[MAX_PATH] = "?";
+        if (m) {
+            GetModuleFileNameA(m, path, MAX_PATH);
+        }
+        std::lock_guard<std::mutex> lock(g_log);
+        std::fprintf(stderr, "[xgameruntime] Windows' own runtime: %s (%s)\n", m ? "loaded" : "does not load",
+                     m ? path : "no module");
+        std::fflush(stderr);
+        return m;
+    }();
+    return module;
+}
+
+template <typename F>
+F windows_function(const char* name) {
+    const HMODULE m = windows_runtime();
+    return m ? reinterpret_cast<F>(GetProcAddress(m, name)) : nullptr;
+}
+
+void log_windows_answer(const char* what, long result) {
+    std::lock_guard<std::mutex> lock(g_log);
+    std::fprintf(stderr, "[xgameruntime] %s: Windows' own runtime answered 0x%08lx\n", what,
+                 static_cast<unsigned long>(result));
+    std::fflush(stderr);
+}
+
 } // namespace
 
 extern "C" {
 
-long __stdcall InitializeApiImpl(void*, void*) {
-    once("InitializeApiImpl: local-only runtime, answered success");
-    return 0;
+long __stdcall InitializeApiImpl(void* a1, void* a2) {
+    using F = long(__stdcall*)(void*, void*);
+    const auto f = windows_function<F>("InitializeApiImpl");
+    const long result = f ? f(a1, a2) : kNotImplemented;
+    log_windows_answer("InitializeApiImpl", result);
+    return result;
 }
-long __stdcall InitializeApiImplEx(void*, void*, void*) {
-    once("InitializeApiImplEx: local-only runtime, answered success");
-    return 0;
+long __stdcall InitializeApiImplEx(void* a1, void* a2, void* a3) {
+    using F = long(__stdcall*)(void*, void*, void*);
+    const auto f = windows_function<F>("InitializeApiImplEx");
+    const long result = f ? f(a1, a2, a3) : kNotImplemented;
+    log_windows_answer("InitializeApiImplEx", result);
+    return result;
 }
-long __stdcall InitializeApiImplEx2(void*, void*, void*, void*) {
-    once("InitializeApiImplEx2: local-only runtime, answered success");
-    return 0;
+long __stdcall InitializeApiImplEx2(void* a1, void* a2, void* a3, void* a4) {
+    using F = long(__stdcall*)(void*, void*, void*, void*);
+    const auto f = windows_function<F>("InitializeApiImplEx2");
+    const long result = f ? f(a1, a2, a3, a4) : kNotImplemented;
+    log_windows_answer("InitializeApiImplEx2", result);
+    return result;
 }
 // The image passes two identifiers and the output slot (measured at its 161 call sites: rcx and rdx point at
 // identifiers in its read-only data, r8 at the caller's output variable). One pair is provided - the system
@@ -196,6 +242,16 @@ long __stdcall QueryApiImpl(const GUID* provider, const GUID* iid, void** out) {
         *out = object;
         once("QueryApiImpl: the system interface is provided (one method: the sandbox name)");
         return 0;
+    }
+    if (provider && iid && IsEqualGUID(*provider, kBaseObject) && IsEqualGUID(*iid, kBaseObject)) {
+        using F = long(__stdcall*)(const GUID*, const GUID*, void**);
+        const auto f = windows_function<F>("QueryApiImpl");
+        const long result = f ? f(provider, iid, out) : kNoInterface;
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1) < 4) {
+            log_windows_answer("QueryApiImpl, the runtime's base object", result);
+        }
+        return result;
     }
     static std::set<std::pair<std::string, std::string>> seen;
     const auto key = std::make_pair(text_of(provider), text_of(iid));
