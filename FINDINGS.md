@@ -1443,3 +1443,15 @@ Both branches are built on upstream's newest state (b540c8a) and build there. Bo
 the shaders pass the validator and their pipelines are made, but nothing of them has run, so correct results are
 not checked; and the public compiler produces neither case, so no test of upstream's usual kind is added. The
 Xbox compiler's own functions and the vkd3d-proton float-atomics change are held back until the builder runs.
+## 2026-11-27 - the checker's "52 of 52 accepted" was a false pass (measured)
+
+The shader checker (a tool outside the repository that runs the builder's 52 shaders, read from the copy in
+memory, through the translator) handed every buffer of every shader to the translator as passed directly by GPU
+address. That was the checker's own simplification, not what the shaders say. `xbox.TypedLoad` was then taught
+only for that case, and the checker reported 52 of 52 accepted. The shader that uses it (38,248 bytes) takes its
+buffer through a descriptor table in its own root signature, inside the builder library. With the real root
+signatures (the driver test tool, and the game test at 01:13) it is refused. So the 52 of 52 held only because of
+the checker's simplification: a pass made by a stitch in the test, not by the translator. No code of the weave is
+involved; the refusal happens while the pipeline is made, before any descriptor exists.
+Next (ExCorvus agreed): the checker takes each shader's own root signature, and is run again to see whether other
+shaders were also passed only by the simplification; then TypedLoad is taught the descriptor-table path.
