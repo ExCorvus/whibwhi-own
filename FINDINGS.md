@@ -1430,3 +1430,16 @@ Follow-up, 2026-11-27 ~01:15 - the driver fault found: a value the translator le
   lacks.)
 - Game test 01:13 (visible, the copy's folder unchanged): FAIL - the builder makes 48 pipelines without a fault (up
   to here 31) and stops at the 49th, that same 38,248-byte shader, refused the same way; the builder throws.
+## 2026-11-27 - two changes to the shader translator offered upstream
+
+ExCorvus decided to offer the two changes that are not Xbox-specific to dxil-spirv itself (the shader translator
+inside vkd3d-proton), each with a full description of the problem, how it showed up, the change and how it was
+tested:
+- https://github.com/HansKristian-Work/dxil-spirv/pull/384 - `llvm.copysign.f32`, and LLVM helper calls that
+  return a value are refused instead of skipped (the skip left a value unwritten and crashed the AMD driver).
+- https://github.com/HansKristian-Work/dxil-spirv/pull/385 - `insertvalue`, with the fix for `extractvalue` on a
+  structure that has no meta entry.
+Both branches are built on upstream's newest state (b540c8a) and build there. Both texts say what is not shown:
+the shaders pass the validator and their pipelines are made, but nothing of them has run, so correct results are
+not checked; and the public compiler produces neither case, so no test of upstream's usual kind is added. The
+Xbox compiler's own functions and the vkd3d-proton float-atomics change are held back until the builder runs.
