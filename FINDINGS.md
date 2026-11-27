@@ -1599,3 +1599,19 @@ ExCorvus set the order: first the executable, then AMD's public documents, then 
 - Result: the GPU and its driver know rectangles; nothing in the PC's graphics interface reaches them from outside.
   On the PC they have to be drawn as triangles: quads by an index list, rectangles by a small extra shader that
   makes the fourth corner (v0 + v2 - v1).
+## 2026-11-27 - rectangle and quad pipelines taken as triangle pipelines; the next stop is the audio device (game test 02:57, measured)
+
+- Change (vkd3d-proton fork, libs/vkd3d/state.c): a graphics pipeline whose topology type is the Xbox Series
+  rectangle-list (0x11) or quad-list (0x13) number is made as a triangle pipeline, with a warning in the log. The
+  GPU rasterizes both as triangles. Draws with these topologies are still held by the weave (they need the
+  topology turned into triangles when they are recorded: steps 2 and 3, not built).
+- Game test 02:57 (run-20261127-025735, visible, the copy's folder unchanged): FAIL. "Invalid primitive topology
+  type" is gone from the log and the AMD driver no longer ends the run. The program set pipelines on its lists
+  (4 times) and asked for draws; draws while topology 0x11 is set were held (32 counted). 32 pictures were
+  presented, frame token 1725. Calls reached for the first time: command list slots 44, 47, 48, 70, 75, 126, 142
+  and device slot 81 (answered not implemented), and a console compute shader of 1376 bytes through slot 62.
+- The run ends where the program stops itself: an int3 at image+0x43ad94e in its audio setup. The order in the
+  log: ApuCreateHeap (answered, 477,102,080 bytes), AcpHalAllocateShapeContexts (350 contexts), ApuAlloc, then
+  AcpHalCreate, which the weave answers "not provided" (E_NOTIMPL, no handle). The function the setup calls at
+  that point (fn 0x43aec40) returns false and the next instruction is the int3. So the program does not go on
+  without its audio device. Earlier runs ended or were measured before the program got this far.
