@@ -54,8 +54,10 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
   `XCRDAPI.dll`.
 - `xgameruntime.h` / `xgameruntime.cpp` → `xgameruntime.dll`. The runtime library the game loads at start:
   initialise and uninitialise answer success, interface queries are logged and answered "no such interface".
-- `acp_hal.h` / `acp_hal.cpp` → `AcpHal.dll`. Console audio hardware library: the memory functions are real, the
-  audio device answers "not implemented".
+- `acp_hal.h` / `acp_hal.cpp` → `AcpHal.dll`. Console audio hardware library: the memory functions are real;
+  `AcpHalCreate` hands out the sound chip of `acp_chip.hpp` / `acp_chip.cpp`, which decodes the program's XMA2
+  voices into their rings through FFmpeg's XMA2 decoder (built by `scripts/setup_ffmpeg.ps1`, loaded at run time).
+  The program mixes and plays the samples itself. Without FFmpeg the chip answers "not implemented".
 - `xapu.h` / `xapu.cpp` → `xapu.dll`, `chad.h` / `chad.cpp` → `chad.dll`. Console audio command libraries:
   skeletons that log and answer failure.
 - `xg_xs.h` / `xg_xs.cpp` → `xg_xs.dll`. The texture layout library: answers with the weave's own untiled layout
