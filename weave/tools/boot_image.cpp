@@ -315,6 +315,29 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
         // If rcx looks like a COM-ish object, dump its vtable pointer and first slots.
         dump_vtable(info->ContextRecord->Rcx);
     }
+    std::fprintf(stderr, "\n[boot]   [rsp] lies in:");
+    print_place(*reinterpret_cast<const std::uintptr_t*>(info->ContextRecord->Rsp));
+    // The stack words nearest the fault that point into a loaded library or the image. These are candidates for
+    // the calls that led here, not an unwound chain: a word on the stack can be an old value.
+    std::fprintf(stderr, "\n[boot]   stack words pointing into code (candidates):");
+    {
+        const auto* stack = reinterpret_cast<const std::uintptr_t*>(info->ContextRecord->Rsp);
+        int shown = 0;
+        for (int i = 0; i < 64 && shown < 12; ++i) {
+            HMODULE module = nullptr;
+            const std::uintptr_t word = stack[i];
+            const bool in_image = g_loaded && g_loaded->base &&
+                                  word >= reinterpret_cast<std::uintptr_t>(g_loaded->base) &&
+                                  word < reinterpret_cast<std::uintptr_t>(g_loaded->base) + g_loaded->size;
+            if (in_image || GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                               reinterpret_cast<const char*>(word), &module)) {
+                std::fprintf(stderr, " [rsp+0x%x]", i * 8);
+                print_place(word);
+                ++shown;
+            }
+        }
+    }
     std::fprintf(stderr, "\n");
     // Backtrace by unwinding the faulting context.
     {
