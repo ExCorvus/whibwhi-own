@@ -53,6 +53,13 @@ c.same("refill: the ring wraps at", n(0x784B6), 0x1700)
 c.same("refill: positions counted per channel (object field)", o(0x784D4), 0x2004)
 c.same("refill: data command opcode", n(0x78518), 0x12)
 c.same("refill: data command magic value", n(0x784FD), 0xF1F1F1F1)
+c.same("ring read: decoded-up-to position = bits 27-31 of record +0, in 256-byte units", [n(0x78214), n(0x7821B)],
+       [0x13, 0x1F00])
+c.same("ring read: taken-out-up-to position = low 5 bits of record +0x24, in 256-byte units",
+       [o(0x78205), n(0x78211), n(0x78218)], [0x24, 0x1F, 8])
+c.same("ring read: ring size = bits 22-26 of record +0", [n(0x7822E), n(0x78231)], [0xE, 0x1F00])
+c.same("ring read: both positions equal -> the sign of record +4 decides empty or full",
+       [o(0x782E6), m.at(0x782EB).mnemonic], [4, "js"])
 
 # Start and stop
 c.same("start command (fn 0x43a73e0): opcode and magic value", [n(0x43A73F2), n(0x43A73EC)], [5, 0xF6F6F6F6])
