@@ -66,8 +66,15 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $run = Join-Path $outFull "run-$stamp"
 $work = Join-Path $outFull 'work'
 New-Item -ItemType Directory -Force -Path $run, $work | Out-Null
-Get-ChildItem -LiteralPath $work -File | Remove-Item -Force
-Copy-Item (Join-Path $build '*.exe'), (Join-Path $build '*.dll') $work -Force
+Get-ChildItem -LiteralPath $work -File | Remove-Item -Force -ErrorAction Stop
+Copy-Item (Join-Path $build '*.exe'), (Join-Path $build '*.dll') $work -Force -ErrorAction Stop
+# The run must use exactly the build it is recorded for: every file in the work folder is compared with the build's
+# (measured 2026-11-27 19:37: one library in the work folder stayed an older copy and the run used it).
+$stale = @(Get-ChildItem -LiteralPath $work -File | Where-Object {
+        (Get-FileHash -LiteralPath $_.FullName).Hash -ne (Get-FileHash -LiteralPath (Join-Path $build $_.Name)).Hash })
+if ($stale.Count) {
+    throw "the work folder does not hold the build as built: $(($stale | ForEach-Object Name) -join ', ') - nothing was run"
+}
 # A library the installation ships itself is loaded from the installation, not from the weave's build: the weave's
 # file of the same name would win (host_libraries.cpp loads from beside boot_image.exe first).
 Get-ChildItem -LiteralPath $work -File | Where-Object { Test-Path -LiteralPath (Join-Path $Game $_.Name) } |
