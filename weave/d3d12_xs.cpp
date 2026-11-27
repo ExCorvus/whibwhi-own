@@ -1779,10 +1779,19 @@ HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, vo
     std::memcpy(&pc, description, sizeof(pc));
     if (!is_plain_pc_shader(pc.CS.pShaderBytecode, pc.CS.BytecodeLength)) {
         static std::once_flag once;
+        void* const returns_to = _ReturnAddress();
         std::call_once(once, [&] {
-            logf("device slot 62 (returns to %p): a compute pipeline of a console shader (%llu bytes, arguments 3 "
-                 "and 4: %p %p) - not covered yet, answered not implemented\n",
-                 _ReturnAddress(), static_cast<unsigned long long>(pc.CS.BytecodeLength), zero1, zero2);
+            HMODULE caller = nullptr;
+            char file[MAX_PATH] = "a place in no loaded library";
+            unsigned long long offset = 0;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   static_cast<const char*>(returns_to), &caller) &&
+                GetModuleFileNameA(caller, file, sizeof(file))) {
+                offset = reinterpret_cast<unsigned long long>(returns_to) - reinterpret_cast<unsigned long long>(caller);
+            }
+            logf("device slot 62 (returns to %p = %s +0x%llx): a compute pipeline of a console shader (%llu bytes, "
+                 "arguments 3 and 4: %p %p) - not covered yet, answered not implemented\n",
+                 returns_to, file, offset, static_cast<unsigned long long>(pc.CS.BytecodeLength), zero1, zero2);
         });
         return 0x80004001L;
     }
