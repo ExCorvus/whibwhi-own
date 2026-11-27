@@ -2192,3 +2192,28 @@ measurements hold, 313 statements, in one run with the scripts side by side.- Po
   the program took another path: it stops where it stopped before, at the stream channel (XApuConnect refused, way 4
   into image+0x43ad94e). The ledger's counts are only complete for a run that ends the ledger's own way; a run
   Windows ends gives a lower bound.
+## 2026-11-27 - the stream channel answers; the program passes the sound start for the first time (game test 17:41, measured)
+
+weave/xapu.cpp now answers the stream channel the way the program was read using it (docs/console-libs/acp-xapu.md
+section 5, the 17:xx entries above): XApuConnect succeeds and writes a client handle into the program's slot; open,
+close and reset are answered with result types 1, 2 and 5; a submitted packet is checked with libopus and decoded
+only when libopus reads it as exactly the samples the command asks for, and the result carries the bytes written
+(0 when nothing was decoded). The weave's own choices are logged once (results answered at once, 48 kHz, floats
+interleaved). libopus is built separately (scripts/setup_opus.ps1) and loaded from beside the library.
+
+Game test 17:41 (run-20261127-174115, visible, the build with the change): PASS - the copy's folder unchanged, every
+measurement the same, no network endpoint in 32 samples of the network watch.
+- XApuConnect was answered (descriptor words 0x1, 0x100, 0x2, 0x104000, 0x0, 0x1) and the program did NOT stop at
+  image+0x43ad94e, where every run since 02:57 had stopped. It went on: 192 imports called, 10 progress reports to
+  the watchdog (5 before), frame token 1683.
+- In the 60 s the program polled XApuGetResultCount but opened no stream and submitted no packet; the sound chip
+  had no voice started. So the decoding itself is not tested yet.
+- Newly called: among others AcpHalCreate, AcpHalAllocateShapeContexts, ApuCreateHeap, XMemAlloc (now counted,
+  because the run is no longer ended by Windows at the breakpoint before the call ledger is written), the C++ stream
+  and lock functions, BCryptCloseAlgorithmProvider, SetFilePointerEx, CloseHandle.
+- New errors, not followed yet (recorded as they are): 21 storage reads failed with Windows error 38 (end of file):
+  the weave's storage library (weave/xcrdapi.cpp) read past the end of the file a request names, at offsets up to
+  0x277fb6000; its log does not say which file. At 57.3 s a read at address 0x733000 faulted at image+0x2942c8
+  (one exception line, the run went on to 60 s). Whether the two are connected is not established. An error that
+  shows up in the program may point away from its cause (ExCorvus); the failed reads are the weave's own and come
+  first.
