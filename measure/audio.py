@@ -1,6 +1,6 @@
 """Repeats the audio measurements of FINDINGS.md (2026-11-27, 'the program's audio setup' and its follow-ups).
 
-    python measure/audio.py <path to the executable in your copy>
+    python measure/audio.py "<your game folder>\\game_scarlett_master.exe"
 
 Reads the executable read-only and prints, for each statement, 'same' or 'DIFFERS' against what FINDINGS.md says.
 Only addresses and the numbers found there are kept here; what they mean is said in words.
