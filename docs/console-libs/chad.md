@@ -6,6 +6,17 @@ name functions, never bytes. No game data is reproduced here.
 Tooling: the private map (`exe_map.py func`, `callers`, `jmpref`, `ptrref`, `dataref`) for the call sites and the
 thunk chains. Nothing here comes from a boot: the module has not been run in the weave.
 
+**Correction (2026-11-27): 0 is success, not failure.** Sections 2, 3, 4 and 6 below called an answer of 0 "failure"
+and the skeleton that answered 0 everywhere "honest". In the image 0 is success at every call site (the connect
+wrapper turns 0 into "channel open", the activate wrapper counts 0 as a started stream, submit reads its answer only
+after 0). So the skeleton told the image that the channel was open, streams were started and pages were taken
+while nothing answered. The weave's chad answers the channel, the streams and the round trip now
+(weave/chad.cpp). Read since (in the image): XDspActivate is called as (channel handle, a 0x1c-byte description,
+where the stream's status block pointer goes = stream +0x68, where the stream handle goes = stream +0x70); the
+wrapper turns 0 into a running number kept at stream +0x60. A submitted stream waits (state 5, fn 0x4e5acc0 at
+0x4e5ad47) until the status block's dword +0xc is 0 and its dword +4 equals the completion number of its submit;
+then the image takes the answer page in four 0x400-byte quarters. What chad computes on a page is not read.
+
 ## 1. What chad is, as far as the image shows
 
 The executable imports **five** functions from `chad.dll`:
