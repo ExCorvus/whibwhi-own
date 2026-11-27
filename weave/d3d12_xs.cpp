@@ -628,6 +628,7 @@ ULONG __stdcall w_addref(Wrap* self) {
 void forget_descriptor_heap(Wrap* heap);
 void give_back_requested_block(Wrap* surface);
 void forget_console_signature(const Wrap* signature);
+void note_pipeline_let_go();
 
 ULONG __stdcall w_release(Wrap* self) {
     const long r = self->refs.fetch_sub(1) - 1;
@@ -638,6 +639,9 @@ ULONG __stdcall w_release(Wrap* self) {
         }
         if (self->requested_block) {
             give_back_requested_block(self);
+        }
+        if (self->kind_id == kPipeline) {
+            note_pipeline_let_go();
         }
         if (self->pc) {
             using Fn = ULONG(__stdcall*)(void*);
@@ -2226,6 +2230,193 @@ void log_console_shader_parts(const void* code, std::size_t size) {
     }
 }
 
+// ---- a measurement: the flow of pipelines in and out ------------------------------------------------------
+// ExCorvus, 2026-11-28: "it should be a flow of the shaders moving in and out", "measure please, yes pipelines and
+// shaders"; and her reading, to be measured: the requests that fail "go into the shell part... and that tells the
+// game all of them are the same one". For every pipeline request of slots 62 and 86: the second of the run it came
+// in, its thread, how many requests were being answered at that moment, how long the answer took (and, for the
+// whole run, the part spent writing PC shaders and the part inside the PC device), whether the same request came
+// before (the bytes of its description, each shader in it named by its contents), its root signature, and the
+// answer the program got back (the value returned, and whether an object came with it). Also how many pipelines the
+// program lets go. Logged as it goes - one line per second of the run that had requests, and the whole picture at
+// every power of two of requests - because a run that ends in a fault never reaches the report at the end. Numbers
+// only; nothing of a shader is kept. Nothing is answered differently.
+namespace flow {
+
+unsigned long long hash(const void* data, std::size_t bytes, unsigned long long h = 1469598103934665603ull) {
+    const auto* p = static_cast<const std::uint8_t*>(data);
+    for (std::size_t i = 0; i < bytes; ++i) {
+        h = (h ^ p[i]) * 1099511628211ull;
+    }
+    return h;
+}
+
+double run_seconds() {
+    static const unsigned long long start = [] {
+        FILETIME created{}, a{}, b{}, c{};
+        GetProcessTimes(GetCurrentProcess(), &created, &a, &b, &c);
+        return (static_cast<unsigned long long>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+    }();
+    FILETIME now{};
+    GetSystemTimePreciseAsFileTime(&now);
+    const unsigned long long t = (static_cast<unsigned long long>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+    return t > start ? static_cast<double>(t - start) / 1e7 : 0.0;
+}
+
+double microseconds_since(const LARGE_INTEGER& start) {
+    static const double per_us = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return static_cast<double>(f.QuadPart) / 1e6;
+    }();
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return static_cast<double>(now.QuadPart - start.QuadPart) / per_us;
+}
+
+struct Request {
+    unsigned long long asked = 0;
+    std::set<std::string> answers;
+};
+struct Second {
+    unsigned long long asked = 0, made = 0;
+    std::set<DWORD> threads;
+    long most_at_once = 0;
+};
+struct Answer {
+    unsigned long long requests = 0;
+    std::unordered_set<unsigned long long> different;
+};
+struct Slot {
+    unsigned long long asked = 0, made = 0, repeats = 0, most_asked = 0;
+    double us_all = 0, us_longest = 0;
+    std::unordered_map<unsigned long long, Request> requests;
+    std::set<void*> signatures_made, signatures_not;
+    std::map<std::string, Answer> answers;
+};
+SRWLOCK lock = SRWLOCK_INIT;
+Slot slots[2];  // 0: slot 62 (a compute pipeline), 1: slot 86 (a pipeline from a stream)
+const char* const slot_names[2] = {"slot 62", "slot 86"};
+std::set<DWORD> threads;
+std::map<long, Second> seconds;
+long open_second = -1;
+unsigned long long total = 0;
+std::atomic<long> at_once{0}, most_at_once{0};
+std::atomic<unsigned long long> let_go{0}, translations{0}, translation_us{0}, device_us{0};
+
+struct Timer {
+    LARGE_INTEGER start{};
+    long at_once_then = 0;
+    Timer() {
+        QueryPerformanceCounter(&start);
+        at_once_then = ++at_once;
+        long most = most_at_once.load();
+        while (at_once_then > most && !most_at_once.compare_exchange_weak(most, at_once_then)) {
+        }
+    }
+};
+
+std::string second_line(long s) {
+    const Second& x = seconds[s];
+    char text[160];
+    std::snprintf(text, sizeof(text), "[pipeline flow] second %ld: %llu asked, %llu made, %zu thread(s), most at once "
+                  "%ld\n", s, x.asked, x.made, x.threads.size(), x.most_at_once);
+    return text;
+}
+
+std::string whole_picture(double at) {
+    std::string out;
+    char text[400];
+    std::snprintf(text, sizeof(text), "[pipeline flow] after %llu requests, at %.1f s of the run: %zu thread(s) asked, "
+                  "most at once %ld; pipelines the program let go: %llu; PC shaders written %llu, in %.2f s together; "
+                  "inside the PC device %.2f s together\n",
+                  total, at, threads.size(), most_at_once.load(), let_go.load(), translations.load(),
+                  translation_us.load() / 1e6, device_us.load() / 1e6);
+    out += text;
+    for (int i = 0; i < 2; ++i) {
+        const Slot& s = slots[i];
+        if (!s.asked) {
+            continue;
+        }
+        std::size_t both = 0, more_answers = 0;
+        for (void* signature : s.signatures_made) {
+            both += s.signatures_not.count(signature);
+        }
+        for (const auto& r : s.requests) {
+            more_answers += r.second.answers.size() > 1;
+        }
+        std::snprintf(text, sizeof(text), "[pipeline flow]   %s: %llu asked, %zu different requests, %llu repeats (the "
+                      "most asked one %llu times), %llu made; answering took %.2f s together, the longest %.1f ms; "
+                      "root signatures: %zu with a made pipeline, %zu with a refused one, %zu in both; %zu request(s) "
+                      "got more than one answer\n",
+                      slot_names[i], s.asked, s.requests.size(), s.repeats, s.most_asked, s.made, s.us_all / 1e6,
+                      s.us_longest / 1e3, s.signatures_made.size(), s.signatures_not.size(), both, more_answers);
+        out += text;
+        for (const auto& a : s.answers) {
+            std::snprintf(text, sizeof(text), "[pipeline flow]   %s, the program got back %s: %llu requests, %zu "
+                          "different ones\n", slot_names[i], a.first.c_str(), a.second.requests,
+                          a.second.different.size());
+            out += text;
+        }
+    }
+    return out;
+}
+
+void done(int which, const Timer& t, unsigned long long key, void* signature, HRESULT hr, bool object) {
+    const double us = microseconds_since(t.start);
+    --at_once;
+    const double at = run_seconds();
+    const long second = static_cast<long>(at);
+    const bool made = hr == 0 && object;
+    char answer[48];
+    std::snprintf(answer, sizeof(answer), "0x%08lx with %s", static_cast<unsigned long>(hr),
+                  object ? "an object" : "no object");
+    std::string closed, whole;
+    AcquireSRWLockExclusive(&lock);
+    Slot& slot = slots[which];
+    ++slot.asked;
+    ++total;
+    slot.made += made;
+    Request& request = slot.requests[key];
+    slot.repeats += ++request.asked > 1;
+    slot.most_asked = (std::max)(slot.most_asked, request.asked);
+    request.answers.insert(answer);
+    Answer& given = slot.answers[answer];
+    ++given.requests;
+    given.different.insert(key);
+    (made ? slot.signatures_made : slot.signatures_not).insert(signature);
+    slot.us_all += us;
+    slot.us_longest = (std::max)(slot.us_longest, us);
+    threads.insert(GetCurrentThreadId());
+    if (second > open_second) {
+        if (open_second >= 0) {
+            closed = second_line(open_second);
+        }
+        open_second = second;
+    }
+    Second& now = seconds[second];
+    ++now.asked;
+    now.made += made;
+    now.threads.insert(GetCurrentThreadId());
+    now.most_at_once = (std::max)(now.most_at_once, t.at_once_then);
+    if ((total & (total - 1)) == 0) {
+        whole = whole_picture(at);
+    }
+    ReleaseSRWLockExclusive(&lock);
+    if (!closed.empty()) {
+        logf("%s", closed.c_str());
+    }
+    if (!whole.empty()) {
+        logf("%s", whole.c_str());
+    }
+}
+
+}  // namespace flow
+
+void note_pipeline_let_go() {
+    ++flow::let_go;
+}
+
 HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, void* zero2, void* identifier,
                                   void** out) {
     if (out) {
@@ -2234,8 +2425,17 @@ HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, vo
     if (!description || !out) {
         return 0x80070057L;
     }
+    const flow::Timer timer;
     D3D12_COMPUTE_PIPELINE_STATE_DESC pc{};
     std::memcpy(&pc, description, sizeof(pc));
+    // The request by its contents: the shader's bytes, the root signature, and the rest of the description.
+    void* const program_signature = pc.pRootSignature;
+    unsigned long long key = flow::hash(&pc.NodeMask, sizeof(pc) - offsetof(D3D12_COMPUTE_PIPELINE_STATE_DESC, NodeMask));
+    key = flow::hash(&program_signature, sizeof(program_signature), key);
+    if (pc.CS.pShaderBytecode && pc.CS.BytecodeLength <= 0x1000000 &&
+        can_read(pc.CS.pShaderBytecode, static_cast<std::size_t>(pc.CS.BytecodeLength))) {
+        key = flow::hash(pc.CS.pShaderBytecode, static_cast<std::size_t>(pc.CS.BytecodeLength), key);
+    }
     if (!is_plain_pc_shader(pc.CS.pShaderBytecode, pc.CS.BytecodeLength)) {
         want(_ReturnAddress(), "7 pipelines | slot 62, a compute pipeline of a console shader | not made: not "
                                "covered yet");
@@ -2255,6 +2455,7 @@ HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, vo
                  "arguments 3 and 4: %p %p) - not covered yet, answered not implemented\n",
                  returns_to, file, offset, static_cast<unsigned long long>(pc.CS.BytecodeLength), zero1, zero2);
         });
+        flow::done(0, timer, key, program_signature, 0x80004001L, false);
         return 0x80004001L;
     }
     pc.pRootSignature = static_cast<ID3D12RootSignature*>(to_pc(pc.pRootSignature));
@@ -2270,13 +2471,17 @@ HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, vo
              "device\n",
              static_cast<unsigned long long>(pc.CS.BytecodeLength), checksum);
     }
+    LARGE_INTEGER inside;
+    QueryPerformanceCounter(&inside);
     HRESULT hr = device->CreateComputePipelineState(&pc, *static_cast<const GUID*>(identifier), out);
     if (hr == static_cast<HRESULT>(0x80004002L)) {
         hr = device->CreateComputePipelineState(&pc, *pc_identifier(kPipeline), out);
     }
+    flow::device_us += static_cast<unsigned long long>(flow::microseconds_since(inside));
     if (hr == 0 && *out) {
         *out = wrap_kind(*out, kPipeline);
     }
+    flow::done(0, timer, key, program_signature, hr, *out != nullptr);
     want(_ReturnAddress(), "7 pipelines | slot 62, a compute pipeline of a PC shader | %s",
          hr == 0 ? "made" : "not made: the PC device refused it");
     logf("device slot 62 (returns to %p): a compute pipeline of a PC shader (%llu bytes, arguments 3 and 4: %p %p) "
@@ -2429,7 +2634,11 @@ std::shared_ptr<const whiwhi::weave::PcShader> translated_shader(const std::uint
         }
     }
     ReleaseSRWLockShared(&g_translated_lock);
+    LARGE_INTEGER writing;
+    QueryPerformanceCounter(&writing);
     auto made = std::make_shared<const whiwhi::weave::PcShader>(translate_shader_container(container, bytes, stage));
+    flow::translation_us += static_cast<unsigned long long>(flow::microseconds_since(writing));
+    ++flow::translations;
     AcquireSRWLockExclusive(&g_translated_lock);
     for (auto [at, end] = g_translated.equal_range(key); at != end; ++at) {
         if (same(at->second)) {  // another thread wrote it meanwhile
@@ -3321,6 +3530,10 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
     using whiwhi::weave::PcStage;
     static std::atomic<unsigned long long> asked{0}, made{0}, refused{0};
     const unsigned long long n = ++asked;
+    const flow::Timer timer;
+    // Where in the stream each shader is named (its pointer and length), so that the request is keyed by the
+    // shader's contents rather than by where the program keeps it.
+    std::vector<std::pair<std::size_t, unsigned long long>> shader_named_at;
     if (out) {
         *out = nullptr;
     }
@@ -3371,6 +3584,8 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
                     reason = std::string(vertex ? "vertex" : "pixel") + " shader: its bytes cannot be read";
                     break;
                 }
+                shader_named_at.emplace_back(at + payload_at,
+                                             flow::hash(code.pShaderBytecode, static_cast<std::size_t>(code.BytecodeLength)));
                 record_shader_against_signature(game_signature, static_cast<const std::uint8_t*>(code.pShaderBytecode),
                                                 static_cast<std::uint32_t>(code.BytecodeLength), vertex);
                 check_shader_tables(game_signature, static_cast<const std::uint8_t*>(code.pShaderBytecode),
@@ -3459,8 +3674,11 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
             }
             const D3D12_PIPELINE_STATE_STREAM_DESC pc_desc = {copy.size(), copy.data()};
             ID3D12PipelineState* state = nullptr;
+            LARGE_INTEGER inside;
+            QueryPerformanceCounter(&inside);
             hr = device->CreatePipelineState(&pc_desc, __uuidof(ID3D12PipelineState),
                                              reinterpret_cast<void**>(&state));
+            flow::device_us += static_cast<unsigned long long>(flow::microseconds_since(inside));
             if (hr == 0 && state) {
                 *out = wrap_kind(state, kPipeline);
             } else {
@@ -3489,6 +3707,21 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
     if (stream && size > 0 && size <= 0x10000 && can_read(stream, static_cast<std::size_t>(size))) {
         note_ray_census(std::vector<std::uint8_t>(stream, stream + static_cast<std::size_t>(size)),
                         hr == 0 ? std::string("made") : "not made: " + reason);
+    }
+    {
+        // The request by its contents: the stream as the program gave it, each shader named by its bytes.
+        unsigned long long key = 1469598103934665603ull;
+        if (!copy.empty()) {
+            std::vector<std::uint8_t> keyed(stream, stream + static_cast<std::size_t>(size));
+            for (const auto& [at, contents] : shader_named_at) {
+                if (at + 16 <= keyed.size()) {
+                    std::memset(keyed.data() + at, 0, 16);
+                    std::memcpy(keyed.data() + at, &contents, sizeof(contents));
+                }
+            }
+            key = flow::hash(keyed.data(), keyed.size());
+        }
+        flow::done(1, timer, key, game_signature, hr, out && *out);
     }
     const unsigned long long count = hr == 0 ? ++made : ++refused;
     if (n <= 8 || (count & (count - 1)) == 0) {
