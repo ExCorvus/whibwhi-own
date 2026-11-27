@@ -16,9 +16,13 @@
 #             (default: the game starts hidden).
 #   -Out      where the records go (default %LOCALAPPDATA%\whiwhi\game-tests).
 #
-# Verdict FAIL when: the game folder changed; a script in measure/ (run on the copy before the game starts) says
-# a result of FINDINGS.md no longer holds; the baseline run was alive at its end and this one is not; or an
-# import the game called in the baseline is not provided now. Everything else that differs is listed as a note.
+# The game test is the real scenario: the whole installation runs as it is started, and the verdict judges the
+# whole, not one error. Two rules are hard: FAIL when the game folder changed, or when a script in measure/ (run on
+# the copy before the game starts) says a result of FINDINGS.md no longer holds. Beyond them the run is judged
+# against the baseline's whole: every meeting point between the program and the weave (the wants ledger, whole.txt:
+# attached, partly or missing) must be the same or better, every import provided in the baseline still provided.
+# FAIL when anything got worse. Where the run ended, frames and pipelines are listed as notes: a single stop is not
+# the verdict (measured 2026-11-27: whether a run outlives 60 s after the program's breakpoint is Windows' timing).
 # The last verdict and a hash of the build it ran on are kept in <Out>\last.txt, so a commit can check that the
 # build being committed is the one that passed.
 param(
@@ -122,6 +126,7 @@ foreach ($script in Get-ChildItem -LiteralPath $measureDir -File | Where-Object 
 $ErrorActionPreference = 'Stop'
 $log = Join-Path $run 'run.err'
 $env:WHIWHI_CALL_LEDGER = Join-Path $run 'calls.tsv'
+$env:WHIWHI_WANTS_LEDGER = Join-Path $run 'wants.txt'
 $env:DISABLE_RTSS_LAYER = '1'
 $env:DISABLE_VULKAN_OBS_CAPTURE = '1'
 $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -137,6 +142,7 @@ try { $p.PriorityClass = 'Normal' } catch {}
 if (-not $p.WaitForExit(($Seconds + 60) * 1000)) { try { $p.Kill() } catch {}; $p.WaitForExit(15000) | Out-Null }
 $elapsed = [int]$sw.Elapsed.TotalSeconds
 Remove-Item Env:\WHIWHI_CALL_LEDGER
+Remove-Item Env:\WHIWHI_WANTS_LEDGER
 $unchanged = ($before -eq (Get-Listing $Game)) -and ($exeHashBefore -eq (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash)
 
 # What the run did, from its own log and the call ledger.
@@ -173,6 +179,32 @@ if (Test-Path $ledger) {
 }
 $called = @($calls.Keys | Where-Object { $calls[$_].count -gt 0 })
 $calledUnprovided = @($called | Where-Object { $calls[$_].answer -eq 'not-provided' })
+
+# The whole, from the wants ledger the weave wrote (weave/d3d12_xs.cpp): one line per (step of the program's flow,
+# what the program asked for, what the weave gave). Each meeting point - step and what was asked - is attached when
+# everything the weave gave there was carried out, missing when nothing was, partly when both happened.
+$gapPattern = 'not made|not provided|not implemented|held|not passed on|not one|refused'
+function Read-Whole([string]$file) {
+    $points = @{}
+    if (-not (Test-Path -LiteralPath $file)) { return $points }
+    foreach ($row in Get-Content -LiteralPath $file) {
+        if ($row.StartsWith('#')) { continue }
+        $f = $row -split "`t"
+        if ($f.Count -lt 4) { continue }
+        $parts = $f[3] -split ' \| ', 3
+        if ($parts.Count -lt 3) { continue }
+        $point = "$($parts[0]) | $($parts[1])"
+        if (-not $points.ContainsKey($point)) { $points[$point] = @{ given = [uint64]0; gap = [uint64]0 } }
+        if ($parts[0] -match $gapPattern -or $parts[2] -match $gapPattern) { $points[$point].gap += [uint64]$f[0] } else { $points[$point].given += [uint64]$f[0] }
+    }
+    $points
+}
+function Get-State($p) { if ($p.gap -eq 0) { 'attached' } elseif ($p.given -eq 0) { 'missing' } else { 'partly' } }
+$whole = Read-Whole (Join-Path $run 'wants.txt')
+$wholeRows = foreach ($k in ($whole.Keys | Sort-Object)) { "{0}`t{1}`t{2}`t{3}" -f (Get-State $whole[$k]), $whole[$k].given, $whole[$k].gap, $k }
+$wholeRows | Set-Content -LiteralPath (Join-Path $run 'whole.txt') -Encoding utf8
+$wholeCounts = @{ attached = 0; partly = 0; missing = 0 }
+foreach ($k in $whole.Keys) { $wholeCounts[(Get-State $whole[$k])]++ }
 
 # Against the map the project already has (docs/exe-map and docs/console-libs, measured from the executable):
 # where each call this run made is described there. A call the map does not name is listed as not in the map,
@@ -211,6 +243,7 @@ $summary = [ordered]@{
     imports_called_not_in_map = $unmappedImports; answers_not_in_map = $unmappedAnswers
     progress_reports = $progressReports; progress_longest_unchanged_s = $progressLongest
     measurements_differing = $measureFail.Count
+    whole_attached = $wholeCounts.attached; whole_partly = $wholeCounts.partly; whole_missing = $wholeCounts.missing
 }
 $summary.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, $_.Value } | Set-Content -LiteralPath (Join-Path $run 'summary.txt') -Encoding utf8
 
@@ -223,7 +256,23 @@ if (-not (Test-Path $ledger)) { $fail.Add('no call ledger was written (the run e
 $baseline = Join-Path $outFull 'baseline'
 if (Test-Path (Join-Path $baseline 'summary.txt')) {
     $b = @{}; Get-Content (Join-Path $baseline 'summary.txt') | ForEach-Object { $k, $v = $_ -split '=', 2; $b[$k] = $v }
-    if ($b['alive_at_end'] -eq 'True' -and -not $alive) { $fail.Add("the baseline was alive at its end; this run ended: $endLine") }
+    if ($b['end'] -ne $endLine) { $note.Add("the run ended elsewhere than the baseline's: $endLine") }
+    # The whole against the baseline's whole: a meeting point that was attached and is now partly or missing, or
+    # was partly and is now missing, or that the program reached in the baseline and not now, is worse.
+    $bwhole = Read-Whole (Join-Path $baseline 'wants.txt')
+    if ($bwhole.Count) {
+        $rank = @{ attached = 2; partly = 1; missing = 0 }
+        foreach ($k in $bwhole.Keys) {
+            $was = Get-State $bwhole[$k]
+            if (-not $whole.ContainsKey($k)) { $fail.Add("worse in the whole: $k was reached in the baseline ($was), not now"); continue }
+            $now = Get-State $whole[$k]
+            if ($rank[$now] -lt $rank[$was]) { $fail.Add("worse in the whole: $k was $was, now $now") }
+            elseif ($rank[$now] -gt $rank[$was]) { $note.Add("better in the whole: $k was $was, now $now") }
+        }
+        foreach ($k in $whole.Keys) { if (-not $bwhole.ContainsKey($k)) { $note.Add("newly reached: $k ($(Get-State $whole[$k]))") } }
+    } else {
+        $note.Add('the baseline has no wants ledger yet: the whole is recorded (whole.txt), not compared')
+    }
     $bcalls = @{}
     if (Test-Path (Join-Path $baseline 'calls.tsv')) {
         foreach ($row in Get-Content (Join-Path $baseline 'calls.tsv')) {
@@ -232,7 +281,7 @@ if (Test-Path (Join-Path $baseline 'summary.txt')) {
     }
     foreach ($k in $bcalls.Keys) {
         if ($bcalls[$k].count -gt 0 -and $calls.ContainsKey($k) -and $bcalls[$k].answer -eq 'provided' -and $calls[$k].answer -ne 'provided') {
-            $fail.Add("$k was provided and called in the baseline, now not provided")
+            $fail.Add("worse in the whole: $k was provided and called in the baseline, now not provided")
         }
         if ($bcalls[$k].count -gt 0 -and (-not $calls.ContainsKey($k) -or $calls[$k].count -eq 0)) { $note.Add("no longer called: $k") }
     }
