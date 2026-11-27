@@ -116,6 +116,10 @@ checked, the error is read, and the game carries on with a failure of its own �
   `0x5a61184` is an `int3`. There is no failure path: a nonzero return stops the game in its own assertion.
 - **V** That function is reached from `0x5bf0410` (a once-only guard), which is reached from `0x266ea0` →
   `0x266cf0` → `0x266be0` (two callers: `0x2669c0`, `0x2208b90`) — the game's network start-up chain.
+- **V** (added 2026-11-27, measure/console_libs.py) A second way leads in: a jump piece at `0x5a61130` without a
+  `.pdata` entry, called at `0x221ee26` in fn `0x221edc0`, which is called by fn `0x1d109b0` - the runtime set-up
+  area of xgameruntime.md §3.2. So the one `WSAStartup` assertion has two ways in, not one. The single call site
+  and the `int3` hold as written.
 - **U** Whether a run under the weave reaches that chain, and at what point. Every run so far handed `WSAStartup`
   to the real library, where it succeeded, so the `int3` has never been exercised. This is the one refusal that
   could stop a run before anything else; section 6 makes it a decision, not a default.
