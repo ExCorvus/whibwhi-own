@@ -1770,3 +1770,22 @@ so nobody else could repeat them.
 - The shared reader `measure/pe_image.py` now reads import tables (`imports`, `import_at`) and finds functions
   that call or tail-jump to a target (`callers_and_jumps`); its reference scan states that it sees only code
   covered by `.pdata`. audio.py and topology.py still give 41 of 41 and 12 of 12 with it.
+## 2026-11-27 - the measurements run inside the game test; where the runs stopped, made repeatable (game test 04:06)
+
+- ExCorvus: "we need to fold the tests into the repo" - chosen: the game test runs measure/. `scripts\game_test.ps1`
+  now runs every script of measure/ on the copy before it starts the game (the C++ one compiled with the weave's
+  compiler, beside the weave's PC graphics library), writes their output to measure.txt of the run, and gives
+  FAIL when one says DIFFERS, or when a script that checks results names no file to read.
+- The first run with it (04:01) passed but ran only five of the seven: audio.py and topology.py named their input
+  in another wording, and the game test skipped them without a word. Both usage lines are now written the same
+  way, and a silent skip is now a failure.
+- Checked that it can fail: a temporary script made to say DIFFERS (never committed, deleted after) gave
+  FAIL at 04:04 with that script named.
+- New `measure/stops.py`, 16 of 16: the audio setup's breakpoint at image+0x43ad94e and the boot b169 unwind
+  chain; the pipeline store fn 0x2479760 checks before device slot 86; the builder's construction at
+  image+0x247944f (the installation's constructor, with false); device slot 62 at image+0x247fe66. One thing read
+  that FINDINGS had not said: the breakpoint is reached four ways - after the call at 0x43ad933 (sign test), after
+  the audio setup fn 0x43aec40 returns false (the way of our runs), after fn 0x5b52510 returns false (0x43ada59;
+  what that function is, is not read), and by falling through after fn 0x43aee50 returns false.
+- Game test 04:06 (visible, built fresh): PASS, the copy's folder unchanged, the seven measurements 41, 7, 13,
+  10, 16, 12 and 26 the same; the run still ends at the audio setup's breakpoint.
