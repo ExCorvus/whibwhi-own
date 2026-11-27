@@ -2125,3 +2125,23 @@ meet after a take; a voice starts and loops at whole 2048-byte packets, because 
   Nothing of the game is copied; the weaving happens when the program runs. Installed and started on this PC at
   16:10: it ran as the game test runs and ended at the same place (the stream channel). The port folder is for the
   owner's own PC and research and is not shared.
+## 2026-11-27 - every runtime interface the program asks for goes to Windows' own runtime (game test 16:52, measured)
+
+- What changed: the weave no longer answers any part of the console runtime with an object of its own. The
+  interfaces measured with Windows' own xgameruntime.dll (10.0.26100.9676, System32) go to it unchanged: the base
+  object, the system interface, state reporting, the one-time start, and three more pairs the program asks for
+  ({03f0fe74...}, {3e241977...}, {973a344e...}). The weave's own system object, which answered "retail", is gone:
+  it was a stitch. The user and networking interfaces are held (rule 3: nothing online; ExCorvus decides). Any pair
+  not yet measured with Windows' runtime is refused and logged. XErrorReport stays the weave's (Windows' own may send
+  a report).
+- Measured beforehand with a small test program outside the game, which loads Windows' runtime directly: every one
+  of these pairs answered S_OK there except the one-time start (0x80004005), and no network connection was opened.
+- Game test 16:52 (visible; copy's folder unchanged; 13 measurements the same; a network watch every 2 s during the
+  run saw no connection of the process): 152 imports called (181 before), 18 answers not provided (25 before).
+  Inside the program's process Windows' runtime answered the base object and the system interface with S_OK, the
+  pair {973a344e...} with S_OK, but state reporting, the one-time start, {03f0fe74...} and {3e241977...} with
+  0x8924010d. The test program got S_OK for those. What 0x8924010d means was not found; that it depends on which
+  process asks is a guess, not measured.
+- The program then takes another path: XApuConnect, the name lookups, the HTTP client start, BCrypt, the C++ stream
+  functions and some file writes are no longer called. The run still ends at the same breakpoint, image+0x43ad94e,
+  reached through another of the four ways into it; which one is not read yet.
