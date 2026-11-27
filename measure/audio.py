@@ -81,4 +81,23 @@ c.same("stream output: the scale constant at 0x615b954", m.float32(0x615B954), 3
 c.same("stream output: float samples read from the output area at offset", o(0x4E64B97), 0x14010)
 c.same("stream output: packed to signed 16-bit", m.at(0x4E64BC5).mnemonic, "vpackssdw")
 c.same("stream output: into the program's own ring at object field", o(0x4E64BD8), 0x100)
+
+# What the voice start (fn 0x785d0) hands the chip
+c.same("voice start: the data address must be 2048-aligned (low bits tested)", n(0x785E6), 0x7FF)
+c.same("voice start: rate classes by the stream's sample rate (object field +0xc)",
+       [o(0x786BD), n(0x786C3), n(0x786E0), n(0x786FE)], [0xC, 24000, 32000, 44100])
+c.same("voice start: rate class written into bits 27-28 of record +4", [n(0x786F0), n(0x7870C), n(0x78714)],
+       [0x8000000, 0x10000000, 0x18000000])
+c.same("voice start: channel bit 29 of record +4 from the object's channel count",
+       [o(0x7867C), n(0x786A1), n(0x786A6)], [0x2004, 0x1D, 0x20000000])
+c.same("voice start: ring size 0x17 into bits 22-26 of record +0", n(0x78763), 0x5C00000)
+c.same("voice start: ring and second area handed as chip addresses (record +0x1c, +0x20)",
+       [o(0x787A1), o(0x787F4)], [0x1C, 0x20])
+c.same("voice start: walks the XMA2 packets, finds the loop, counts the samples",
+       [m.at(a).op_str for a in (0x78831, 0x78850, 0x78931)], ["0x55cbd10", "0x43a7440", "0x55cbd70"])
+c.same("voice start: length in 2048-byte packets into the low 12 bits of record +0", [n(0x78AC5), n(0x78ADB)],
+       [0x7FF800, 0xB])
+c.same("voice start: the data address into record +0x14 and +0x18", [o(0x78B0E), o(0x78B52)], [0x14, 0x18])
+c.same("voice start: loop count 255 (bits 12-19 of record +0) when the loop count is over 4", n(0x78919), 0xFF000)
+c.same("voice start: first frame's bit position into the low 26 bits of record +8", n(0x78BA5), 0xFC000000)
 c.done()
