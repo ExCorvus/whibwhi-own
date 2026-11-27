@@ -1455,3 +1455,26 @@ the checker's simplification: a pass made by a stitch in the test, not by the tr
 involved; the refusal happens while the pipeline is made, before any descriptor exists.
 Next (ExCorvus agreed): the checker takes each shader's own root signature, and is run again to see whether other
 shaders were also passed only by the simplification; then TypedLoad is taught the descriptor-table path.
+## 2026-11-27 - the builder's 52 shaders made with their own root signatures, and the first passing game test with the installation's builder (game test 01:34, measured)
+
+- The driver test tool (outside the program; it reads XboxBvhBuilder.dll from the copy in memory and hands every
+  shader, in the builder's own order, with the shader's own root signature, to vkd3d-proton on one device) ran
+  with Vulkan's validation layer on. Before the change below: 51 of 52 made, no message from the layer; the one
+  refused is the 38,248-byte shader with xbox.TypedLoad, whose buffer (u0, a raw buffer) comes through the root
+  signature's descriptor table, not by GPU address. The checker's earlier "52 of 52" had hidden that (entry above).
+- A first attempt to read that buffer through the table was reported by the layer
+  (VUID-VkShaderModuleCreateInfo-pCode-08737: the access's type did not match the buffer's) and made the driver
+  fault in the tool. So the layer does report, and a translation the layer reports is one the driver may fault on.
+  Cause: the translator's first pass, which decides how each buffer is declared, did not know TypedLoad.
+- Taught in the translator (dxil-spirv fork, commit b046daf6; vkd3d-proton fork 0bb92ce7): the first pass counts
+  TypedLoad as a read of a byte address, and TypedLoad reads the 32-bit word that holds the byte through the
+  table's buffer. Tool afterwards: 52 tried, 52 made, nothing from the layer, no fault.
+- Game test 01:34 (visible, all files committed): **PASS**. Alive 60 s, the copy's folder unchanged, frame token
+  1,584, 4,096 pipelines, 17 calls answered "not provided", one new progress report (longest unchanged 6.0 s).
+  The installation's own builder is constructed: 53 compute pipelines of its PC shaders made by the PC device.
+- What this does not show: that the builder's shaders compute the right thing. None of them has run yet.
+- Next stop seen in the same run: device slot 62 is asked for a compute pipeline of a console shader (1,264 bytes,
+  with the console part), returning into a library outside the executable (address 0x7FFD91A179F2; which
+  library is not identified - the run did not record library start addresses). Answered "not provided".
+- Also in the log, as before: the weave's own shader translator refuses some pixel shaders ("a texel read whose
+  values go to an instruction the pass cannot type"). Not looked at.
