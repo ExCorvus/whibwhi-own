@@ -9,8 +9,10 @@
 // sites, the arguments and the object fields). Where a parameter's meaning is not established the header says
 // so; the register shape itself is measured.
 //
-// Todays state: a skeleton. Each export logs its name and arguments once and returns 0 (failure) — an honest
-// "the weave has no DSP path yet", never a faked success. The image reacts to that failure with its own code.
+// Today: the channel, the streams and the round trip of a page are answered (chad.cpp says what is measured and
+// that the answer page is, for now, a test answer). Until 2026-11-27 every export answered 0 without doing
+// anything - and 0 is success to the image, so the image ran on answers that were not true.
+
 #ifndef WHIWHI_WEAVE_CHAD_H
 #define WHIWHI_WEAVE_CHAD_H
 
@@ -35,11 +37,10 @@ typedef struct WhiwhiChadCommand {
 extern "C" {
 #endif
 
-// Starts a stream. The image passes four register arguments and swaps its own third and fourth when it calls
-// here; the one wrapper that does so is not reached in this build, so what the arguments mean is not
-// established. 0 = success.
-WHIWHI_CHAD_API long __stdcall XDspActivate(unsigned long long a1, unsigned long long a2, unsigned long long a3,
-                                            unsigned long long a4);
+// Starts a stream (read in the image: fn 0x3b770 -> fn 0x11d4720 -> fn 0x11d4750). The image passes its channel
+// handle, a description of 0x1c bytes, where the stream's status block pointer goes (stream +0x68) and where the
+// stream handle goes (stream +0x70). 0 = success.
+WHIWHI_CHAD_API long __stdcall XDspActivate(void* connection, const void* description, void** status, void** stream);
 
 // Opens the command channel. The image calls this once while starting the audio engine, with:
 //   command_buffer       a ring it allocated itself (see chad.md: 0x60000 bytes of 0x1000-byte pages)
