@@ -53,7 +53,8 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
 - `inflate.hpp` / `inflate.cpp` — our own zlib decoder (written from the public format description), built into
   `XCRDAPI.dll`.
 - `xgameruntime.h` / `xgameruntime.cpp` → `xgameruntime.dll`. The runtime library the game loads at start:
-  initialise and uninitialise answer success, interface queries are logged and answered "no such interface".
+  its start, end and the interfaces measured with Windows' own runtime are passed to that runtime unchanged;
+  networking and the signed-in user are held (rule 3); a pair not measured yet is refused and logged.
 - `acp_hal.h` / `acp_hal.cpp` → `AcpHal.dll`. Console audio hardware library: the memory functions are real;
   `AcpHalCreate` hands out the sound chip of `acp_chip.hpp` / `acp_chip.cpp`, which decodes the program's XMA2
   voices into their rings through FFmpeg's XMA2 decoder (built by `scripts/setup_ffmpeg.ps1`, loaded at run time).
