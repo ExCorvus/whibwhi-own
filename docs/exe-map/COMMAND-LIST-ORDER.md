@@ -353,3 +353,18 @@ In the order that removes the most doubt per line:
 | whether the inline stream is meant to be written by the title on the console | measured that the image writes it and never decodes it; the console documentation is not available here |
 | what `c3827890-4024-474c-98cf-645b51dc4874` is | shares four bytes with `ID3D12GraphicsCommandList6` and nothing else known; called with slots 131/132 only |
 | the PC meaning of queue slot 35's third argument (object 0x75e0e88) | unchanged from COMMAND-LIST.md §4.2 |
+## 7. The topology numbers the program uses (read in the executable, 2026-11-27)
+
+The renderer keeps the topology number in its context object at +0x1237d (211 instructions read or write it). The
+draw path (fn 0x32520) passes it to slot 20 (`IASetPrimitiveTopology`, returns to image+0x325c0) and sorts it into a
+class of its own for the pipeline key (0x32710-0x3273e): 1 apart, 2 and 3 -> 2, 0x11 -> 0x11, any other below 0x20
+-> 4, 0x20 and above -> 0x20. Besides the public numbers it writes two more:
+
+| number | places that write it | what it is |
+|---|---|---|
+| 0x11 (17) | 39 | AMD's `DI_PT_RECTLIST`: at 0x124995 the program writes three corners of a screen rectangle, (-1, 1), (-1, -1), (1, -1), as 3 vertices of 24 bytes, and draws; the fourth corner is not written (**measured** what it draws; the name **inferred** from AMD's numbering) |
+| 0x13 (19) | 2 | AMD's `DI_PT_QUADLIST` (**inferred** from AMD's numbering; what is drawn not read) |
+
+AMD's numbering: Mesa's public register description, src/amd/registers/gfx10.json (VGT primitive type). One
+pipeline description per run (from fn 0x2479760, returns to image+0x2479a8d) names primitive topology type 19
+(**measured**, game test 02:33); that it is the quad list is **inferred** from the number.
