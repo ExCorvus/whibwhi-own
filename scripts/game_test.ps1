@@ -144,6 +144,11 @@ $p = Start-Process -FilePath (Join-Path $work 'boot_image.exe') -WorkingDirector
 if ($Show) {
     Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile', '-Command',
         "`$host.UI.RawUI.WindowTitle = 'game test log'; Get-Content -LiteralPath '$log' -Wait -Tail 50"
+    # The console shows the program's window as the whole screen; Windows is asked for that from outside
+    # (scripts\fullscreen_window.ps1). What it did is written to fullscreen.txt in the run's folder.
+    Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', "`"$(Join-Path $PSScriptRoot 'fullscreen_window.ps1')`"", '-ProcessId', "$($p.Id)",
+        '-Log', "`"$(Join-Path $run 'fullscreen.txt')`""
 }
 try { $p.PriorityClass = 'Normal' } catch {}
 if (-not $p.WaitForExit(($Seconds + 60) * 1000)) { try { $p.Kill() } catch {}; $p.WaitForExit(15000) | Out-Null }
