@@ -21,7 +21,9 @@ resource, no staging buffer.
 - **V** `XCRDAPI.dll!DStorageGetFactory` has exactly one call site in the image: `0x1d8e4f0`, inside function
   `0x1d8e4d0` (86 bytes). The import is the only XCRDAPI import (1 function, 1 call site).
 - **V** The factory IID the game passes is at `0x62fc7d8`:
-  `{62959d11-d45f-4888-a0a3-f7862ea243ae}`. It is **not** the PC `IID_IDStorageFactory`
+  `{62959d11-d45f-4884-a0a3-f7862ea243ae}` (corrected 2026-11-27: this line said `-4888-`; the bytes `84 48` at
+  `0x62fc7de` give `0x4884`, and the weave's own log of the program's request shows `-4884-`; measure/console_libs.py).
+  It is **not** the PC `IID_IDStorageFactory`
   (`{6924ea0c-c3cd-4826-b10a-f64f4ed927c1}`, public `dstorage.h`). The output slot is `0x78f5e78`.
 - **I** Because the IID differs, a PC `dstorage.dll` asked for that IID answers `E_NOINTERFACE`, so a verbatim
   forward fails even before the vtable question comes up.
