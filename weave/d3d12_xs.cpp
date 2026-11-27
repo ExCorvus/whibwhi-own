@@ -1788,6 +1788,17 @@ HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, vo
     }
     pc.pRootSignature = static_cast<ID3D12RootSignature*>(to_pc(pc.pRootSignature));
     auto* device = static_cast<ID3D12Device*>(self->pc);
+    {
+        // Named before it is handed over, so that a failure inside the PC device still says which shader it was:
+        // the size and the first 8 bytes of the container's checksum (bytes 4-11 of its header).
+        unsigned long long checksum = 0;
+        if (pc.CS.BytecodeLength >= 12) {
+            std::memcpy(&checksum, static_cast<const unsigned char*>(pc.CS.pShaderBytecode) + 4, sizeof(checksum));
+        }
+        logf("device slot 62: handing a compute pipeline of a PC shader (%llu bytes, checksum %016llx) to the PC "
+             "device\n",
+             static_cast<unsigned long long>(pc.CS.BytecodeLength), checksum);
+    }
     HRESULT hr = device->CreateComputePipelineState(&pc, *static_cast<const GUID*>(identifier), out);
     if (hr == static_cast<HRESULT>(0x80004002L)) {
         hr = device->CreateComputePipelineState(&pc, *pc_identifier(kPipeline), out);
