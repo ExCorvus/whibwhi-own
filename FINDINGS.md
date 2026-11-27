@@ -1615,3 +1615,29 @@ ExCorvus set the order: first the executable, then AMD's public documents, then 
   AcpHalCreate, which the weave answers "not provided" (E_NOTIMPL, no handle). The function the setup calls at
   that point (fn 0x43aec40) returns false and the next instruction is the int3. So the program does not go on
   without its audio device. Earlier runs ended or were measured before the program got this far.
+## 2026-11-27 - the program's audio setup, read in the executable (first reading, measured)
+
+ExCorvus: audio next, and "answering it silently might be a trap". So first what the program puts in and reads
+back, before any answer. Read in fn 0x43aec40 (the setup) and the places that use the same globals.
+- The executable imports nothing for sound except AcpHal.dll and xapu.dll (no XAudio2, no Windows audio). All of
+  its sound goes through the audio device. (The installation's Bink library uses XAudio2 itself.)
+- Order in fn 0x43aec40: the status word at 0x9ae98c8 is set to 0; AcpHalAllocateShapeContexts with a block at
+  0x9ae98d0 asking for 350 (0x15e) records; the 350 x 64 bytes are zeroed; 350 flag bytes set to 1; a table of
+  350 x 32 bytes at 0x9ae9938; ApuAlloc of 0x222e00 bytes (kind 2), cut into 350 pairs of 0x1700 and 0x200
+  bytes (one pair per record); AcpHalCreate(&0x9ae98b8); the object's slot 0 with 0x1000, 0x1000;
+  CreateEventA (manual reset, not set) at 0x9ae98c0; wait while the status word is negative (Sleep 10); then
+  the object's slot 0x10 with opcode 2, 0xf0f0f0f0, -1, a 4-byte block holding 0xc0, 0. The setup succeeds when
+  that last call is not negative.
+- The status word: the program writes it once (0, before the create) and only reads it afterwards: at start-up
+  it waits while it is negative, at shut-down (fn 0x43ae840) while it is positive. So a device that never writes
+  it does not make the program wait. This corrects docs/console-libs/acp-xapu.md section 3.1, which inferred that
+  a success without the console driver would hang here for ever. What the word means is still not known. The
+  event at 0x9ae98c0 is only used at shut-down.
+- The 64-byte records are filled by the program's per-packet feed (fn 0x785d0, fn 0x78120) with packed bit fields
+  (for example bits 20-23 of the dword at +4 set to 4, bits 22-26 of the dword at +0 set to 0x17, the top bit of
+  byte +7 set) and 32-bit APU addresses of the record's two buffers at +0x1c and +0x20. They have the form of a
+  hardware descriptor for the console's audio processor, not of a library call. Their meaning is not in the
+  executable.
+- No codec name (Opus, XMA, AAC) appears in the executable's text.
+- Also corrected: the table in section 6 of acp-xapu.md is older than the weave: AcpHalAllocateShapeContexts,
+  ApuCreateHeap, ApuAlloc and the address functions are answered with real memory now (weave/acp_hal.cpp).
