@@ -1581,3 +1581,21 @@ driver after vkd3d-proton's "Invalid primitive topology type #13". The copy's fo
   the same number, 0x13).
 - On a PC: AMD's hardware has these primitive types, but Vulkan (and so vkd3d-proton) offers neither a rectangle
   list nor a quad list; the PC library has no number for them. Nothing was changed.
+## 2026-11-27 - can the PC reach the GPU's own rectangle and quad modes? (measured, chain: the executable, AMD's public code, the installed driver)
+
+ExCorvus set the order: first the executable, then AMD's public documents, then the installed driver itself.
+- The executable: 37 functions set the topology number 0x11 (rectangles) or 0x13 (quads). 33 of them set nothing
+  else and test nothing before it; in three more, other numbers follow as separate draws, not as a replacement. One
+  (fn 0x5178b90) has a triangle path and a rectangle path side by side; what chooses between them is not read. So
+  the program has no path without these two modes: it expects them to be drawn.
+- AMD's public driver code (GPUOpen xgl, icd/api/include/vk_conv.h): the table that turns a Vulkan topology into
+  the GPU's own lists exactly Vulkan's eleven topologies. None leads to a rectangle or quad mode.
+- The installed driver (the one Windows names for the RX 9070 XT, amdvlk.inf_amd64_1d6da6c2496b97d2\amdvlk64.dll,
+  driver 32.0.32029.2010), read only: its own list of Vulkan topology names has the same eleven. The word "RectList"
+  appears many times inside the pipelines the driver keeps for its own work (copies and clears), so the driver uses
+  the GPU's rectangle mode itself. Of the 244 extensions the driver offers (vulkaninfo), none is about rectangle or
+  quad lists. The driver keeps its extension names in a form a plain text search does not find, so the offered list
+  is taken from vulkaninfo, not from the file.
+- Result: the GPU and its driver know rectangles; nothing in the PC's graphics interface reaches them from outside.
+  On the PC they have to be drawn as triangles: quads by an index list, rectangles by a small extra shader that
+  makes the fourth corner (v0 + v2 - v1).
