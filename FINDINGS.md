@@ -1544,3 +1544,20 @@ builder) are made as given. 27 of 27 sample tests pass.
 - So, measured: the program's shaders read places past the ranges its named root signatures give their tables
   (as the 02:04 entry found from the other side); some shaders compute a sampler's place at run time; a vertex
   shader uses an address as a number. Nothing was changed after this run.
+Follow-up, game test 02:33 (the same build plus one record: every pipeline description whose primitive topology
+type is not one of the public 0 to 4; behaviour unchanged). The run ended the same way, about 58 s in, in the AMD
+driver after vkd3d-proton's "Invalid primitive topology type #13". The copy's folder is unchanged.
+- In the whole run one description names a type outside 0 to 4: type 19, near the end, from the program's own
+  pipeline path (the call returns to image+0x2479a8d, fn 0x2479760). vkd3d-proton prints that number in hex: 0x13 is
+  19, so its message is about this description (inferred from the number; that this one request was made, and not
+  refused, is not shown by the log). All pipeline descriptions of the program have the same 15 subobjects (root
+  signature, the five graphics shader stages with only the vertex and pixel ones filled, blend, sample mask,
+  rasterizer, second depth-stencil, sample description, input layout, topology type, render-target formats,
+  depth format).
+- Read in the executable: the description is put together in the program's draw path (fn 0x32520, which calls fn
+  0xb5a5d0 at 0x3275f). There, at 0x32710-0x3273e, the program turns the topology number set on the list into a
+  class of its own for the pipeline's key: number 1 stays apart, 2 and 3 become 2, 0x11 stays 0x11, any other number
+  below 0x20 becomes 4, and 0x20 and above become 0x20. 0x11 (17) is the topology number not on the public list
+  that the program sets on its lists (seen in earlier runs; the weave holds draws while it is set). Where that class becomes the
+  description's type 19 is not read (fn 0xb5a5d0 hashes the key and hands a request on; the request is filled
+  elsewhere).
