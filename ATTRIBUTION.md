@@ -52,6 +52,17 @@ repository; they are kept because the ideas were ExCorvus's, not because they de
     graphics library supplies them at the moment it builds those shaders - and the result runs on the GPU in
     memory the CPU side uses too. One thread runs through the program, a shipped library, the graphics library
     and the GPU.
+15. **Do not port the game code (2026-11-27).** The executable needs no change to its code: it is already PC code.
+    What it asks for is Windows - the console's libraries are mostly Windows and D3D12 under console names - plus
+    a few pieces only the console has (the sound chip, the frame clock, memory attributes). This is still a way of
+    porting, and in ExCorvus's view the correct one: not a rewrite of the program, and not a rewrite of its
+    surroundings either, but untangling the web first and mapping which call belongs to which part of Windows;
+    attaching each call to its Windows counterpart, so that nothing is answered twice, because Windows answers
+    back into the fabric as well; and building only what Windows does not have, folded into the pieces that
+    already exist. ExCorvus's reading is that this is how the program was designed: the trap
+    is to replace what the program expects with one's own version of it, library by library. What is measured is
+    that the executable needs no change; that this was the designers' intent cannot be measured in the executable.
+    ExCorvus expects the method to reach beyond this one program; it has been measured in this one only.
 
 ## The agent's work (the implementation)
 
