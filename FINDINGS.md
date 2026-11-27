@@ -1846,3 +1846,25 @@ ExCorvus asleep; read-only work on the copy, no game or GPU run.
   version is 10.0.26100.9628 or newer. Besides global 0x8759d00 the device is copied into ten more globals.
 - Not read here: what the other four command signatures describe, what the objects of slot 48 are, what slot 49
   does.
+## 2026-11-27 - the command list map made repeatable: measure/command_lists.py, and corrections (measured, no run)
+
+`measure/command_lists.py` repeats docs/exe-map/COMMAND-LIST-ORDER.md sections 1 and 2 on the copy: 26 of 26 the
+same after the corrections below. It checks the list object's fields in the four flush functions (sizes 6,037,
+1,005, 1,027 and 935 bytes), the record words 0xc000b600 / 0xc000b800 / 0x4001b700 (0xc000b600 occurs once in the
+whole file, inside its writer), that the builder library is handed the list at 0x24902ac, and each method slot at
+each of the places the map names (Close, CopyBufferRegion, ResourceBarrier, ExecuteIndirect, the 40 "emit this
+record" places, and the four console-only slots).
+
+Corrections written into the map:
+- Byte `+0x140` is not only set after a test that the record's first word is below 0x40000000. That test comes
+  before 15 of the sets (5 in each of fn 0x32130, 0x248c2a0, 0x248c6b0). Four sets have no test: after the 28-byte
+  record that also copies bit 20 into `+0x141` (one in each of fn 0x32520, 0x248c2a0, 0x248c6b0) and after a run
+  of records in fn 0x32520. Two of the places the map listed for `+0x140` (0x32940, 0x248c44c) are the branch and
+  the record store next to such a set, not the set itself.
+- One place listed for `+0x18` (0x32a48) reads a renderer field instead.
+- The two 16-byte blocks `+0x544` / `+0x554` are also written in fn 0x248c6b0 (0x248c705, 0x248c712), not only in
+  fn 0x248c2a0 and fn 0x32520.
+- Close (`+0x48`): its result is tested after all three calls, not at one place only. In the graphics set-up a
+  negative result stops the program (int3); at the third place it returns.
+
+What the slots mean on the PC is not checked by the script; the map still marks most of it unknown.
