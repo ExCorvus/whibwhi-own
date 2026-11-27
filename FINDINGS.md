@@ -1998,3 +1998,11 @@ Follow-up to the file trace of 13:37, read in the executable and in Microsoft's 
 - So T: is not the installation: it is a writable place of the program's own that starts empty. That the telemetry
   cache is missing at the start is what a console shows too.
 - What the weave answers today: G:\ only. A call for T:\ goes to Windows as written and fails (error 3).
+Follow-up, game test 13:57 (PASS: alive at the end, 5 progress reports, frame token 1,637; the run still ends at
+the sound device's stop), with T:\ answered for this one run from a temporary folder (that change was taken out
+again afterwards and never committed; T: is now meant to be a real drive, docs/BUILD-AND-RUN.md):
+- Correction: the program does not only read the telemetry cache. With T: there, its `CreateFileW` for
+  `t:\telemetrycache.dat` succeeds and the file is left behind at exactly 2,097,152 bytes (0x200000, the size
+  fn 0x1dec9c0 hands to its file layer): the program makes the file itself, at its full size. Its contents were
+  not read.
+- Nothing else was written to T: in that run.
