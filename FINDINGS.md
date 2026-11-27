@@ -2145,3 +2145,40 @@ meet after a take; a voice starts and loops at whole 2048-byte packets, because 
 - The program then takes another path: XApuConnect, the name lookups, the HTTP client start, BCrypt, the C++ stream
   functions and some file writes are no longer called. The run still ends at the same breakpoint, image+0x43ad94e,
   reached through another of the four ways into it; which one is not read yet.
+## 2026-11-27 - what Microsoft's own tools say about the builder's shaders (measured, no game run)
+
+Asked for on dxil-spirv's llvm.copysign change ("Does it pass dxil.dll validator? Is there evidence Windows drivers
+don't explode on that code?"). A small program, written for that question and kept on its own branch of our
+dxil-spirv fork (`evidence-xbox-builder`, folder `evidence/xbox-builder/`), reads the 52 compute shaders of the
+installation's XboxBvhBuilder.dll in memory and hands each one to Microsoft's tools. Nothing is written to disk.
+
+- **Microsoft's validator** (dxil.dll 1.9 from the Windows SDK 10.0.26100): all 52 invalid. Every one is refused
+  first for its target, "Unknown target triple 'dxil-ms-xb2'", and for "Named metadata 'xbox.compiler.options' is
+  unknown": these are the Xbox's form of DXIL, not the PC's. Further messages: "External function 'xbox.*' is not a
+  DXIL function" for each console function, "ExtractValue should only be used on dxil struct types and cmpxchg",
+  "Instructions must be of an allowed type", and for the three shaders that
+  declare it, "External function 'llvm.copysign.f32' is not a DXIL function". So the maintainer's reading holds:
+  llvm.copysign is not valid PC DXIL. It comes only in the Xbox's form.
+- **Windows' own D3D12** (system d3d12.dll, AMD Radeon RX 9070 XT, driver 32.0.32029.2010): with the containers'
+  own root signatures, all 52 refused at the root signature (0x80004005: the two Xbox-only bits 0x3000000). With
+  each root signature rewritten without just those two bits (a measuring option, the shader unchanged), the first
+  seven shaders gave: the two without console functions made; four with console functions an access violation
+  inside AMD's D3D12 shader compiler (amdxc64.dll+0x1aab91c, the same place each time); the fifth the pipeline
+  refused 0x887A0005 and the device removed with 0x887A0020 (driver internal error); no new device could be made
+  after that, so the run ended there.
+- **Driver and machine after it** (rule 7): the device removal stayed inside the test program; Windows' System log
+  has no display or driver event from that time, and both graphics adapters report OK.
+- What this does and does not show: Windows' own path does not take these shaders either; AMD's D3D12 compiler
+  faults on those with console functions. Whether llvm.copysign itself would make a Windows driver fail is not
+  shown: none of the three shaders that use it was reached, and all of them also use console functions.
+## 2026-11-27 - one command repeats every measurement: measure/run_all.py (measured, no game run)
+
+`python measure/run_all.py "<your game folder>" --report report.txt` runs every script in measure/ on a game folder
+side by side and prints one report: the tool versions, the size and SHA-256 of each file read, and for each script
+"holds", "differs" (with its DIFFERS lines) or "could not run". The report holds nothing of the game, so it can be
+posted as it is; anyone with their own copy can check the results without us measuring again. The script that needs
+the graphics card runs only when its built program is passed with --pipelines.
+
+On this copy (executable 120,181,760 bytes, SHA-256 e95020b2fa4a721db3df59fdecf75621730ac559d8835252f6c3b658d5a08993;
+XboxBvhBuilder.dll 884,224 bytes, SHA-256 99f803ac22c01ef329dddb1d40be67238d2a812d01e8d040b3cb5135bc23707e): all 11
+measurements hold, 313 statements, in one run with the scripts side by side.
