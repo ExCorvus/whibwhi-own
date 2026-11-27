@@ -2352,3 +2352,26 @@ the audio part of the weave.
   ended as before, at the fault image+0x161b994 (a read at 0x8) in the user interface, after progress reports up to
   61.9 s. So the GameInput version is not what leaves the user interface's value empty. What the program does with
   the interface Windows returns is not logged (Windows answers directly).
+
+## 2026-11-27 - the second stop at image+0x344196 is the program's own stop on the weave's "no size" answer, new since the IDXGIDevice answer (game tests 19:15 to 23:13, read from their logs, no new run)
+
+- In run 23:13 the line right before the breakpoint at image+0x344196 is the weave's device slot 25
+  (GetResourceAllocationInfo): "no size for a texture of dimension 3, 2560 x 1440 x 1, 1 mips, format 118, 1 samples,
+  layout number 0x0, flags 0x80300006 - the texture library does not answer this description; answered the failure
+  value". Format 118 is not in the public DXGI list (which has nothing between 115 and 130), so it is a console
+  format number; the flags include 0x2, a depth-stencil texture.
+- Read in the exe: the breakpoint sits in fn 0x343e80 right after its call of the device's method +0xc8 (slot 25):
+  it copies the answer and stops itself when the size's upper 32 bits are not 0 (the comment at weave/d3d12_xs.cpp
+  slot 25 had already noted "it stops itself when the size does not fit in 32 bits"). The failure value (all ones)
+  does not fit, so the stop is the program's direct, measured reaction to that answer.
+- Over the last nine runs: the breakpoint and the 2560 x 1440 request appear together, in every run from 20:27 on
+  (20:27, 20:49, 21:01, 21:12, 23:13) and in none before (19:15, 19:37, 19:50, 20:05). 20:27 is the first run in
+  which the device gives IDXGIDevice (Windows' adapter, DISPLAY1 and its 369 modes). So since the program learns
+  the display, it also asks for this texture. Why 2560 x 1440 (the display is 3440 x 1440) is not read.
+- The fault at image+0x161b994 (the user interface) is a separate thing: it comes first, on another thread (the
+  window thread), and was there before 20:27 (19:37, 19:50, 20:05, and once at 18:32) without the breakpoint.
+- Also in the log, on the thread that later stops (same stack): at 57.4 s the texture object's method +0x50 (texture
+  library) was called for a 512 x 512 texture of format 71 and answered "not provided"; the program (fn 0x3441f0)
+  does not check that answer and reads the values the method should have written (they stay the program's own
+  zeros). The storage queue's method +0x30 is answered "not recognised" six times early in the run.
+- Nothing changed in the weave for this entry.
