@@ -2262,3 +2262,26 @@ Windows crash report (the last one is 18:43:25, the run of 18:32), alive at 60 s
 presented, no failed read. So the fault at image+0x161b994 does not come in every run; its thread's history is
 not seen yet. Seen in 3 of the last 4 runs: a fault in a different place each time (17:41 image+0x2942c8, 17:57
 the C runtime, 18:32 image+0x161b994; the first two came from the weave's reads, fixed since).
+## 2026-11-27 - the silent answer: chad said "success" and did nothing (game test 19:15, measured)
+
+The program's sound circle has a fourth part besides the sound chip, the stream channel and Windows' spatial audio:
+chad.dll, which takes 4096-byte pages from the program and gives back an answer page and a completion number.
+ExCorvus heard that the sound stays silent and named it: a silent answer, a signal you cannot hear that confirms
+the audio part of the weave.
+- The weave's chad answered every call with 0 and did nothing. In the program 0 is SUCCESS at every call site; the
+  map (docs/console-libs/chad.md, corrected) and the weave's own sample test had taken 0 for failure. So the program
+  ran with "channel open, streams started, pages taken" while nothing answered: no handle, no status block, no
+  answer page, no completion number (rule 4). It also means one of the four ways into the old sound stop at
+  image+0x43ad94e was only passed because of this false success.
+- Read in the exe: activate (channel, description, where the status block goes = stream +0x68, where the stream
+  handle goes = stream +0x70); submit (stream, {1.0, 1.0, page in, page out, 0}, completion number out); the stream
+  then waits until its status block carries the completion number (+4) and a 0 (+0xc), and takes the answer page
+  in four quarters.
+- weave/chad.cpp now opens the channel, gives every stream a handle and a status block, and closes each round trip
+  at once. The answer page is, as a TEST of what the program expects back (ExCorvus: "test what it expects back
+  first, and if that isn't the solution, it's what it wants to go in"), the input page unchanged; the first pages'
+  contents are logged as numbers for the next step. The sample test that pinned 0 = failure is rewritten.
+- Game test 19:15 (run-20261127-191524, visible): PASS, the copy's folder unchanged, every measurement the same,
+  alive at 60 s, no fault, frame token 1755. The channel opened and its handle was written; in the 60 s the program
+  activated no chad stream and submitted no page, opened no stream on the stream channel and started no voice on
+  the sound chip. So the round trip itself is not tested yet: the program has not got to playing sound.
