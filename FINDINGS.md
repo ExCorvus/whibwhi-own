@@ -1660,4 +1660,12 @@ back, before any answer. Read in fn 0x43aec40 (the setup) and the places that us
   decoding service whose result comes back to the program (measured layout; that the 4-byte samples are floats
   and that [obj+0x18] is the sample rate is inferred). 960 samples per packet is Opus's 20 ms at 48 kHz;
   that the packets are Opus is still not shown from the data itself. The channel is not reached in today's runs:
-  XApuConnect comes after the AcpHal setup, which stops first.
+  XApuConnect comes after the AcpHal setup, which stops first.- Follow-up: the first step, the sound device's object (docs/console-libs/acp-xapu.md 3.1, re-read against the
+  code). The program calls only four of its slots: [0] start (0x1000, 0x1000; negative = audio start-up fails),
+  [0x10] the command door, [8] and [0x28] on the way down (results ignored). Of the commands only opcode 2 (setup,
+  0xf0f0f0f0, block {0xc0}) has its result used (>= 0 = success). Opcode 0x12 (0xf1f1f1f1) is sent by fn 0x78120
+  after it copied new data into one record's ring of 0x1700 bytes (the position at [record+0x30] wraps at 0x1700);
+  its block is {voice, bytes >> 8}: "this many 256-byte units of new data for this voice". Opcodes 5 and 7 carry
+  a stream id. The records' memory pointer (0x9ae9908) is used only by fn 0x78120 and fn 0x785d0 (and set up by
+  fn 0x43aec40). Where the decoded sound goes - played out by the device itself, or read back by the program -
+  is not read yet.
