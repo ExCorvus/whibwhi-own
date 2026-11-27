@@ -1831,6 +1831,35 @@ void log_console_shader_parts(const void* code, std::size_t size) {
             }
         }
     }
+    static std::atomic<unsigned> described{0};
+    if (described.fetch_add(1) < 3) {
+        // The packed program inside the DXIL part (weave/shader_program.*, the same reader as for graphics shaders).
+        using namespace whiwhi::weave;
+        const PackedProgram program = read_packed_program(b, size);
+        std::string line;
+        for (const ProgramDirectoryEntry& e : program.entries) {
+            std::snprintf(text, sizeof(text), " {kind 0x%x, %u bytes}", e.kind, e.size);
+            line += text;
+        }
+        if (program.ok()) {
+            const ModuleProgram module = find_module_program(program.bytes.data(), program.bytes.size());
+            std::snprintf(text, sizeof(text), "; packed %u -> unpacked %u bytes; ", program.packed_bytes,
+                          program.unpacked_bytes);
+            line += text;
+            if (module.found) {
+                std::snprintf(text, sizeof(text),
+                              "module: number at +0x%x, code %u bytes, program %u bytes, %u instructions",
+                              module.header_place, module.code_bytes, module.program_bytes, module.instructions);
+                line += text;
+            } else {
+                line += "module refused: " + module.reason;
+            }
+        } else {
+            line += std::string("; packed program: ") + program_status_name(program.status) + " " + program.reason;
+        }
+        logf("device slot 62: the console compute shader of %llu bytes, directory%s\n",
+             static_cast<unsigned long long>(size), line.c_str());
+    }
     AcquireSRWLockExclusive(&lock);
     const unsigned n = ++seen[names];
     const std::size_t lists = seen.size();
