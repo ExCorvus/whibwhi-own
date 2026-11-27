@@ -1412,3 +1412,21 @@ Follow-up, 2026-11-27 ~01:30 - the driver fault reproduced outside the program (
   meaning not checked); feature level 12_0 or 12_1; a 64 MiB stack for the thread that makes them.
 - Open: why the game runs since 00:28 get past the 5th and the tool does not. Differences left: what the program
   and the weave have made on the device before the builder, and the driver's own cache per program (guess).
+Follow-up, 2026-11-27 ~01:15 - the driver fault found: a value the translator left unwritten (game test 01:13):
+- The Vulkan SDK's validator (spirv-val, fed through a pipe in memory, nothing on disk) found 3 of the 52 translated
+  builder shaders invalid: 29,996, 74,508 and 34,020 bytes - the one the tool faulted on, the one the game runs
+  faulted on, and one not reached yet. In each, a calculation uses an ID that is never defined.
+- That ID is the result of `llvm.copysign.f32(1.0, x)` (the sign of x as +1/-1; the shader takes 0 where x is 0).
+  It is a plain LLVM function, not a console one. dxil-spirv passed over every `llvm.` call without a word (written
+  for markers like llvm.lifetime that compute nothing), so the result was never written and the driver read
+  whatever lay in memory - text, taken as an address.
+- Changed in the dxil-spirv fork (not yet committed there): llvm.copysign.f32 is translated (the magnitude bits of
+  the first value with the sign bit of the second); an `llvm.` call that produces a value and is not known is now
+  refused with an error instead of passed over. Validator afterwards: 52 of 52 valid.
+- The test tool (one device, builder order, each shader's own root signature): 51 of 52 made, no fault. The one
+  refused is 38,248 bytes: xbox.TypedLoad on a buffer that its root signature hands over through the descriptor heap,
+  where the translation taught so far covers only a buffer passed by its GPU address. (The tool's first attempt with
+  the builder's one recorded root signature was wrong: the builder has more than one; 37 shaders use buffers it
+  lacks.)
+- Game test 01:13 (visible, the copy's folder unchanged): FAIL - the builder makes 48 pipelines without a fault (up
+  to here 31) and stops at the 49th, that same 38,248-byte shader, refused the same way; the builder throws.
