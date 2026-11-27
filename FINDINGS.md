@@ -1668,4 +1668,17 @@ back, before any answer. Read in fn 0x43aec40 (the setup) and the places that us
   its block is {voice, bytes >> 8}: "this many 256-byte units of new data for this voice". Opcodes 5 and 7 carry
   a stream id. The records' memory pointer (0x9ae9908) is used only by fn 0x78120 and fn 0x785d0 (and set up by
   fn 0x43aec40). Where the decoded sound goes - played out by the device itself, or read back by the program -
-  is not read yet.
+  is not read yet.- Follow-up: what the device gives back, read in fn 0x785d0 and fn 0x78120 (the only functions besides the setup
+  that load the records' pointer 0x9ae9908). fn 0x785d0 starts a voice: it zeroes its 64-byte record and writes
+  it field by field: a rate class in bits 27-28 of dword +4 by thresholds 24000 / 32000 / 44100 Hz, a channel
+  bit 29, the ring size 0x17 in bits 22-26 of dword +0 (0x17 x 256 = 0x1700, the ring's size), a 4 in bits
+  20-23 of dword +4, values from the stream's header into dwords +0xc and +0x10 and bits 12-13 / 17-19 of
+  dword +4, a valid bit (top bit of byte +7), and the device addresses of the ring and of a second 0x200-byte
+  area at +0x1c / +0x20. Before that it walks the stream's XMA2 packets (fn 0x55cbd10). fn 0x78120 then reads
+  back two 5-bit positions in 256-byte units: bits 27-31 of dword +0 and the low 5 bits of dword +0x24. Neither
+  is written anywhere in these functions (the record is zeroed at the start), so both are written by the device
+  (measured: no write by the program in the functions that hold the pointer; that nothing else reaches the
+  records is not shown). From their difference the program works out how much of the ring the device has used,
+  refills that much and sends opcode 0x12. So the device must keep these positions current as it consumes the
+  data. Where the decoded sound itself goes is still not read: nothing in these two functions reads decoded
+  samples back (the 0x200-byte area is only copied between two records of the same stream).
