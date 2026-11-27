@@ -2098,3 +2098,30 @@ meet after a take; a voice starts and loops at whole 2048-byte packets, because 
   those threads is not measured.
 - Not in the ledger yet: the weave's other libraries (sound chip, stream channel, memory, files, runtime). They
   appear only through the import list so far.
+## 2026-11-27 - the runtime's start and base object answered by Windows' own runtime, and the port installer (game tests 16:17, 16:31, measured)
+
+- The first errors the program meets in a run are six runtime interfaces the weave refused. Followed along the
+  thread: the first of them is the runtime's base object, which 58 of the program's 161 runtime calls touch before
+  anything else (docs/console-libs/xgameruntime.md section 3.2). Windows has the runtime itself
+  (System32\xgameruntime.dll), and the weave was answering in its place.
+- Measured first without the program (a small test of its own, outside the repository): Windows' runtime starts with
+  the program's own start values (InitializeApiImpl(0x6336, 0x2712) = 0) and hands out the base object; its
+  methods, including +0xe8, lie in Windows' library. No network endpoint opened by that process, none by the Gaming
+  Services processes (IPv4 checked).
+- Woven in (weave/xgameruntime.cpp): the runtime's start (InitializeApiImpl, Ex, Ex2) and the base object are
+  passed to Windows' own runtime unchanged; the weave adds nothing. The other interfaces stay as they were.
+- Game test 16:17: PASS; Windows answered the start (Ex2) and the base object with success. The program then went
+  on to ask for two runtime interfaces it had not asked for before ({3e241977-...}, {973a344e-...}).
+- Game test 16:31, with a watch of the program's process every 2 s (29 samples over its 60 s): 0 TCP connections and
+  0 UDP endpoints the whole time. The weave's offline layer refused getaddrinfo and the installation's HTTP library
+  as before. Not watched: Windows' runtime service, which runs in a system process of its own. A first watch during
+  the 16:17 run wrote nothing (a mistake in how it was started); that run has no network record.
+- Still answered by the weave in Windows' place: the sandbox name ("RETAIL") and the remaining interfaces (user,
+  networking, state reporting, one-time initialisation, two more).
+- scripts/install_port.ps1: installs the weave on a PC as a personal port of one's own copy. It compiles first (the
+  weave with its sample tests, the vkd3d-proton fork, FFmpeg's XMA2 decoder, libopus), then puts the weave's
+  programs and libraries into a port folder outside the repository and the game folder (it refuses others), without
+  the libraries the installation ships, with a start script that runs the original executable through the weave.
+  Nothing of the game is copied; the weaving happens when the program runs. Installed and started on this PC at
+  16:10: it ran as the game test runs and ended at the same place (the stream channel). The port folder is for the
+  owner's own PC and research and is not shared.
