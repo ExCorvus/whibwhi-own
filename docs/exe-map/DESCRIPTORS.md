@@ -329,10 +329,18 @@ Three independent places move descriptor bytes as raw memory, all of them 32 byt
    record's shape from the table at 0x75e7540 into the descriptor address at `[view object +0x18]`, where the view
    object is the one at `[argument +0x28]`. When the device object has a non-zero byte at +0x18 it calls device
    slot 24 with (1, destination, source, 0) instead of copying.
-2. **fn 0x4fd2b50**, **fn 0x4fd2bf0**, **fn 0x4fd2c60** (0x4fd2b84, 0x4fd2c56, 0x4fd2ce6): copy 32 bytes from the
-   descriptor a set record points to (`[record+0x18]`, or one of the four canned null descriptors at 0x75e7540 +
-   index*8) to the first argument object's `+0x10` plus `(bits 4..11 of *record) * [0x75e7000]`. Same
-   device-byte-+0x18 switch to slot 24.
+2. **fn 0x4fd2b50**, **fn 0x4fd2bf0**, **fn 0x4fd2c60** (copies at 0x4fd2b84, 0x4fd2c2b, 0x4fd2c94; slot-24 calls
+   at 0x4fd2bd6, 0x4fd2c56, 0x4fd2ce6): copy 32 bytes to a place `(bits 16..25 of *record) * [0x75e7000]` past a
+   base (`bextr` with control 0xa10). Corrected 2026-11-27 from the executable (`measure/descriptors.py`); this
+   point said "bits 4..11" and "one of the four canned null descriptors at 0x75e7540" for all three before. Read:
+   - fn 0x4fd2b50: from `[record+0x18]`, or when there is no record from the null descriptor at
+     0x75e7540 + index*8, index = bits 12..13 of *record, or 4 when bit 15 of *record is set (five entries);
+     base = first argument's `+0x10`.
+   - fn 0x4fd2c60: the same, with the null descriptors at 0x75e7570 + index*8 (a second set of five, written by
+     fn 0x2478440 from 0x2479154); base = first argument's `+0x10`.
+   - fn 0x4fd2bf0: from `[record+0x38]`, or the one descriptor at 0x75e7598 (written by fn 0x2478440 at
+     0x2479248); base = the first argument itself.
+   Same device-byte-+0x18 switch to slot 24 in all three.
 3. **fn 0x4e31bb0** (0x4e31cf0): after the slot-70 call returns, copies 32 bytes from the temporary destination it
    gave the library to `[object+0x10] + (word[record+2] & 0x3ff) * [0x75e7000]`; device byte +0x18 non-zero →
    slot 24 at 0x4e31d58.
