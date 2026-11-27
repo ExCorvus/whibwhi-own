@@ -43,6 +43,9 @@ namespace {
 
 std::mutex g_log;
 LoadedImage* g_loaded = nullptr;
+// Measurement: the thread-storage slots of the per-thread call history (see set_call_history_slots).
+unsigned long g_history_slots[4] = {};
+bool g_history_kept = false;
 
 // What a run leaves behind for the log: every network call that was refused, and which bytes of the graphics
 // objects the game wrote into.
@@ -366,6 +369,24 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
         }
         std::fprintf(stderr, "\n");
     }
+    // Measurement: the last four imports this thread called (the border it crossed last), newest first.
+    if (g_history_kept && g_loaded) {
+        std::fprintf(stderr, "[boot]   thread %lu, its last imports called (newest first):", GetCurrentThreadId());
+        for (int i = 0; i < 4; ++i) {
+            const auto number = reinterpret_cast<std::uintptr_t>(TlsGetValue(g_history_slots[i]));
+            if (number == 0 || number > g_loaded->counted.size()) {
+                std::fprintf(stderr, " -");
+                continue;
+            }
+            const UnprovidedImport& u = g_loaded->counted[number - 1];
+            if (u.by_ordinal) {
+                std::fprintf(stderr, " %s!#%u", u.library.c_str(), u.ordinal);
+            } else {
+                std::fprintf(stderr, " %s!%s", u.library.c_str(), u.function.c_str());
+            }
+        }
+        std::fprintf(stderr, "\n");
+    }
     std::fflush(stderr);
     if (code == 0x80000003) {
         // A breakpoint may be handled by the image's own SEH (debug probes); let the process decide. Only when
@@ -513,6 +534,14 @@ int main(int argc, char** argv) {
 
     if (GetEnvironmentVariableA("WHIWHI_CALL_LEDGER", nullptr, 0) > 0) {
         set_count_import_calls(true);  // the game test: count every call through the import table
+        // and keep, per thread, the last four imports it called (shown with a fault).
+        for (int i = 0; i < 4; ++i) {
+            g_history_slots[i] = TlsAlloc();
+        }
+        g_history_kept = set_call_history_slots(g_history_slots);
+        if (!g_history_kept) {
+            std::fprintf(stderr, "[boot] the call history is not kept: a thread-storage slot is 64 or above\n");
+        }
     }
     LoadedImage loaded;
     std::string reason;
