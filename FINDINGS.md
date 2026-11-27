@@ -2254,3 +2254,11 @@ called). Two reads were again open at once on audio.rpf and on data.rpf, and NO 
   +0xeae076, +0xea8d14, +0xea8144, +0xea778b, +0x6c52a9, ...); the run went on to 60 s. Not followed yet. The
   faults of 17:41 (image+0x2942c8) and 17:57 (inside the C runtime) did not come back.
 - The stream channel still opened no stream in the 60 s.
+Follow-up, game test 18:49 (run-20261127-184935, visible): the weave's call counter now also keeps, per thread,
+the last four imports that thread called, and a fault prints them for the faulting thread (weave/loader.cpp
+set_call_history_slots, weave/tools/boot_image.cpp; the stubs use rax, which no call takes an argument in). PASS,
+the copy's folder unchanged, every measurement the same. This run had NO fault at all: no exception line, no
+Windows crash report (the last one is 18:43:25, the run of 18:32), alive at 60 s, frame token 1745, 64 pictures
+presented, no failed read. So the fault at image+0x161b994 does not come in every run; its thread's history is
+not seen yet. Seen in 3 of the last 4 runs: a fault in a different place each time (17:41 image+0x2942c8, 17:57
+the C runtime, 18:32 image+0x161b994; the first two came from the weave's reads, fixed since).
