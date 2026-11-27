@@ -1789,3 +1789,24 @@ so nobody else could repeat them.
   what that function is, is not read), and by falling through after fn 0x43aee50 returns false.
 - Game test 04:06 (visible, built fresh): PASS, the copy's folder unchanged, the seven measurements 41, 7, 13,
   10, 16, 12 and 26 the same; the run still ends at the audio setup's breakpoint.
+## 2026-11-27 - the memory map made repeatable: measure/memory.py (measured, no run)
+
+ExCorvus asleep; read-only work on the copy, no game or GPU run.
+
+- New `measure/memory.py`, 37 of 37 the same: docs/exe-map/MAP.md sections 1.1-1.3, 1.6 and 1.7 (their verified
+  parts). The memory start-up fn 0x1e1cf60 (1,677 bytes, one caller, run-once guard 0x71bf9f8; the value from
+  fn 0x55deb88 tested against 8 and the mask 0x1c2; view size ((fn 0x75140() ^ 1) | 2) << 33;
+  D3D12ConfigureVirtualMemoryX with fn 0x4da2350(ceil(size / 16 GiB)) + 2, int3 on failure; the two views with
+  attributes 0x21/protect 4 and attributes 3/protect 0x801; the loop over 9 pool sizes from 0x71bf9b0 with
+  0x183/0x22004 and 0x283/0x2404, ten 16-byte slots, the four allocators, the pool switch 0x674c270). The
+  streaming page pool fn 0x1e6c110 (951 bytes, one caller; the view globals touched by these two functions only,
+  7 references; 64 KiB pages; XMemAllocatePhysicalPages with 0x380; the pool range with attributes 0x23/protect
+  0x2004 kept in 0x71bfaa8; device methods +0x250 and +0x40; the free list's end 0x1fffff). The page mapper
+  (the leaf 0xf2c460 and its one calling function fn 0xe88f0, stored at .rdata 0x62fc790; the six operation
+  kinds at the code places MAP.md names; lock 0x71bfad8; one XMemMapPhysicalPagesScatter; the GPU batches to queue
+  method +0xf8 with the pool address). The reference counts of section 1.6 (53 in 14, 47 in 34, 59 in 41, 5 in 3,
+  2 in 2) and the buddy allocator sizes and callers (495 and 199 bytes).
+- No correction to the map this time. One blind spot of the script itself was found and closed on the first run
+  (the test against 8 lay one instruction past the window it looked in); the map was right.
+- Not repeated: what the values mean (MAP.md marks those U or I), and section 1.4/1.5, which are reasoning and
+  hosting, not readings.
