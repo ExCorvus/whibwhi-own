@@ -1702,4 +1702,11 @@ back, before any answer. Read in fn 0x43aec40 (the setup) and the places that us
   form is the same everywhere: (object, opcode, magic or value, -1, pointer to a small block, 0). Nothing the
   program sends (commands, the 64-byte records, the setup) carries a volume, a mix or an output channel layout -
   in what was read the program gives the device no mixing instructions. fn 0x785d0 also writes device
-  addresses of two more buffers into record +0x14 / +0x18 on one of its paths; what they are is not read.
+  addresses of two more buffers into record +0x14 / +0x18 on one of its paths; what they are is not read.- Follow-up: the two extra buffers. On the XMA2 path fn 0x785d0 writes into record +0x14 and +0x18 the device
+  address of the stream's own packet data (the pointer it walked with fn 0x55cbd10, after skipped packets; each
+  required to be 2048-byte aligned), and the data's length in 2048-byte packets into the low 12 bits of dword +0
+  (bytes >> 11, at most 0x7ff800 bytes). So these are the decoder's input, pointing straight at the program's
+  packets, not an output area. Nothing read so far gives the program decoded XMA2 samples back.
+- ExCorvus, on where the volume is (2026-11-27): "the volume is in the web"; "it's a weave because it is an
+  active process while the game runs, but the programm itself is a web". The program is the web; the weave is
+  the running process through it. So the volume is to be looked for inside the program, not added by the weave.
