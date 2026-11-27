@@ -2393,3 +2393,24 @@ the audio part of the weave.
   asks Windows from outside to make it a frameless window over the whole of DISPLAY1: done, now 2560 x 1440, style
   0x94000000. The weave and the program are unchanged. The run ended as before at the user-interface fault
   image+0x161b994; the first progress report came at 50.6 s (55.6 s in run 21:01).
+## 2026-11-28 - the flow of pipelines: when they come, how often, how long (game test 00:21, measured)
+
+- weave/d3d12_xs.cpp now counts, for every pipeline request of device slots 62 and 86, the second of the run, the
+  thread, how many were being answered at that moment, how long the answer took, whether the same request came
+  before (its description with each shader named by its contents), its root signature, the answer the program got
+  back, and how many pipelines the program lets go ("[pipeline flow]" lines; numbers only, no answer changed).
+- When: 53 requests at second 2 (all made: the plain PC compute shaders), 6 at second 4, then none until second 54.
+  At seconds 54-56 the program asks for about 53,000 pipelines (12,862 / 37,642 / 2,650), then 30 at 58 and 4,097
+  at 59; the fault follows. The first progress report came at 53.2 s. So the time before the first picture is not
+  spent on pipelines: they come after it, all at once.
+- Repeats: none. Up to the 32,768th request (55.5 s) every request was different (slot 86: 32,673 asked, 32,673
+  different; slot 62: 95 and 95). The program does not ask for the same pipeline again.
+- Threads: 14 of the program's threads asked, at most 8 at the same moment. Answering the first 32,768 took 6.2 s
+  of thread time together (the longest single one 226 ms): writing 3,040 PC shaders 1.9 s, inside the PC device
+  3.7 s.
+- Out: the program let go of no pipeline up to the fault.
+- What the program got back (slot 86): 2,052 requests a pipeline (0x00000000 with an object), 30,621 different
+  requests one and the same answer, 0x80070057 with no object. Slot 62: 53 made, 42 answered 0x80004001 (the
+  program's own compute shaders, not made yet). No request got two different answers.
+- Root signatures (slot 86): every made pipeline uses one and the same root signature; the refused ones use 5,
+  that one among them.
