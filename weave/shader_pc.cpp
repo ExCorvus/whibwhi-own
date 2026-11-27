@@ -374,14 +374,15 @@ struct Origin : Fact {
     unsigned root = 0;  // the register the module's first table names
 };
 
-enum class DescKind { kTable, kSamplerNumber };
+enum class DescKind { kTable, kSampler };
 
 struct Desc : Fact {
     DescKind kind = DescKind::kTable;
     unsigned words = 0;
     ModuleLayoutEntry layout{};
     ModuleResourceEntry resource{};
-    std::uint32_t number_temp = 0;  // the temporary holding the descriptor's place in the weave's heap
+    std::uint32_t pc_register = 0;  // place k of the table (program_layout)
+    std::uint32_t pc_space = 0;     // the table's root parameter p
 };
 
 class Writer {
@@ -409,6 +410,9 @@ private:
     std::uint32_t scc_ = 0, live_ = 0, next_ = 0, a_ = 0, b_ = 0, c_ = 0, d_ = 0, m_[3] = {}, coord_ = 0, texel_ = 0;
     std::bitset<128> written_s_;
     std::bitset<128> token_s_;   // holds the interpolation value: readable only by a move toward M0
+    // Holds a root argument the PC gives as a binding, not as a number (a table's or a buffer's address):
+    // readable only by a move, which carries where it came from.
+    std::bitset<128> address_s_;
     std::bitset<256> written_v_;
     unsigned interp_reg_ = 8;    // the register right after the last one the first table names (pixel)
     // For each scalar-load instruction: the registers it fills with descriptor words (not numbers).
@@ -493,6 +497,9 @@ private:
         if (token_s_[reg]) {
             refuse_register("the interpolation value in s%u is read as a number", reg);
         }
+        if (address_s_[reg]) {
+            refuse_register("s%u holds an address the PC gives as a binding and is read as a number", reg);
+        }
         if (holds_descriptor(reg)) {
             refuse_register("s%u holds a word of a descriptor and is read as a number", reg);
         }
@@ -549,6 +556,7 @@ private:
         if (reg < 128) {
             written_s_.set(reg);
             token_s_.reset(reg);
+            address_s_.reset(reg);
         }
         // The facts about a register follow its last write (compute_writers). That bookkeeping reads the
         // instruction's words on its own; a write it did not foresee would leave a fact standing wrongly.
@@ -778,8 +786,8 @@ private:
         binding.shader_register = reg;
         binding.space = space;
         binding.unbounded = unbounded;
+        binding.root_parameter = space;
         switch (kind) {
-            case PcBindingKind::kArguments:
             case PcBindingKind::kConstantBuffer:
                 binding.id = cb_count_++;
                 break;
@@ -795,18 +803,26 @@ private:
         return result_.bindings.back();
     }
 
-    // One word of the weave's arguments buffer (weave_layout in shader_pc.hpp).
-    DOp argument(std::uint32_t word) {
-        const PcBinding& binding = bind(PcBindingKind::kArguments, 0, weave_layout::kArgumentsSpace, false);
-        return dxbc::constant_buffer_scalar(binding.id, 0, word / 4, static_cast<std::uint8_t>(word % 4));
-    }
-
-    // The place in a weave heap of the descriptor at `address` (a temporary): the address less the heap's own
-    // (word `base_word` of the arguments buffer holds 0 minus it), in units of weave_layout::kDescriptorUnit.
-    void heap_place(std::uint32_t temp, std::uint32_t base_word) {
-        op(Opcode::kIadd, {D(temp), T(temp), argument(base_word)});
-        op(Opcode::kUshr, {D(temp), T(temp), U(4)});
-        static_assert(weave_layout::kDescriptorUnit == 16, "the shift above is for 16-byte places");
+    // A move of a register that holds an address the PC gives as a binding: the copy holds the same.
+    bool move_address(const Instruction& ins, unsigned low) {
+        const Operand& source = ins.src[0];
+        if (source.kind != OperandKind::kSgpr || source.index >= 128 || !address_s_[source.index]) {
+            return false;
+        }
+        const Origin* origin = origin_of(source.index);
+        Origin copy;
+        if (origin != nullptr) {
+            copy = *origin;
+        }
+        wrote_s(low);
+        if (low < 128) {
+            address_s_.set(low);
+        }
+        if (origin != nullptr && low < kTracked) {
+            copy.writer = cur_ins_;
+            origin_[{low, cur_ins_}] = copy;
+        }
+        return true;
     }
 
     const ModuleLayoutEntry* layout_at(unsigned kind, unsigned scalar_register, std::uint32_t byte_offset) const {
@@ -848,17 +864,33 @@ private:
                 if (entry.kind == 4) {
                     continue;  // a fixed sampler takes no register
                 }
-                // Every starting register the first table names is read from the arguments buffer, whatever it
-                // holds (constants, an address); the weave fills that buffer from the game's root arguments.
+                // Root constants are numbers: the n-th starting register is the n-th constant of the root
+                // parameter (b0 of its space). Any other starting register holds an address the PC gives as a
+                // binding, not as a number (program_layout in shader_pc.hpp).
                 const unsigned registers = entry.kind == 0 ? entry.count : entry.kind == 1 ? 2u : 1u;
+                const PcBinding* constants = nullptr;
+                if (entry.kind == 0) {
+                    PcBinding& binding = bind(PcBindingKind::kConstantBuffer, 0, entry.fixed_index, false);
+                    binding.root_constants = true;
+                    binding.values = std::max(binding.values, entry.count);
+                    binding.scalar_register = entry.scalar_register;
+                    constants = &binding;
+                }
                 for (unsigned i = 0; i < registers; ++i) {
                     const unsigned reg = entry.scalar_register + i;
-                    if (reg >= weave_layout::kArgumentRegisters || reg >= 102) {
-                        refuse("a starting register past those the weave's arguments buffer holds");
+                    if (reg >= 102) {
+                        refuse("a starting register past those the pass carries");
                     }
-                    if (!written_s_[reg]) {
-                        op(Opcode::kMov, {D(ts(reg)), argument(reg)});
+                    if (written_s_[reg]) {
+                        continue;
+                    }
+                    if (constants != nullptr) {
+                        op(Opcode::kMov, {D(ts(reg)), dxbc::constant_buffer_scalar(constants->id, 0, i / 4,
+                                                                                    static_cast<std::uint8_t>(i % 4))});
                         written_s_.set(reg);
+                    } else {
+                        written_s_.set(reg);
+                        address_s_.set(reg);
                     }
                 }
                 if (entry.kind == 1 || entry.kind == 3 || entry.kind == 5 || entry.kind == 6) {
@@ -1432,6 +1464,9 @@ private:
                     }
                     return;
                 }
+                if (move_address(ins, low)) {
+                    return;
+                }
                 const Origin* origin = source.kind == OperandKind::kSgpr ? origin_of(source.index) : nullptr;
                 Origin copy;
                 if (origin != nullptr) {
@@ -1767,37 +1802,34 @@ private:
             refuse(not_written(ins, "a load into registers the pass does not carry"));
         }
         if (heap != nullptr) {
-            if (access.words != 4) {
-                refuse(not_written(ins, "a load from the sampler heap that is not one sampler"));
+            if (access.words != program_layout::kSamplerWords) {
+                refuse(not_written(ins, "a load from a sampler table that is not one sampler"));
             }
-            // Which sampler: its place in the weave's sampler heap, from the address computed here at run time.
-            const std::uint32_t number = new_temp();
-            op(Opcode::kIadd, {D(number), rs(access.address_register), U(access.immediate_offset)});
             if (!access.offset_register_is_null) {
-                op(Opcode::kIadd, {D(number), T(number), rs(access.offset_register)});
+                refuse(not_written(ins, "a sampler taken from a table at a place computed at run time"));
             }
-            heap_place(number, weave_layout::kSamplerBaseWord);
+            if (access.immediate_offset % (program_layout::kSamplerWords * 4) != 0) {
+                refuse(not_written(ins, "a sampler that does not start one of the table's 16-byte places"));
+            }
             for (unsigned i = 0; i < access.words; ++i) {
                 wrote_s(access.first_destination + i);
             }
             Desc fact;
             fact.writer = cur_ins_;
-            fact.kind = DescKind::kSamplerNumber;
+            fact.kind = DescKind::kSampler;
             fact.words = 4;
             fact.layout = *heap;
-            fact.number_temp = number;
+            fact.pc_register = access.immediate_offset / (program_layout::kSamplerWords * 4);
+            fact.pc_space = heap->fixed_index;
             desc_[{access.first_destination, cur_ins_}] = fact;
             return;
         }
         if (!table) {
-            refuse("a load through a register that is neither a table nor the sampler heap");
+            refuse("a load through a register that is neither a table nor a sampler table");
         }
         if (!access.offset_register_is_null) {
             refuse("not written: a descriptor taken from a table at a place computed at run time");
         }
-        // The table's address is read before any destination is written: a destination may be the address.
-        const std::uint32_t table_address = new_temp();
-        op(Opcode::kMov, {D(table_address), rs(access.address_register)});
         for (unsigned i = 0; i < access.words; ++i) {
             wrote_s(access.first_destination + i);
         }
@@ -1814,15 +1846,17 @@ private:
             }
             const unsigned size = resource != nullptr && resource->descriptor_words == 8 ? 8u : 4u;
             if (resource != nullptr && position + size <= access.words) {
+                if (entry->offset_words % program_layout::kRecordWords != 0) {
+                    refuse(not_written(ins, "a descriptor that does not start one of the table's 32-byte places"));
+                }
                 Desc fact;
                 fact.writer = cur_ins_;
                 fact.kind = DescKind::kTable;
                 fact.words = size;
                 fact.layout = *entry;
                 fact.resource = *resource;
-                fact.number_temp = new_temp();
-                op(Opcode::kIadd, {D(fact.number_temp), T(table_address), U(access.immediate_offset + position * 4)});
-                heap_place(fact.number_temp, weave_layout::kResourceBaseWord);
+                fact.pc_register = entry->offset_words / program_layout::kRecordWords;
+                fact.pc_space = entry->fixed_index;
                 desc_[{access.first_destination + position, cur_ins_}] = fact;
             }
             position += size;
@@ -1835,8 +1869,6 @@ private:
         bool constant_buffer = false;
         std::uint32_t id = 0;
         std::uint32_t shader_register = 0;
-        bool by_place = false;       // taken from the weave's resource heap at the place in place_temp
-        std::uint32_t place_temp = 0;
     };
 
     BufferSource buffer_source(const Instruction& ins, unsigned descriptor_register) {
@@ -1847,19 +1879,18 @@ private:
         const Desc* fact = desc_at(descriptor_register);
         if (fact != nullptr && fact->kind == DescKind::kTable) {
             if (fact->resource.resource_class == 2) {
-                const PcBinding& binding =
-                    bind(PcBindingKind::kConstantBuffer, 0, weave_layout::kConstantBufferSpace, true);
+                PcBinding& binding = bind(PcBindingKind::kConstantBuffer, fact->pc_register, fact->pc_space, false);
+                binding.offset_words = fact->layout.offset_words;
                 source.constant_buffer = true;
                 source.id = binding.id;
-                source.by_place = true;
-                source.place_temp = fact->number_temp;
+                source.shader_register = binding.shader_register;
                 return source;
             }
             if (fact->resource.resource_class == 0 && fact->words == 4) {
-                const PcBinding& binding = bind(PcBindingKind::kRawBuffer, 0, weave_layout::kRawBufferSpace, true);
+                PcBinding& binding = bind(PcBindingKind::kRawBuffer, fact->pc_register, fact->pc_space, false);
+                binding.offset_words = fact->layout.offset_words;
                 source.id = binding.id;
-                source.by_place = true;
-                source.place_temp = fact->number_temp;
+                source.shader_register = binding.shader_register;
                 return source;
             }
             refuse(not_written(ins, "a read from a table entry that is neither a constant buffer nor a buffer"));
@@ -1868,18 +1899,27 @@ private:
             const Origin* origin = origin_of(descriptor_register);
             if (origin != nullptr) {
                 for (const ModuleLayoutEntry& entry : in_.tables->layout) {
-                    if (entry.kind == 1 && entry.scalar_register == origin->root) {
-                        if (origin->root >= weave_layout::kAddressRegisters) {
-                            refuse(not_written(ins, "a buffer's address in registers past those the weave's "
-                                                    "layout gives a buffer"));
-                        }
-                        PcBinding& binding =
-                            bind(PcBindingKind::kRawBuffer, origin->root, weave_layout::kAddressSpace, false);
-                        binding.scalar_register = origin->root;
-                        source.id = binding.id;
-                        source.shader_register = binding.shader_register;
-                        return source;
+                    if (entry.kind != 1 || entry.scalar_register != origin->root) {
+                        continue;
                     }
+                    // A root buffer: what it is comes from the shader's own list of what it declares.
+                    const ModuleResourceEntry* resource = nullptr;
+                    for (const ModuleResourceEntry& candidate : in_.tables->resources) {
+                        if (candidate.arrival == 1 && candidate.scalar_register == origin->root) {
+                            resource = &candidate;
+                        }
+                    }
+                    if (resource == nullptr || (resource->resource_class != 0 && resource->resource_class != 2)) {
+                        refuse(not_written(ins, "a root buffer that is neither a constant buffer nor a buffer"));
+                    }
+                    const bool constants = resource->resource_class == 2;
+                    PcBinding& binding = bind(constants ? PcBindingKind::kConstantBuffer : PcBindingKind::kRawBuffer,
+                                              0, entry.fixed_index, false);
+                    binding.scalar_register = origin->root;
+                    source.constant_buffer = constants;
+                    source.id = binding.id;
+                    source.shader_register = binding.shader_register;
+                    return source;
                 }
             }
         }
@@ -1888,20 +1928,13 @@ private:
 
     // One component of a 16-byte element of a constant buffer source.
     DOp constant_of(const BufferSource& source, std::uint32_t element, std::uint8_t component) const {
-        if (!source.by_place) {
-            return dxbc::constant_buffer_scalar(source.id, source.shader_register, element, component);
-        }
-        DOp o = dxbc::constant_buffer_ranged(source.id, 0, source.place_temp, 0, element);
-        o.select_one = true;
-        o.select_component = component;
-        return o;
+        return dxbc::constant_buffer_scalar(source.id, source.shader_register, element, component);
     }
 
     // A 16-byte element of a constant buffer source taken at run time: `element` plus one component of `temp`.
     DOp constant_indexed_of(const BufferSource& source, std::uint32_t element, std::uint32_t temp,
                             std::uint8_t components) const {
-        DOp o = source.by_place ? dxbc::constant_buffer_ranged(source.id, 0, source.place_temp, 0, element)
-                                : dxbc::constant_buffer_source(source.id, source.shader_register, element);
+        DOp o = dxbc::constant_buffer_source(source.id, source.shader_register, element);
         o.swizzle = components;
         o.relative_index = true;
         o.relative_temp = temp;
@@ -1911,8 +1944,7 @@ private:
 
     // A buffer source read by byte offset.
     DOp raw_of(const BufferSource& source) const {
-        return source.by_place ? dxbc::resource_source_indexed(source.id, 0, source.place_temp, 0)
-                               : dxbc::resource_source(source.id, source.shader_register);
+        return dxbc::resource_source(source.id, source.shader_register);
     }
 
     void scalar_buffer_load(const Instruction& ins, const AccessInfo& access) {
@@ -2058,11 +2090,23 @@ private:
             image->words != 8) {
             refuse(not_written(ins, "a texture the pass knows nothing about"));
         }
-        // The textures of each kind are one range of the weave's layout; the place was computed at the load.
-        PcBinding& texture = bind(PcBindingKind::kTexture, 0,
-                                  weave_layout::kTextureSpace + static_cast<std::uint32_t>(kind.dimension), true);
+        // Place k of the table of root parameter p: register k of space p (program_layout).
+        const bool known = [&] {
+            for (const PcBinding& binding : result_.bindings) {
+                if (binding.kind == PcBindingKind::kTexture && binding.shader_register == image->pc_register &&
+                    binding.space == image->pc_space) {
+                    return true;
+                }
+            }
+            return false;
+        }();
+        PcBinding& texture = bind(PcBindingKind::kTexture, image->pc_register, image->pc_space, false);
+        if (known && texture.dimension != static_cast<std::uint32_t>(kind.dimension)) {
+            refuse(not_written(ins, "one texture read as two kinds of texture"));
+        }
         texture.dimension = static_cast<std::uint32_t>(kind.dimension);
-        return dxbc::resource_source_indexed(texture.id, 0, image->number_temp, 0);
+        texture.offset_words = image->layout.offset_words;
+        return dxbc::resource_source(texture.id, texture.shader_register);
     }
 
     // A texel read at whole-number coordinates. The PC declares a texture with the kind of number it holds, and
@@ -2157,12 +2201,13 @@ private:
         const unsigned coordinates = kind.coordinates;
         const bool sliced = kind.sliced;
         const DOp texture_operand = texture_of(ins, access, kind);
-        // The sampler: one taken from the heap by a number computed earlier, or the one the shader declares.
+        // The sampler: one taken from a sampler table at its place, or one the root signature holds itself.
         DOp sampler_operand;
         const Desc* sampler = desc_at(access.sampler_register);
-        if (sampler != nullptr && sampler->kind == DescKind::kSamplerNumber) {
-            const PcBinding& heap = bind(PcBindingKind::kSamplerHeap, 0, weave_layout::kSamplerSpace, true);
-            sampler_operand = dxbc::sampler_source_indexed(heap.id, 0, sampler->number_temp, 0);
+        if (sampler != nullptr && sampler->kind == DescKind::kSampler) {
+            PcBinding& binding = bind(PcBindingKind::kSampler, sampler->pc_register, sampler->pc_space, false);
+            binding.offset_words = sampler->pc_register * program_layout::kSamplerWords;
+            sampler_operand = dxbc::sampler_source(binding.id, binding.shader_register);
         } else {
             bool fixed = false;
             for (const ModuleResourceEntry& resource : in_.tables->resources) {
@@ -2171,9 +2216,9 @@ private:
             if (sampler != nullptr || !fixed) {
                 refuse(not_written(ins, "a sampler the pass cannot tell"));
             }
-            // A fixed sampler is part of the game's root signature object, which the weave's layout does not
-            // take in; how the console program receives one (in registers it builds itself) is not read yet.
-            refuse(not_written(ins, "a fixed sampler (the weave's layout has none)"));
+            // A fixed sampler is part of the program's root signature object; how the console program receives
+            // one (in registers it builds itself) is not read yet.
+            refuse(not_written(ins, "a fixed sampler (how the program receives one is not read yet)"));
         }
         // The address: coordinates, then the array slice, as the PC wants them; bias or level beside them.
         unsigned placed = 0;
@@ -2614,22 +2659,17 @@ private:
         global.enable_raw_and_structured_buffers = raw;
         builder.declare_global_flags(global);
         for (const PcBinding& binding : result_.bindings) {
-            switch (binding.kind) {
-                case PcBindingKind::kArguments:
-                    builder.declare_constant_buffer(binding.id, 0, 0, (weave_layout::kArgumentWords + 3) / 4,
-                                                    binding.space);
-                    break;
-                case PcBindingKind::kConstantBuffer:
-                    builder.declare_constant_buffer(binding.id, 0, 0xFFFFFFFFu, 4096, binding.space,
-                                                    binding.indexed);
-                    break;
-                default:
-                    break;
+            if (binding.kind == PcBindingKind::kConstantBuffer) {
+                // Root constants: as many 16-byte elements as their values fill. Any other constant buffer: its
+                // size is not in the shader's tables; the largest a PC constant buffer has is declared.
+                const std::uint32_t elements = binding.root_constants ? (binding.values + 3) / 4 : 4096;
+                builder.declare_constant_buffer(binding.id, binding.shader_register, binding.shader_register,
+                                                elements, binding.space, binding.indexed);
             }
         }
         for (const PcBinding& binding : result_.bindings) {
-            if (binding.kind == PcBindingKind::kSamplerHeap) {
-                builder.declare_sampler(binding.id, 0, 0xFFFFFFFFu, binding.space);
+            if (binding.kind == PcBindingKind::kSampler) {
+                builder.declare_sampler(binding.id, binding.shader_register, binding.shader_register, binding.space);
             }
         }
         for (const PcBinding& binding : result_.bindings) {
@@ -2697,11 +2737,10 @@ private:
 
 const char* pc_binding_kind_name(PcBindingKind kind) {
     switch (kind) {
-        case PcBindingKind::kArguments: return "arguments";
         case PcBindingKind::kConstantBuffer: return "constant buffer";
         case PcBindingKind::kTexture: return "texture";
         case PcBindingKind::kRawBuffer: return "buffer";
-        case PcBindingKind::kSamplerHeap: return "sampler heap";
+        case PcBindingKind::kSampler: return "sampler";
     }
     return "?";
 }
