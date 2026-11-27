@@ -37,6 +37,7 @@
 #include "shader_isa.hpp"        // the console instruction reader
 #include "shader_pc.hpp"         // the pass that writes a PC shader for a console program, and the weave's layout
 #include "shader_program.hpp"    // the packed program inside a shader container, unpacked in memory
+#include "shader_walk.hpp"       // the instruction walk (formats and opcodes), for the ray census
 #include "xg_xs.h"  // the texture description; the library's functions are looked up by name at run time
 #include "xmem.h"   // the memory library's region records; its functions are looked up by name at run time
 
@@ -2261,6 +2262,130 @@ void log_pipeline_refusals() {
     }
 }
 
+// A count (ExCorvus, 2026-11-27: "the missing pipelines is the raytracing"): for every pipeline request of slot 86,
+// whether one of its shaders holds the GPU's ray test against an acceleration structure, and a fingerprint of each
+// shader, counted per answer (made, or the reason it was not made). The ray test is MIMG opcode 0xe6
+// (image_bvh_intersect_ray) or 0xe7 (image_bvh64_intersect_ray) on this GPU generation (LLVM
+// AMDGPU/MIMGInstructions.td, the gfx10 column of mimgopc). Numbers only; nothing of a shader is kept.
+struct RayShader {
+    bool known = false;
+    bool ray = false;
+};
+struct RayAnswer {
+    unsigned long long with_ray = 0, without = 0, unread = 0;
+    std::unordered_set<unsigned long long> ray_shaders, other_shaders;
+};
+SRWLOCK g_ray_lock = SRWLOCK_INIT;
+std::unordered_map<unsigned long long, RayShader> g_ray_shaders;
+std::map<std::string, RayAnswer> g_ray_answers;
+unsigned long long g_ray_requests = 0;
+
+unsigned long long shader_fingerprint(const std::uint8_t* bytes, std::size_t size) {
+    unsigned long long h = 1469598103934665603ull;  // FNV-1a
+    for (std::size_t i = 0; i < size; ++i) {
+        h = (h ^ bytes[i]) * 1099511628211ull;
+    }
+    return h ^ size;
+}
+
+RayShader read_ray_shader(const std::uint8_t* container, std::size_t size) {
+    using namespace whiwhi::weave;
+    RayShader result;
+    const PackedProgram program = read_packed_program(container, size);
+    if (!program.ok()) {
+        return result;
+    }
+    const ModuleProgram module = find_module_program(program.bytes.data(), program.bytes.size());
+    if (!module.found || module.code_offset + module.program_bytes > program.bytes.size()) {
+        return result;
+    }
+    std::vector<std::uint32_t> words(module.program_bytes / 4);
+    std::memcpy(words.data(), program.bytes.data() + module.code_offset, words.size() * 4);
+    std::vector<WalkStep> steps;
+    walk_program(words.data(), words.size(), &steps);
+    result.known = true;
+    for (const WalkStep& step : steps) {
+        if (step.format == WalkFormat::kMimg && (step.opcode == 0xE6 || step.opcode == 0xE7)) {
+            result.ray = true;
+            break;
+        }
+    }
+    return result;
+}
+
+void log_ray_census_locked() {
+    logf("[ray census] after %llu pipeline requests of slot 86 (%zu different shaders read):\n", g_ray_requests,
+         g_ray_shaders.size());
+    for (const auto& item : g_ray_answers) {
+        const RayAnswer& a = item.second;
+        logf("[ray census]   %s: %llu with the ray test, %llu without, %llu not read; different shaders: %zu with the "
+             "ray test, %zu without\n",
+             item.first.c_str(), a.with_ray, a.without, a.unread, a.ray_shaders.size(), a.other_shaders.size());
+    }
+}
+
+void note_ray_census(const std::vector<std::uint8_t>& stream, const std::string& answer) {
+    std::vector<std::pair<const std::uint8_t*, std::size_t>> containers;
+    for (std::size_t at = 0; at + 4 <= stream.size();) {
+        unsigned type = 0;
+        std::memcpy(&type, stream.data() + at, 4);
+        std::size_t payload_at = 0, whole = 0;
+        if (!stream_subobject(type, payload_at, whole) || at + whole > stream.size()) {
+            break;
+        }
+        if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS || type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS) {
+            D3D12_SHADER_BYTECODE code;
+            std::memcpy(&code, stream.data() + at + payload_at, sizeof(code));
+            if (code.pShaderBytecode && code.BytecodeLength && code.BytecodeLength <= 0x1000000 &&
+                can_read(code.pShaderBytecode, static_cast<std::size_t>(code.BytecodeLength))) {
+                containers.emplace_back(static_cast<const std::uint8_t*>(code.pShaderBytecode),
+                                        static_cast<std::size_t>(code.BytecodeLength));
+            }
+        }
+        at += whole;
+    }
+    std::vector<std::pair<unsigned long long, RayShader>> read;
+    for (const auto& c : containers) {
+        const unsigned long long print = shader_fingerprint(c.first, c.second);
+        AcquireSRWLockShared(&g_ray_lock);
+        const auto found = g_ray_shaders.find(print);
+        const bool have = found != g_ray_shaders.end();
+        RayShader shader = have ? found->second : RayShader{};
+        ReleaseSRWLockShared(&g_ray_lock);
+        if (!have) {
+            shader = read_ray_shader(c.first, c.second);
+        }
+        read.emplace_back(print, shader);
+    }
+    AcquireSRWLockExclusive(&g_ray_lock);
+    RayAnswer& a = g_ray_answers[answer];
+    bool ray = false, unread = false;
+    for (const auto& r : read) {
+        g_ray_shaders.emplace(r.first, r.second);
+        unread = unread || !r.second.known;
+        ray = ray || r.second.ray;
+        (r.second.ray ? a.ray_shaders : a.other_shaders).insert(r.first);
+    }
+    if (ray) {
+        ++a.with_ray;
+    } else if (unread || read.empty()) {
+        ++a.unread;
+    } else {
+        ++a.without;
+    }
+    const unsigned long long n = ++g_ray_requests;
+    if (n >= 1024 && (n & (n - 1)) == 0) {
+        log_ray_census_locked();
+    }
+    ReleaseSRWLockExclusive(&g_ray_lock);
+}
+
+void log_ray_census() {
+    AcquireSRWLockShared(&g_ray_lock);
+    log_ray_census_locked();
+    ReleaseSRWLockShared(&g_ray_lock);
+}
+
 // ---- a record of the game's root signatures next to its shader modules (a measurement) ---------------------
 //
 // WHIWHI_ROOT_SIGNATURE_RECORD=<file> writes, on the user's PC: every root signature the game makes (device slot
@@ -3147,6 +3272,10 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
     }
     want(returns_to, "7 pipelines | slot 86, a pipeline from a stream | %s%s", hr == 0 ? "made" : "not made: ",
          reason.c_str());
+    if (stream && size > 0 && size <= 0x10000 && can_read(stream, static_cast<std::size_t>(size))) {
+        note_ray_census(std::vector<std::uint8_t>(stream, stream + static_cast<std::size_t>(size)),
+                        hr == 0 ? std::string("made") : "not made: " + reason);
+    }
     const unsigned long long count = hr == 0 ? ++made : ++refused;
     if (n <= 8 || (count & (count - 1)) == 0) {
         logf("device slot 86 #%llu: %llu bytes, subobject types %s, %zu shader(s) written -> 0x%08lx%s%s; %llu "
@@ -5167,6 +5296,7 @@ void log_memory_kinds() {
 unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
     log_memory_kinds();
     log_pipeline_refusals();
+    log_ray_census();
     write_shader_check();
     write_wants();
     // Per kind of object: which offsets of the image's area are not zero in at least one live object.
