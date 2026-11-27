@@ -149,6 +149,7 @@ struct Factory {
 struct File {
     Com com;
     HANDLE handle = nullptr;
+    std::wstring path;  // the file on the PC, for the log only
 };
 
 constexpr long kPending = static_cast<long>(0x8000000AL);  // E_PENDING: no result yet
@@ -195,7 +196,7 @@ bool is_object(const std::set<const void*>& set, const void* object) {
     return set.count(object) != 0;
 }
 
-File* make_file(HANDLE h);
+File* make_file(HANDLE h, const std::wstring& path);
 StatusArray* make_status_array(unsigned long capacity);
 Queue* make_queue(const unsigned char* desc);
 
@@ -243,7 +244,7 @@ long __stdcall f_openfile(Factory* self, const wchar_t* path, const GUID* riid, 
         }
         return 0x80004005L;  // E_FAIL
     }
-    *out = make_file(h);
+    *out = make_file(h, mapped);
     return 0;
 }
 long __stdcall f_createstatusarray(Factory* self, unsigned long capacity, const wchar_t* name, const GUID* riid,
@@ -342,10 +343,11 @@ void** file_vtable() {
     return vt;
 }
 
-File* make_file(HANDLE h) {
+File* make_file(HANDLE h, const std::wstring& path) {
     auto* f = new File{};
     f->com.vt = file_vtable();
     f->handle = h;
+    f->path = path;
     remember_object(g_files, f);
     return f;
 }
@@ -486,6 +488,24 @@ bool read_exactly(HANDLE file, unsigned long long offset, void* to, unsigned lon
     return true;
 }
 
+// The failure line of a read: which file, how large it is on the PC, and where the piece lies against its end.
+void log_read_failure(unsigned long long number, const File* file, unsigned long long options,
+                      unsigned long long offset, unsigned long source_bytes, unsigned long destination_bytes,
+                      unsigned long error) {
+    LARGE_INTEGER size{};
+    const bool sized = GetFileSizeEx(file->handle, &size) != 0;
+    const unsigned long long file_bytes = sized ? static_cast<unsigned long long>(size.QuadPart) : 0;
+    const unsigned long long end = offset + source_bytes;
+    logf("request #%llu: reading %lu bytes at offset 0x%llx failed, error %lu - file \"%ls\", %s%llu bytes (0x%llx); "
+         "the piece ends at 0x%llx, %s; option %llu, %lu bytes asked for at the destination\n",
+         number, source_bytes, offset, error, file->path.c_str(), sized ? "" : "size not read, ", file_bytes,
+         file_bytes, end,
+         !sized ? "against an unknown end" : offset >= file_bytes ? "and starts at or past the file's end"
+                                           : end > file_bytes  ? "past the file's end"
+                                                               : "inside the file",
+         options, destination_bytes);
+}
+
 // A request is eight 64-bit words. Layout as the image fills it, read off a run (every request the image made
 // for its shader package had this shape) - see docs/console-libs/xcrdapi-dstorage.md:
 //   +0x00 options      0 = copy the file bytes; 1 = the file bytes are one zlib stream to be decoded
@@ -546,8 +566,7 @@ long carry_out(Queue* q, const unsigned char* r, unsigned long long number) {
     unsigned long error = 0;
     if (options == 0) {
         if (!read_exactly(file->handle, offset, reinterpret_cast<void*>(destination), source_bytes, error)) {
-            logf("request #%llu: reading %lu bytes at offset 0x%llx failed, error %lu\n", number, source_bytes,
-                 offset, error);
+            log_read_failure(number, file, options, offset, source_bytes, destination_bytes, error);
             return kFail;
         }
         if (number <= 3) {
@@ -559,8 +578,7 @@ long carry_out(Queue* q, const unsigned char* r, unsigned long long number) {
 
     std::vector<std::uint8_t> packed(source_bytes);
     if (!read_exactly(file->handle, offset, packed.data(), source_bytes, error)) {
-        logf("request #%llu: reading %lu bytes at offset 0x%llx failed, error %lu\n", number, source_bytes, offset,
-             error);
+        log_read_failure(number, file, options, offset, source_bytes, destination_bytes, error);
         return kFail;
     }
     const whiwhi::weave::InflateOutcome o = whiwhi::weave::inflate_zlib(
