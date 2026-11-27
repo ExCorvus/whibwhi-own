@@ -1966,3 +1966,18 @@ Nothing in the weave was changed. Whether any of the newly reachable places is r
   0x1c82b20, and fn 0x120790 with fn 0xc9e350, reached through a table), and when the stamp stands still for about
   30 seconds the program stops itself. Its progress reports are therefore the measure of whether the web holds; the
   frame pacer, the timing table and the frame statistics are threads it watches, not parts of it.
+## 2026-11-27 - which files the program asks Windows for (game test 13:37, file trace on, measured)
+
+The weave's file trace (`WHIWHI_FILE_TRACE=1`) in a visible game test; the run ended at the sound device's stop
+as before (image+0x43ad94e).
+- 26 file calls. The program checks and opens **12 of the installation's 22 archives** through its package drive
+  G:\ - appdata0, common, movies, shaders, anim, data, levels, navmeshes, packs, textures, audio, script - and
+  every one is found. This corrects the earlier reading that only 5 were opened: that count came from the
+  storage requests, not from the files the program opens.
+- One file beside the program: `xgameruntime.dll` in the work folder (found: the weave's own). Nothing else is
+  looked for next to the program; so far "all files together" is not what stops it.
+- One file is not found: `t:\telemetrycache.dat`, error 3 (path not found). The program names a second drive, T:,
+  which the weave does not answer. What the program does with that failure, and what T: is on the console, is not
+  read yet.
+- The window pictures did not work in this run (the tool found no visible window although the log says the
+  program showed it); not followed.
