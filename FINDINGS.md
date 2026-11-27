@@ -2066,3 +2066,35 @@ scripts the same):
 Not measured, the weave's choices (each logged once when used): "taken out up to" is moved by the amount the program
 names in opcode 0x12 (inferred: the program never writes it); the ring is marked empty again when both positions
 meet after a take; a voice starts and loops at whole 2048-byte packets, because FFmpeg decodes whole packets.
+## 2026-11-27 - the game test judges the whole: the wants ledger, and the first picture of the whole (game test 15:42, measured)
+
+- The game test is the real scenario: the whole installation runs as it is started, and the verdict no longer
+  hangs on one error. Two rules stay hard (the copy's folder unchanged; every script in measure/ still holds).
+  Beyond them a run is judged against the baseline's whole: every meeting point between the program and the weave
+  must be the same or better, and every import provided in the baseline still provided (scripts/game_test.ps1).
+- The meeting points come from a new record the weave writes while the program runs, the wants ledger
+  (weave/d3d12_xs.cpp, WHIWHI_WANTS_LEDGER; the game test sets it): one line per step of the program's flow, what
+  the program asked for there, and what the weave gave, with a count, the time of the first one and the place in
+  the program it came from. Numbers and words only. The game test folds it into whole.txt: each point attached,
+  partly or missing.
+- Why "alive at 60 s" is no longer a rule (measured): every run since 11:00 reaches the program's breakpoint at
+  image+0x43ad94e exactly once, and Windows' application log has a crash entry for that breakpoint for every one
+  of them, including the runs that counted as alive. The program's own handler for unhandled errors
+  (SetUnhandledExceptionFilter, imported by the executable) hands it to Windows, which ends the process; other
+  threads go on presenting frames meanwhile. Whether that happens before or after the 60 s mark is Windows'
+  timing, not a second cause. The breakpoint itself is reached because the weave's stream channel (xapu.dll)
+  answers XApuConnect "not provided": the stop points to the sound device, but its cause is in the weave.
+- Run 15:42 (run-20261127-154207, visible): copy's folder unchanged, 13 measurements the same, PASS. The whole of
+  the graphics library: 19 points attached (all six kinds of descriptor heap, every kind of view, the sampler
+  copies, the builder's 53 compute pipelines, triangle topology, pipelines, root signatures and tables set on the
+  lists), 1 partly (the program's graphics pipelines: 2,905 made, 47,564 not made), 19 missing (the program's own
+  compute shaders, slot 62, and their lookup, slot 67, 2,689 each; base pipelines, slot 57, 25,450; samplers,
+  slot 61, 43; the rectangle topology and all 54 draws; 13 command-list methods).
+- A mistake of the gate's own, found in its first run: it counted the "not provided" points as attached (35
+  attached, 3 missing). Its pattern looked only at the answer's words. Corrected and counted again from the same
+  ledger.
+- Every pipeline the weave's translator refuses is a C++ error the weave throws and catches itself on the program's
+  worker threads: about 47,000 in about 8 s of this run. They do not reach the program; what they cost in time on
+  those threads is not measured.
+- Not in the ledger yet: the weave's other libraries (sound chip, stream channel, memory, files, runtime). They
+  appear only through the import list so far.
