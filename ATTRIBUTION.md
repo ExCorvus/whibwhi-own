@@ -38,7 +38,7 @@ repository; they are kept because the ideas were ExCorvus's, not because they de
     original executable; a shell, not an emulator.
 13. **One singular piece of software — a shell that wires the game into it.** The game is mapped into the shell,
     its imports resolved to the shell's shims, its memory hosted by the shell; the whole is one program.
-14. **A weave, not a wrapper (the latest find, 2026-11-26).** By its code the shell is the same as a shell, but it
+14. **A weave, not a wrapper (the latest find, 2026-11-26).** By its code the web is the same as a shell, but it
     is not wrapped around the executable: it is woven all through it. Its entry point is neither outside the code
     nor inside it, but in the middle, like a crochet: every loop holds the loops beside it, and pulling the wrong
     thread makes the whole system collapse. This corrects item 2: looking from outside was not the answer either.
