@@ -16,7 +16,8 @@
 #             (default: the game starts hidden).
 #   -Out      where the records go (default %LOCALAPPDATA%\whiwhi\game-tests).
 #
-# Verdict FAIL when: the game folder changed; the baseline run was alive at its end and this one is not; or an
+# Verdict FAIL when: the game folder changed; a script in measure/ (run on the copy before the game starts) says
+# a result of FINDINGS.md no longer holds; the baseline run was alive at its end and this one is not; or an
 # import the game called in the baseline is not provided now. Everything else that differs is listed as a note.
 # The last verdict and a hash of the build it ran on are kept in <Out>\last.txt, so a commit can check that the
 # build being committed is the one that passed.
@@ -74,6 +75,51 @@ $dirty = @(git -C $repo status --porcelain -- weave scripts).Count
 
 $before = Get-Listing $Game
 $exeHashBefore = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash
+
+# The measurements (measure/README.md) run on the copy first, one after another, before the game starts: each
+# script checks results of FINDINGS.md on the file its usage line names, read-only. One that says DIFFERS makes
+# the verdict FAIL; the game still runs, so the run's record is complete. Their output goes to measure.txt.
+$measureLog = Join-Path $run 'measure.txt'
+$measureFail = New-Object System.Collections.Generic.List[string]
+$measureDir = Join-Path $repo 'measure'
+$measureTools = Join-Path $outFull 'measure-tools'
+$ErrorActionPreference = 'Continue'  # a line a tool writes to its error output is part of its record, not a stop
+foreach ($script in Get-ChildItem -LiteralPath $measureDir -File | Where-Object { $_.Extension -in '.py', '.cpp' } | Sort-Object Name) {
+    $text = Get-Content -LiteralPath $script.FullName -Raw
+    $usage = [regex]::Match($text, 'game folder>\\+([A-Za-z0-9_.]+)')
+    if (-not $usage.Success) {
+        # The shared readers name no file: they are not measurements. A script that checks results and names no
+        # file would be skipped without a word, so that is a failure, not a skip.
+        if ($text -match '(?m)(\.same\(|^\s*same\(")') { $measureFail.Add("measure/$($script.Name) names no file of the game folder in its usage line") }
+        continue
+    }
+    $measureInput = Join-Path $Game $usage.Groups[1].Value
+    Add-Content -LiteralPath $measureLog -Value "---- $($script.Name) on $($usage.Groups[1].Value)" -Encoding utf8
+    if ($script.Extension -eq '.py') {
+        $output = & python $script.FullName $measureInput 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+    } else {
+        # A C++ measurement is compiled with the same compiler as the weave and run beside the PC graphics
+        # library of the weave's build.
+        New-Item -ItemType Directory -Force -Path $measureTools | Out-Null
+        Copy-Item (Join-Path $build 'd3d12_vk.dll'), (Join-Path $build 'd3d12core.dll') $measureTools -Force
+        $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
+        $compiled = & cmd /c "`"$vcvars`" >nul && cd /d `"$measureTools`" && cl /nologo /std:c++17 /EHsc /O2 `"$($script.FullName)`"" 2>&1 | ForEach-Object { "$_" }
+        $tool = Join-Path $measureTools ($script.BaseName + '.exe')
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tool)) {
+            $output = @('not compiled:') + $compiled
+            $code = 1
+        } else {
+            $output = & $tool $measureInput 2>&1 | ForEach-Object { "$_" }
+            $code = $LASTEXITCODE
+        }
+    }
+    Add-Content -LiteralPath $measureLog -Value $output -Encoding utf8
+    $last = @($output | Where-Object { $_ -match 'the same as FINDINGS' }) | Select-Object -Last 1
+    Write-Host "measure/$($script.Name): $(if ($last) { $last } else { "exit $code" })"
+    if ($code -ne 0) { $measureFail.Add("measure/$($script.Name): $(if ($last) { $last } else { "exit $code" }) (measure.txt)") }
+}
+$ErrorActionPreference = 'Stop'
 $log = Join-Path $run 'run.err'
 $env:WHIWHI_CALL_LEDGER = Join-Path $run 'calls.tsv'
 $env:DISABLE_RTSS_LAYER = '1'
@@ -164,6 +210,7 @@ $summary = [ordered]@{
     last_frame_token = $frame; pipelines_made = $made; not_provided_answers = @($notProvided).Count
     imports_called_not_in_map = $unmappedImports; answers_not_in_map = $unmappedAnswers
     progress_reports = $progressReports; progress_longest_unchanged_s = $progressLongest
+    measurements_differing = $measureFail.Count
 }
 $summary.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, $_.Value } | Set-Content -LiteralPath (Join-Path $run 'summary.txt') -Encoding utf8
 
@@ -171,6 +218,7 @@ $summary.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, $_.Value } | Se
 $fail = New-Object System.Collections.Generic.List[string]
 $note = New-Object System.Collections.Generic.List[string]
 if (-not $unchanged) { $fail.Add('THE GAME FOLDER CHANGED') }
+foreach ($m in $measureFail) { $fail.Add("a FINDINGS result no longer holds on this copy: $m") }
 if (-not (Test-Path $ledger)) { $fail.Add('no call ledger was written (the run ended before its report)') }
 $baseline = Join-Path $outFull 'baseline'
 if (Test-Path (Join-Path $baseline 'summary.txt')) {
