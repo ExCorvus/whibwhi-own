@@ -1,16 +1,12 @@
 // Interface of our xgameruntime.dll: the Xbox Game Runtime, answered on a PC.
 //
 // The game LoadLibraryExW's "xgameruntime.dll" (fn 0x55e29dc) and GetProcAddress's InitializeApiImpl,
-// InitializeApiImplEx, InitializeApiImplEx2, QueryApiImpl, UninitializeApiImpl. On a PC there is no Xbox
-// service to connect to; the skeleton answers initialize/uninitialize with success (a local-only runtime)
-// and QueryApiImpl with E_NOINTERFACE until an interface is really provided. QueryApiImpl takes two
-// identifiers and the output slot (measured at the game's call sites); each distinct pair is logged once.
-//
-// One interface is provided: the system interface (provider {e349bd1a-fc20-4e40-b99c-4178cc6b409f}, interface
-// {1861cf2e-e18b-4834-a9f5-b4a4e6efb4cf}), with one method answered - the one at offset 0x20, which has the
-// argument list of the public XSystemGetXboxLiveSandboxId(size, text, used). It answers the sandbox name this
-// PC stores, or "RETAIL" when it stores none (the default Microsoft documents). Every other method of that
-// object is logged and answered "not implemented".
+// InitializeApiImplEx, InitializeApiImplEx2, QueryApiImpl, UninitializeApiImpl. Windows has that runtime itself
+// (System32\xgameruntime.dll): the start, the end and every interface pair measured with it are Windows' own
+// answers, passed through unchanged. Two pairs Windows also has are held by ExCorvus's decision (networking and
+// the signed-in user, rule 3), and a pair not measured yet is refused and logged once, so each one is measured
+// before Windows answers it. QueryApiImpl takes two identifiers and the output slot (measured at the game's call
+// sites).
 #ifndef WHIWHI_WEAVE_XGAMERUNTIME_H
 #define WHIWHI_WEAVE_XGAMERUNTIME_H
 
