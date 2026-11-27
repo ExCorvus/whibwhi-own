@@ -2,7 +2,7 @@
 the AMD rectangle list and quad list', 'can the PC reach the GPU's own rectangle and quad modes?', and the class
 the draw path makes for the pipeline key).
 
-    python measure/topology.py <path to the executable in your copy>
+    python measure/topology.py "<your game folder>\\game_scarlett_master.exe"
 
 Only the executable's part is repeated here; the parts read in AMD's public code and in the installed driver
 depend on the reader's own PC and are described in FINDINGS.md.
