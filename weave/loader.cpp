@@ -27,14 +27,56 @@ constexpr unsigned kRelocation64 = 10;        // IMAGE_REL_BASED_DIR64
 
 UnprovidedHandler g_unprovided_handler = nullptr;
 bool g_count_import_calls = false;
+// Measurement: four thread-storage slots (each below 64, so they lie in the thread's own block at gs:[0x1480 +
+// 8 * slot]) that hold, per thread, the numbers (index + 1) of the last four imports that thread called.
+DWORD g_history_slots[4] = {};
+bool g_keep_history = false;
 
 // A counting stub, 16 bytes: lock inc qword [rip + to count] ; jmp qword [rip + to target] ; int3 int3.
 // The counts and targets lie in one block after all the stubs, 16 bytes per import (count, target), so both
 // distances are the same for every stub.
+// With the call history kept, the stub first moves the thread's last three numbers one place on and writes its
+// own number (index + 1) into the first place, using rax (not an argument register, and free at a call): 96 bytes.
 constexpr std::size_t kCountingStubSize = 16;
-void write_counting_stub(std::uint8_t* at, std::int32_t data_distance) {
-    const std::int32_t to_count = data_distance - 8;   // from the end of the 8-byte increment
-    const std::int32_t to_target = data_distance + 8 - 14;  // from the end of the 6-byte jump, to the second word
+constexpr std::size_t kHistoryStubSize = 96;
+
+std::size_t counting_stub_size() {
+    return g_keep_history ? kHistoryStubSize : kCountingStubSize;
+}
+
+void put_gs_move(std::uint8_t*& at, std::uint8_t opcode, DWORD slot) {
+    const std::int32_t place = static_cast<std::int32_t>(0x1480 + 8 * slot);
+    *at++ = 0x65;  // gs:
+    *at++ = 0x48;  // 64-bit
+    *at++ = opcode;  // 0x8B load into rax, 0x89 store rax
+    *at++ = 0x04;
+    *at++ = 0x25;
+    std::memcpy(at, &place, 4);
+    at += 4;
+}
+
+void write_counting_stub(std::uint8_t* start, std::int32_t data_distance, std::size_t index) {
+    std::uint8_t* at = start;
+    if (g_keep_history) {
+        for (int i = 3; i > 0; --i) {
+            put_gs_move(at, 0x8B, g_history_slots[i - 1]);
+            put_gs_move(at, 0x89, g_history_slots[i]);
+        }
+        const std::int32_t place = static_cast<std::int32_t>(0x1480 + 8 * g_history_slots[0]);
+        const std::int32_t number = static_cast<std::int32_t>(index + 1);
+        *at++ = 0x65;
+        *at++ = 0x48;
+        *at++ = 0xC7;  // mov qword gs:[place], number
+        *at++ = 0x04;
+        *at++ = 0x25;
+        std::memcpy(at, &place, 4);
+        at += 4;
+        std::memcpy(at, &number, 4);
+        at += 4;
+    }
+    const std::int32_t used = static_cast<std::int32_t>(at - start);
+    const std::int32_t to_count = data_distance - used - 8;        // from the end of the 8-byte increment
+    const std::int32_t to_target = data_distance + 8 - used - 14;  // from the end of the 6-byte jump, to the target
     at[0] = 0xF0;
     at[1] = 0x48;
     at[2] = 0xFF;
@@ -43,8 +85,9 @@ void write_counting_stub(std::uint8_t* at, std::int32_t data_distance) {
     at[8] = 0xFF;
     at[9] = 0x25;
     std::memcpy(at + 10, &to_target, 4);
-    at[14] = 0xCC;
-    at[15] = 0xCC;
+    for (std::uint8_t* pad = at + 14; pad < start + counting_stub_size(); ++pad) {
+        *pad = 0xCC;
+    }
 }
 
 std::uintptr_t unprovided_called(const UnprovidedImport* which) {
@@ -282,6 +325,18 @@ void set_count_import_calls(bool count) {
     g_count_import_calls = count;
 }
 
+bool set_call_history_slots(const unsigned long slots[4]) {
+    for (int i = 0; i < 4; ++i) {
+        if (slots[i] >= 64) {
+            g_keep_history = false;
+            return false;
+        }
+        g_history_slots[i] = slots[i];
+    }
+    g_keep_history = true;
+    return true;
+}
+
 void set_unprovided_handler(UnprovidedHandler handler) {
     g_unprovided_handler = handler;
 }
@@ -446,7 +501,7 @@ bool load_image(const Image& image, const ImportResolver& resolve, LoadedImage& 
     std::uint8_t* counting = nullptr;
     std::size_t code_bytes = 0;
     if (g_count_import_calls && !targets.empty()) {
-        code_bytes = (targets.size() * kCountingStubSize + 0xFFF) & ~static_cast<std::size_t>(0xFFF);
+        code_bytes = (targets.size() * counting_stub_size() + 0xFFF) & ~static_cast<std::size_t>(0xFFF);
         out.counting_bytes = code_bytes + targets.size() * 16;
         counting = static_cast<std::uint8_t*>(
             VirtualAlloc(nullptr, out.counting_bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
@@ -470,11 +525,11 @@ bool load_image(const Image& image, const ImportResolver& resolve, LoadedImage& 
                 target = stub;
             }
             if (counting) {
-                std::uint8_t* stub = counting + index * kCountingStubSize;
+                std::uint8_t* stub = counting + index * counting_stub_size();
                 std::uint8_t* data = counting + code_bytes + index * 16;
                 std::memset(data, 0, 8);
                 std::memcpy(data + 8, &target, 8);
-                write_counting_stub(stub, static_cast<std::int32_t>(data - stub));
+                write_counting_stub(stub, static_cast<std::int32_t>(data - stub), index);
                 out.counted.push_back(UnprovidedImport{lib.name, fn.name, fn.ordinal, fn.by_ordinal});
                 out.counted_connected.push_back(connected);
                 target = stub;
