@@ -31,4 +31,7 @@ The last line says how many statements are the same as FINDINGS.md; the exit cod
 
 | `topology.py` | FINDINGS 2026-11-27, the topology entries: the renderer's topology field, the places that set rectangle lists (0x11) and quad lists (0x13), the rectangle drawn from three vertices, the class the draw path makes for the pipeline key |
 
+| `dxil_bitcode.py` | not a measurement: the shared reader of shader containers and of the LLVM bitcode inside them (record kinds, declared functions, metadata text) |
+| `builder_shaders.py` | FINDINGS 2026-11-26/27 about the installation's `XboxBvhBuilder.dll`: its 52 shaders, their parts, the root signature bits 0x3000000, stages and thread groups, insertvalue, the 33 console shader compiler functions, the 32-lane switch. Takes the library's path, not the executable's. Not yet repeated here: the operation numbers of those functions |
+
 More scripts are added as the earlier results are turned into repeatable steps.
