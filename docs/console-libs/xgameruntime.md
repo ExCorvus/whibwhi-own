@@ -15,6 +15,9 @@ How to read the markings: **V** = read in the image's code or data, **I** = infe
   for a size); one caller, fn `0x3dda560`, then compares the text with `RETAIL`, `CERT`, `RKTR.99`, `CERT.DEBUG`
   or a text beginning `RKTR` and stops at a breakpoint of its own (image+`0x3dda76b`) when none matches. This is
   the one refusal among the pairs that did stop the game (section 3 said none does; that was wrong for this one).
+  **Corrected 2026-11-27 (measure/console_libs.py):** "one caller" was the view of one run. fn `0x55deaf4` has
+  four callers: fn `0x2214040` (at `0x221419b`), fn `0x2228fd0` (`0x22297ed`), fn `0x3dda560` (`0x3dda597`, the one
+  that compares) and fn `0x5614a40` (`0x5614a91`). What the other three do with the text is not read. (V)
 - **I** The argument list and the values are the public `XSystemGetXboxLiveSandboxId`. The weave answers the
   sandbox name this PC stores, or `RETAIL` when it stores none, which is the default Microsoft's public page
   documents. The methods at `+0x18` and `+0x28` (fn `0x55dd13c`, fn `0x55dd1d0`; three arguments, an error code
@@ -142,6 +145,12 @@ ignored). Its own 18 wrappers use, in this order: `+0x18`(a0, a1-as-byte), `+0x2
 `+0x68`(a0,a1,a2), `+0x70`(a0,a1,a2), `+0x78`(a0,a1), `+0x80`(a0,a1,a2), `+0x88`(a0), `+0x98`(a0,a1,a2),
 `+0xb0`(a0,a1,a2), `+0xc8`(a0), `+0xe8`(). (V)
 
+- `+0x30` (wrapper fn `0x55ddd30`): section 7 item 7 said no caller at all. **Corrected 2026-11-27
+  (measure/console_libs.py, first seen with Ghidra):** a small piece at `0x2213b10` without a `.pdata` entry checks
+  `[rcx+0x10] != 0` and `[rcx+0x28] == 0` (else it returns `0x80004005`), stores `rdx` at `+0x28` and tail-jumps
+  into the wrapper (at `0x2213b34`). That piece is called from ten functions (`0x223c950`, `0x28d1130`,
+  `0x28d1a30`, `0x28d26e0`, `0x28d2770`, `0x28d2980`, `0x28d2f40`, `0x28d30a0`, `0x28d3660`, `0x28d39a0`). (V)
+
 - Example: `0x1d10a0b` in fn `0x1d109e0` passes two integers (the same two it has just stored into its own object)
   and one out slot to **+0x60**; on failure it stores the code and jumps back to `0x1d109ec`. (V)
 - Example: `0x41f6c1b` in fn `0x41f6bf0` pre-sets a field to `0x0000000100000001`, passes (1, 1, &that field) to
@@ -177,6 +186,9 @@ Methods used, in order: `+0x18`(a0,a1), `+0x20`(a0), `+0x28`(a0,a1), `+0x38`(a0,
 
 - Methods: `+0x40`(a0,a1), `+0x48`(a0), `+0x50`(a0), `+0x58`(a0), `+0x60`(a0,a1), `+0x68`(a0,a1,a2),
   `+0x70`(a0) — **no caller at all in this build**, `+0x78`(a0,a1), `+0x80`(a0,a1,a2), `+0xa8`(a0,a1,a2). (V)
+- **Corrected 2026-11-27 (measure/console_libs.py):** `+0x70` has a caller. Its wrapper fn `0x55deff0` is reached
+  by a piece at `0x3e41b40` without a `.pdata` entry (if `rcx` is not null, `rcx = [rcx]`, then a tail jump at
+  `0x3e41b48`), which fn `0x3e40e80` calls at `0x3e410d9`. (V)
 - Example: `0x5a75f99` in fn `0x5a75f80` calls **+0x48** with the address of a field, and on failure jumps to the
   function's exit (`0x5a75fc9`), i.e. the object is left uninitialised. (V)
 
@@ -285,6 +297,10 @@ arguments). (V)
   `+0x60`(a0,a1,a2), `+0x70`(a0,a1,a2), `+0x80`(a0,a1,a2), `+0x88`(a0,a1), `+0x90`(a0,a1,a2), `+0x98`(a0,a1,a2),
   `+0x110`(a0), `+0x128`(a0,a1), `+0x130`(a0,a1), `+0xc8`(a0,a1,a2), `+0xd0`(a0), `+0x138`(a0,a1,a2) — this last
   one has **no caller at all in this build**. (V)
+  **Corrected 2026-11-27 (measure/console_libs.py):** its wrapper fn `0x55e0684` is reached by a piece at
+  `0x2937bf0` without a `.pdata` entry (`r8 = [rcx]`, an address in `r9`, `ecx = 1`, `edx = 0`, tail jump at
+  `0x2937c01`). fn `0x1ce6f10` keeps that piece's address (at `0x1ce6f8b`, into `+0x50` of a record, with
+  `0x1167b0` at `+0x58`) for a later call. Whether that call happens in a run is not read. (V)
 - Example: `0x1ce6e9f` in fn `0x1ce6e20` passes (0x21, &(object+0x50)); only on success does it set a byte at
   `+0x71` and continue into the rest of the work. (V)
 - Example: `0x293bd70` (a function with no direct caller, so it runs as a callback) first calls the wrapper for
@@ -436,6 +452,9 @@ with success (as the skeleton does) changes nothing that the game reads.
    known to be asked before the device; the order after that is untested.
 7. **The two methods with no caller at all** (fn `0x55ddd30` for #2 `+0x30`, fn `0x55e0684` for #15 `+0x138`) and
    the whole interface #5's `+0x70`: dead in this build, so nothing can be measured about them. (U)
+   **Corrected 2026-11-27:** none of the three is dead. Each is reached through a small piece of code without a
+   `.pdata` entry (§3.2, §3.5, §3.15). The earlier search looked only at functions listed in `.pdata` and so did
+   not see those pieces. What the three methods are asked to do is still not read. (U)
 
 ## Sources
 
