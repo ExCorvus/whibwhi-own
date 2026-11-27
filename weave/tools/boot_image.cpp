@@ -342,6 +342,42 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
         }
     }
     std::fprintf(stderr, "\n");
+    // Measurement: every general register at the fault, and for one that points at readable memory, what lies
+    // there - as text when it starts with printable characters (a name), else its first four words. Shown in the
+    // run's log only.
+    {
+        const CONTEXT& r = *info->ContextRecord;
+        const struct { const char* name; DWORD64 value; } regs[] = {
+            {"rax", r.Rax}, {"rbx", r.Rbx}, {"rcx", r.Rcx}, {"rdx", r.Rdx}, {"rsi", r.Rsi}, {"rdi", r.Rdi},
+            {"rbp", r.Rbp}, {"r8", r.R8},   {"r9", r.R9},   {"r10", r.R10}, {"r11", r.R11}, {"r12", r.R12},
+            {"r13", r.R13}, {"r14", r.R14}, {"r15", r.R15}};
+        for (const auto& reg : regs) {
+            std::fprintf(stderr, "[boot]   %s 0x%llx", reg.name, static_cast<unsigned long long>(reg.value));
+            MEMORY_BASIC_INFORMATION m{};
+            const auto* p = reinterpret_cast<const unsigned char*>(reg.value);
+            const bool readable =
+                reg.value >= 0x10000 && VirtualQuery(p, &m, sizeof(m)) == sizeof(m) && m.State == MEM_COMMIT &&
+                (m.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                              PAGE_EXECUTE_READWRITE)) != 0 &&
+                (m.Protect & PAGE_GUARD) == 0 &&
+                reinterpret_cast<const unsigned char*>(m.BaseAddress) + m.RegionSize >= p + 32;
+            if (readable) {
+                int text = 0;
+                while (text < 64 && p[text] >= 0x20 && p[text] < 0x7f &&
+                       reinterpret_cast<const unsigned char*>(m.BaseAddress) + m.RegionSize > p + text + 1) {
+                    ++text;
+                }
+                if (text >= 4) {
+                    std::fprintf(stderr, " -> text \"%.*s\"", text, reinterpret_cast<const char*>(p));
+                } else {
+                    const auto* q = reinterpret_cast<const unsigned long long*>(p);
+                    std::fprintf(stderr, " -> words 0x%llx 0x%llx 0x%llx 0x%llx", q[0], q[1], q[2], q[3]);
+                }
+                print_place(reg.value);
+            }
+            std::fprintf(stderr, "\n");
+        }
+    }
     // Backtrace by unwinding the faulting context.
     {
         CONTEXT c = *info->ContextRecord;
@@ -661,8 +697,21 @@ int main(int argc, char** argv) {
                 last = value;
                 changed_at = now;
                 ++changes;
+                if (changes <= 40) {
+                    std::fprintf(stderr, "[boot] progress stamp: new report %llu at %.1f s\n", changes,
+                                 static_cast<double>(now - started) / 1000.0);
+                    std::fflush(stderr);
+                }
             } else if (value != 0 && now - changed_at > longest) {
+                const ULONGLONG before = longest;
                 longest = now - changed_at;
+                for (const ULONGLONG mark : {10000ull, 20000ull, 25000ull, 29000ull}) {
+                    if (before < mark && longest >= mark) {
+                        std::fprintf(stderr, "[boot] progress stamp: unchanged for %llu s at %.1f s\n", mark / 1000,
+                                     static_cast<double>(now - started) / 1000.0);
+                        std::fflush(stderr);
+                    }
+                }
             }
         }
         std::fprintf(stderr, "[boot] the watchdog's progress stamp (read only): %llu new reports, longest unchanged "
