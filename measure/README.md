@@ -25,6 +25,16 @@ python measure/audio.py "<your game folder>\game_scarlett_master.exe"
 
 The last line says how many statements are the same as FINDINGS.md; the exit code is 0 when all are.
 
+All of them at once, with one short report you can post as it is (it holds the verdict lines, the size and
+SHA-256 of each file read, and the tool versions; nothing of the game):
+
+```
+python measure/run_all.py "<your game folder>" --report report.txt
+```
+
+Add `--pipelines <built builder_pipelines.exe> [--validate]` to include the one that needs the graphics card. If
+your copy is another version, the report shows straight away which results hold there and which do not.
+
 ## The scripts
 
 | script | repeats |
@@ -32,6 +42,7 @@ The last line says how many statements are the same as FINDINGS.md; the exit cod
 | `pe_image.py` | not a measurement: the shared reader (sections, functions from the executable's own `.pdata`, callers, rip-relative references, the number or offset in one instruction). Its `callers` and `callers_and_jumps` see only functions listed in `.pdata`; `reached_by` also follows small pieces of code that have no `.pdata` entry, which is where several wrong "no caller" claims came from (FINDINGS 2026-11-27) |
 | `audio.py` | FINDINGS 2026-11-27, "the program's audio setup" and its follow-ups: the 350 sound records, the setup/start/stop/data commands, the XMA2 packet walk, what the device writes back, the stream channel's float output turned into 16-bit samples |
 | `topology.py` | FINDINGS 2026-11-27, the topology entries: the renderer's topology field, the places that set rectangle lists (0x11) and quad lists (0x13), the rectangle drawn from three vertices, the class the draw path makes for the pipeline key |
+| `run_all.py` | not a measurement: runs every script here on your game folder side by side and prints one report (which hold, which differ, which could not run) |
 | `dxil_bitcode.py` | not a measurement: the shared reader of shader containers and of the LLVM bitcode inside them (record kinds, declared functions, metadata text) |
 | `builder_shaders.py` | FINDINGS 2026-11-26/27 about the installation's `XboxBvhBuilder.dll`: its 52 shaders, their parts, the root signature bits 0x3000000, stages and thread groups, insertvalue, the 33 console shader compiler functions, the 32-lane switch. Takes the library's path, not the executable's. Not yet repeated here: the operation numbers of those functions |
 | `imports.py` | FINDINGS 2026-11-26, "the installation's own libraries": the executable's 68 libraries and 587 functions, the seven of those libraries that ship in the installation, and what the shipped builder, Bink and FidelityFX libraries ask of the console libraries |
