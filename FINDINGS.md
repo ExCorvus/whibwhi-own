@@ -4,69 +4,48 @@ What has been measured about the game and about the shell. The **Current state**
 below it is the dated log, oldest entry first. A later entry overrides an earlier one. Addresses written as
 `fn 0x...` or `image+0x...` are offsets inside the game's executable.
 
-## Current state (2026-11-26)
+## Current state (2026-11-27, game test 23:13)
 
-- **Newest (game test 23:13):** run with the installation's own libraries (the ray-tracing builder, FidelityFX,
-  Bink, libHttpClient load from the copy). The run stops about 5 s in, inside the installation's ray-tracing
-  builder: its shaders call 33 console shader functions named `xbox.` (AMD GPU operations, see the entry "the
-  builder's shaders call the console's own shader functions"), which vkd3d-proton's shader converter does not
-  have. vkd3d-proton is built from the fork ExCorvus/vkd3d-proton (branch whibwhi-own) with ExCorvus/dxil-spirv
-  (branch whibwhi-own: reads `insertvalue`). The shell changes of that run are not committed yet: no game test has
-  passed on them. The blocks below are older.
-- **Returned to this state on 2026-11-26** (bugfix: undid an AI trap). Everything built after boot b80 was
-  taken out of the repository again; see the last dated entry. This block describes the b80 state, re-measured
-  in boot b169.
-- **Build:** `shell\build.cmd` builds the shell, the console libraries and the tools; 27 tests pass (the shader translator came back, see the newest entries).
-- **Testing (rule 11):** the shell is tested on the game itself: scripts/game_test.ps1 runs the real game from the
-  user's copy, counts every import call and compares with the last accepted run. The sample tests are a build
-  check only. Why this came so late is in the entry "what went wrong: the shell was not tested on the game's own
-  code".
-- **Loading:** the unmodified game file is placed in memory at its preferred address. 586 of its 587 imported
-  functions are connected; the one left is a ray-tracing builder function. It gets thread-local storage at
-  index 0.
-- **Running:** the game's entry point is started. The furthest run (boot b79) goes through the game's memory
-  start-up, loads the game runtime library, opens all of the game's package files (read-only, through the
-  package drive the shell answers), creates a real graphics device (Direct3D 12 on Vulkan, through vkd3d-proton,
-  on the RX 9070 XT) and completes the game's graphics start-up. It then reads its whole shader package through
-  the storage library (4,199 compressed pieces, each decoded by the shell's own zlib decoder into the game's
-  memory), creates its textures and render targets, hands command lists to its threads and records commands on
-  them (descriptor heaps, root signatures, descriptor tables, render targets, clears), submits the lists,
-  signals and waits on fences, and presents: the game's display surface (3840 x 2160) is copied into a swap
-  chain on the window the game itself created, one picture per interval of the game's 30-per-second frame clock.
-- **What is on screen:** the game's own window (it titles it "Americas") shows a black picture. That is what the
-  game's commands leave in its display surface today: it clears the surface, and every draw is held, because
-  no pipeline state exists (the game's shaders are not translated yet). The shell draws nothing of its own.
-- **Where it stops:** about 13 seconds into a run the game starts its audio. It asks the audio library for the
-  audio device (AcpHalCreate); the shell answers "not provided", because a PC has no console audio processor;
-  the game's audio start-up has no path for that failure and stops at its own breakpoint (image+0x43ad94e).
-  Going further needs either a real audio path behind that object, or a decision by ExCorvus to accept a silent
-  device as a stated exception to rule 4. It is not decided and nothing was built for it. This is the only
-  stop left at that point (boot b80); the game has no switch of its own for running without audio hardware.
-- **Textures:** a texture's bytes in the game's memory are in the shell's own untiled layout (xg_xs.h); the
-  device tells the game that size when asked. A texture the game places at an address of its own memory is a
-  real texture in the PC device's memory - its pixels are not at that address. Nothing copies a texture's bytes
-  from the game's memory into a PC texture yet, so no texture with starting data can be sampled.
-- **Network:** every imported function that could open a socket, resolve a name or make an HTTP request is
-  connected to a refusal (docs/console-libs/network.md). No run so far has called one.
-- **Pipelines (boots b172-b174):** device slot 86 writes the game's vertex and pixel programs as PC shaders bound
-  to the shell's layout and makes real PC pipelines with the shell's one root signature; the PC device took every
-  one written (32,768+ in b174). The game's start-up waits for about 50,000 of them, which takes longer than
-  300 s at the PC device's compile rate. Slots 57, 62 and 67 are not provided.
-- **Not built:** anything that draws the game's picture. Draws are held while a pipeline of the shell's layout
-  is named, because the arguments buffer and the shell's heaps are not filled from the game's root arguments
-  yet. Command-list methods that name buffers by address (slots 41 to 48: root
-  buffers, index and vertex buffers), because a game address is not turned into a PC buffer address yet. The
-  command-list methods at slots 70, 71, 72, 74, 75, 126, 131, 132, 142 and 146 (what they are is not known).
-  The primitive topology number 0x11 (not a PC topology). Views made from raw descriptor words (device slot 70)
-  and samplers (slot 61). Reading or writing a texture the game keeps at its own address (its Map is refused).
-  Device slot 81 (a per-frame query; the game tolerates the refusal). The queue's page-mapping call (slot 31)
-  is recorded but nothing reads the record. The game runtime library answers every interface query with "no
-  such interface", except the system interface, where one method is answered: the sandbox name. The audio
-  device and the ray-tracing builder are skeletons that answer failure. PC command
-  allocators are never reset, so memory grows while a run lasts.
-- **Answers that are less than the full work** are listed in the entry "answers that say yes" below, and in the
-  newest entries; each one is a place to look first when the game behaves wrongly later.
-- **Nothing of the game's picture has been drawn.** The window shows the game's cleared surface.
+- **Where a run ends today (game test 23:13, PASS):** the program runs for about 60 s and then falls over at
+  image+0x161b994 (a read at 0x8) on its own window thread, while it builds its user interface: it creates a
+  `flash.display.Sprite` and hands it a value holder of its user-interface script system whose value (+0x20) has
+  not been given yet. Up to that moment the program reports progress to its watchdog every half second (the first
+  report at about 56 s), so it was running normally, not stuck. Right after it, another thread stops at the
+  program's own breakpoint image+0x344196 (not followed). Every file the program asks for is found and opened (file
+  trace 21:12). What should have given that value is not measured. Entry "the fault at about 70 s: in the program's
+  user interface, while it reports progress".
+- **Build:** `weave\build.cmd` builds the weave, the console libraries and the tools; 27 tests pass. They are a
+  build check on sample programs only (rule 11).
+- **The game test:** `scripts\game_test.ps1` runs the whole installation from the user's copy as it is started. It
+  first checks that its work folder holds exactly the build it is recorded for, runs every script in measure/,
+  counts every import call and judges the whole run against the baseline through the wants ledger (entries 15:42
+  and 19:37). Hard rules: the copy's folder unchanged, every measure/ script still holds.
+- **Loading:** the unmodified executable is placed at its preferred address; the installation's own libraries (the
+  ray-tracing builder, FidelityFX, Bink, libHttpClient) load from the copy.
+- **Windows answers where it has the same thing:** the runtime's start, its base object and every runtime interface
+  the program asks for go to Windows' own runtime (16:17 to 16:52); XNetworking and XUser are held (rule 3,
+  ExCorvus decides). The device's IDXGIDevice is answered from Windows' adapter and monitor (20:27). The import
+  GameInput.dll is answered by Windows' current GameInput 4.0 (GameInputRedist.dll, 23:13). The program's own frame
+  pacer sets the frame interval (33,333 us); the weave's own pacer was removed (12:42).
+- **Sound:** the sound chip (AcpHal), the stream channel (xapu, with libopus) and chad answer as read in the
+  executable. The program passes its sound start since 17:41, but no run has yet started a voice, opened a stream
+  or sent a chad page, so the sound round trip is not tested.
+- **Storage:** the weave's storage library reads with one event per reading thread (fix of 18:20); no read has
+  failed since.
+- **Graphics:** a real Direct3D 12 device on Vulkan through vkd3d-proton (forks ExCorvus/vkd3d-proton and
+  ExCorvus/dxil-spirv, branch whibwhi-own) on the RX 9070 XT. Pipelines are made with the program's own root
+  signatures; rectangle and quad lists are made as triangle pipelines, and draws with them are still held (steps 2
+  and 3 not built). At 20:05, of 32,768 pipeline requests 2,052 were made (42 shaders); the largest refusal, 29,608
+  requests from 638 shaders, is a sampler taken from a table at a place computed at run time. None of the 714
+  shaders read holds the GPU's ray test. The program's own compute shaders (device slot 62) are not translated.
+- **What is on screen:** the program presents a 3840 x 2160 picture (format 28) into its own window. That picture is
+  a committed resource in the PC library's memory, not in the program's, so whether anything of the program's
+  picture is drawn in it is not measured.
+- **Network:** every function that could reach the network is refused; the network watch has seen no endpoint in
+  any game test.
+- **Older state:** the block that stood here until 2026-11-27 described boot b80 (the state of 2026-11-26) and is
+  replaced by this one. Answers that are less than the full work are in the entry "answers that say yes" and in the
+  newest entries; each is a place to look first when the program behaves wrongly.
 
 ## 2026-11-25 - the project restarts as its own shell
 
@@ -2360,3 +2339,16 @@ the audio part of the weave.
   fault. No storage read failed. Not found (and not in the installation): data\data\effects\animimgfilters.zmt; the
   program also lists D:\decorations\presets\* and D:\decorations\compressed_textures\* (D: on the console is the
   development scratch drive), not there. Correction to the 13:37 entry: that trace ended before these opens.
+## 2026-11-27 - the import GameInput.dll answered by Windows' current GameInput (game test 23:13, measured)
+
+- The executable imports one input function, GameInputCreate (GameInput.dll, ordinal 1). Until now Windows answered
+  it with the file of that name in System32, the old in-box version 0.2309. The user's PC has Microsoft GameInput
+  4.0.306.0 installed (GameInputRedist.dll in System32, its service GameInputRedistService running), which serves the
+  controllers today and also exports GameInputCreate as ordinal 1. A real Xbox controller is connected.
+- weave/host_libraries.cpp (ExCorvus's decision): when the image asks for GameInput.dll, the weave loads Windows'
+  GameInputRedist.dll from System32; if it is not there, the old way is taken.
+- Game test 23:13 (run-20261127-231340, visible): PASS, copy's folder unchanged, every measurement the same. The log
+  says "GameInput.dll: loaded from C:\Windows\SYSTEM32\GameInputRedist.dll", GameInputCreate called once. The run
+  ended as before, at the fault image+0x161b994 (a read at 0x8) in the user interface, after progress reports up to
+  61.9 s. So the GameInput version is not what leaves the user interface's value empty. What the program does with
+  the interface Windows returns is not logged (Windows answers directly).
