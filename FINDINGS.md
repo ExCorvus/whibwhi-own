@@ -1730,4 +1730,8 @@ so nobody else could repeat them.
   Correction found by it: the entry above says "211 instructions in the executable read or write" the field
   +0x1237d. Counted again: 430 instructions address it; 211 of them store a byte into it, 189 of those a fixed
   number. The numbers of places writing 0x11 (39) and 0x13 (2), and of functions setting them (37, 33 of them
-  setting nothing else), stay as they were.
+  setting nothing else), stay as they were.- Follow-up: measure/builder_shaders.py (with the shared bitcode reader measure/dxil_bitcode.py) repeats the
+  builder library entries: 52 shaders, their nine parts, the root signature flags 0x3000000 in all, feature flags,
+  stage and thread groups, insertvalue in five shaders, the 33 console shader compiler functions (9 shaders use
+  none), the 32-lane switch in 42, the compiler named in all. 13 of 13 the same. The functions' operation numbers
+  are not repeated by a script yet.
