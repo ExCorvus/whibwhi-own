@@ -6,7 +6,10 @@ memory**, checks the statements of one group of FINDINGS entries, and prints `sa
 Nothing of the game is written anywhere, and the scripts themselves hold only addresses and the numbers found
 there (rule 2 in [AGENTS.md](../AGENTS.md)).
 
-These are measuring tools. They are not part of the weave's build and not part of the game test.
+These are measuring tools, not part of the weave's build. The game test (`scripts\game_test.ps1`,
+docs/BUILD-AND-RUN.md) runs every one of them on your copy before it starts the game, and its verdict is FAIL when
+one says `DIFFERS`. It finds each script's file from the usage line (`"<your game folder>\\<file>"`), so a new
+script needs that line; a script that checks results without it makes the game test fail rather than skip it.
 
 ## What you need
 
@@ -33,6 +36,7 @@ The last line says how many statements are the same as FINDINGS.md; the exit cod
 | `builder_shaders.py` | FINDINGS 2026-11-26/27 about the installation's `XboxBvhBuilder.dll`: its 52 shaders, their parts, the root signature bits 0x3000000, stages and thread groups, insertvalue, the 33 console shader compiler functions, the 32-lane switch. Takes the library's path, not the executable's. Not yet repeated here: the operation numbers of those functions |
 | `imports.py` | FINDINGS 2026-11-26, "the installation's own libraries": the executable's 68 libraries and 587 functions, the seven of those libraries that ship in the installation, and what the shipped builder, Bink and FidelityFX libraries ask of the console libraries |
 | `watchdog.py` | what FINDINGS 2026-11-26 "the program's progress reports" stands on: the program's hang watchdog as docs/exe-map/MAP.md section 4 describes it (who writes the progress stamp, the one-second pass, the 2 s and 300 s limits, the 30 passes, the stop, the run loop, the watch scopes). It found two corrections to the map (2026-11-27) |
+| `stops.py` | the places in the executable where FINDINGS says a run stopped or reached a new call: the audio setup's breakpoint at image+0x43ad94e (the ways that lead to it, the unwind chain of boot b169), the pipeline store checked before device slot 86, the builder's construction at image+0x247944f, the program's own compute shaders through device slot 62 at image+0x247fe66 |
 | `builder_pipelines.cpp` | FINDINGS 2026-11-27, "the builder's 52 shaders made with their own root signatures" (game test 01:34): all 52 compute pipelines made on one PC device, each with its own root signature, in the builder's measured order; no error line of the PC library; with `--validate`, no message of the Vulkan validation layer. Needs a PC and its graphics card (see below) |
 
 ## The one that needs the graphics card
