@@ -95,7 +95,9 @@ int main() {
     // Sizes per pixel from the public format list; codes outside it are not answered.
     CHECK(bits(28) == 32 && bits(61) == 8 && bits(2) == 128 && bits(10) == 64 && bits(56) == 16);
     CHECK(bits(71) == 4 && bits(77) == 8 && bits(80) == 4 && bits(83) == 8 && bits(98) == 8);
-    CHECK(bits(0) == 0 && bits(66) == 0 && bits(100) == 0 && bits(0x76) == 0 && bits(0x79) == 0);
+    CHECK(bits(0) == 0 && bits(66) == 0 && bits(100) == 0 && bits(0x79) == 0);
+// The console's 118 to 120: 16 bits, from the program's own table (measure/texture_formats.py).
+CHECK(bits(0x76) == 16 && bits(0x77) == 16 && bits(0x78) == 16 && bits(0x75) == 0);
 
     // 64 x 32, 3 mips, 4 bytes per pixel, 2 array slices: mips of 8192, 2048 and 512 bytes.
     {
