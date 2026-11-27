@@ -1750,3 +1750,23 @@ so nobody else could repeat them.
 - The earlier checker that passed shaders through the translator alone is not part of measure/: it gave every
   buffer to the shaders by GPU address, which is how the false "52 of 52 accepted" came about (entry above).
   This program takes the path the PC library itself takes.
+## 2026-11-27 - two more results made repeatable: the imports and the watchdog (measured)
+
+- `measure/imports.py` repeats the file part of "the installation's own libraries" (2026-11-26): 10 of 10 the
+  same - 68 libraries and 587 functions imported by the executable; the shipped XboxBvhBuilder, Bink2Scarlett and
+  FidelityFX upscaler ask exactly the console functions named there; XAudio2_9.dll is Windows' own; nothing the
+  shipped libraries ask for is missing. One wording made exact: the entry says "six" shipped libraries and names
+  seven files (VCRUNTIME140 and VCRUNTIME140_1 written as one); the script counts seven.
+- `measure/watchdog.py` repeats what "the program's progress reports" (2026-11-26) stands on: the watchdog as
+  docs/exe-map/MAP.md section 4 describes it. 26 of 26 the same after the first run, which showed five
+  differences. Each was read before anything was changed:
+  - three were the script's own blind spots, not the map's: the crash-callback installer fn 0x22161f0 is a leaf
+    with no `.pdata` entry, so a scan over `.pdata` functions cannot see its store (read directly now, at
+    0x221620c); the countdown of 30 passes is kept in a register (9 places set it), not stored in memory; and of
+    the 23 functions that run the loop fn 0x1c82b20, 6 reach it by a tail jump, not a call (20 calls, 6 jumps).
+  - two were the map's: the progress stamp 0x71b6338 is written by the program's reporter fn 0x22159f0 and also
+    by the watchdog itself, 4 times, when it re-arms (the table said "only"); and the reporter is 35 bytes, not
+    18 (what it does - one QueryPerformanceCounter, one store - was right). MAP.md corrected in both places.
+- The shared reader `measure/pe_image.py` now reads import tables (`imports`, `import_at`) and finds functions
+  that call or tail-jump to a target (`callers_and_jumps`); its reference scan states that it sees only code
+  covered by `.pdata`. audio.py and topology.py still give 41 of 41 and 12 of 12 with it.
