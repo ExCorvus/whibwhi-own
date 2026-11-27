@@ -21,6 +21,15 @@ licence, whose shader translator dxil-spirv (MIT, copyright its authors) comes f
 these notices on 2026-11-24. The LGPL requires that users can relink/replace it — that holds here, since it is
 loaded by file name at run time and the system d3d12.dll is the fallback.
 
+## Third-party library used at run time: FFmpeg (LGPL-2.1)
+
+The weave's sound chip (`weave/acp_chip.cpp`) decodes the program's XMA2 audio with **FFmpeg**'s XMA2 decoder
+(libavcodec and libavutil). FFmpeg is copyright its authors and licensed under the **GNU Lesser General Public License
+v2.1 or later** for the parts used here; its source and licence are at <https://ffmpeg.org> (see its `LICENSE.md` and
+`COPYING.LGPLv2.1`). It is not vendored into this repository: `scripts/setup_ffmpeg.ps1` builds only its XMA1/XMA2
+decoders from a source checkout you get yourself, and places `avcodec-*.dll` and `avutil-*.dll` beside the weave.
+They are loaded by file name at run time, so they can be replaced with any compatible build.
+
 ## Required credit (additional term under GNU GPL v3 §7(b)–(c))
 
 This program is free software under the GNU General Public License v3 (or later). In addition, as permitted
