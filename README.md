@@ -54,7 +54,7 @@ it.
 
 The measurements behind each point are in [FINDINGS.md](FINDINGS.md) and [docs/exe-map/](docs/exe-map/).
 
-## What the earlier attempt got wrong
+## What earlier attempts got wrong
 
 Before this weave there was an attempt built on top of another project's runtime (Leonida, by NotRexed). None of
 that code is here. The attempt failed, and the reasons are why this project is shaped the way it is. The mistakes
@@ -74,6 +74,14 @@ described are our own.
    crash at the start of the game world was exactly such an address.
 4. **It measured progress by how far a run got.** A run that gets further looks like progress whether or not
    the answers behind it are right.
+
+**Other attempts to run Xbox programs on a PC.** There are also projects, not built for one game, that run Xbox
+programs on a PC. As far as ExCorvus can see from their public descriptions (her reading, not measured here), they
+map around the weave: they recreate, one by one, the console libraries a program asks for, and translate its
+shaders on their own terms. Each recreated library is a piece of the program's fabric rewritten from outside, and
+it has to match what the program expects in every detail, including the details nobody has read yet. The weave
+goes the other way: what Windows already has, Windows answers; the weave answers only where the program reaches
+past it, and only with what was measured in the executable.
 
 What this project does instead, as fixed rules ([AGENTS.md](AGENTS.md)): provide what the game expects and never
 change its checks; never answer "done" for work that was not done; treat the game's memory as one whole; and take
