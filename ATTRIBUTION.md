@@ -16,6 +16,10 @@ repository; they are kept because the ideas were ExCorvus's, not because they de
 1. **The watchdog ground truth.** The watchdog is a small parallel execution folded into the game executable,
    running alongside the game and checking against it (framerate, and the post-boot user environment variable).
    It stays armed; it is ground truth, not a thing to disable or probe.
+   (Updated 2026-11-27: measured, it checks once a second whether the program has reported progress, and stops the
+   program after about 30 checks without a report. It is not the whole secret, as first thought, but keeping it
+   as ground truth held: it tells when the program really stopped moving. The "post-boot user environment
+   variable" may have been a misreading.)
 2. **The AI trap — outward, not from within.** The trap is looking at the code from within instead of outward:
    "fixing" the game's allocation/refusal/error paths into success rather than observing what the game does from
    outside and hosting the environment it expects. The project is a shell that hosts the game, not an emulator.
