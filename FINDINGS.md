@@ -1504,3 +1504,20 @@ bytes laid out like the graphics modules, with its number at +0x70 (the place se
 In it stands the program in the console's instruction set: 35, 49 and 66 instructions (196-380 bytes), each walk
 ending exactly on the end-of-program word. So the program's own compute shaders carry their code as console GPU
 instructions, the same form as its graphics shaders, and no PC code.
+## 2026-11-27 - the program's named root signatures do not describe where its shaders' table resources sit (game test 02:04, measured)
+
+Asked before changing how translated shaders bind: can a translated shader use the root signature the program
+names for its pipeline exactly as it is? For that, the named signature's descriptor table would have to hold, at the
+place where the shader's own tables put a resource, a range of that resource's class. Two claims were added to the
+table check (`WHIWHI_SHADER_CHECK`, weave/d3d12_xs.cpp) and measured in game test 02:04 (PASS, 60 s, the copy's
+folder unchanged; 1,540 table resources of the program's vertex and pixel shaders):
+
+- With the place counted in 32-byte records (word 1 / 8, how the program fills its tables, DESCRIPTORS.md C.2):
+  994 checks held, 1,593 did not (a resource whose record size is 8 words is counted twice in these numbers).
+- With the place counted in records of the resource's own size (word 1 / low byte of word 4): 4 held, 489 not.
+- Unchanged from 2026-11-26: the named table lists the shader's register for 216 of the 1,540.
+
+So the table ranges of the named root signatures are mostly not where the shaders' resources are, by register or
+by place. What does hold for every shader is the part about parameters (their number, kind, the constants'
+registers and counts, the root descriptors), measured on 2026-11-26. On the console, the program's shaders find
+their table resources by their own tables (parameter and place), not by the ranges of the root signature.
