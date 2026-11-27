@@ -163,6 +163,22 @@ With those two files beside the tools, `boot_image` logs "using the vkd3d-built 
 weave creates runs on Vulkan. Buffers the game places in its own memory are opened on that device where they
 lie, without a copy, and the game's frames are presented through that library's swap chain.
 
+## The sound chip's decoder: FFmpeg
+
+The program's sound chip decodes XMA2 audio. The weave's chip hands that work to FFmpeg's XMA2 decoder (LGPL-2.1,
+see `NOTICE.md`), built separately. You need MSYS2 with `make` and `diffutils` (`pacman -S make diffutils`), the
+Visual Studio Build Tools, and an FFmpeg source checkout (<https://ffmpeg.org/download.html>):
+
+```
+git clone https://git.ffmpeg.org/ffmpeg.git ffmpeg
+powershell -ExecutionPolicy Bypass -File scripts\setup_ffmpeg.ps1 -Source ffmpeg
+```
+
+The script builds only the XMA1/XMA2 decoders (no programs, no network, no assembly) in
+`%LOCALAPPDATA%\whiwhi\ffmpeg-build` and copies `avcodec-*.dll` and `avutil-*.dll` into `weave\build`. Run it before
+`weave\build.cmd`: the build takes FFmpeg's headers from there. Without FFmpeg the weave still builds, and its sound
+chip answers "not implemented".
+
 ## What you will see
 
 A window titled "Americas" opens (the game creates it; the weave shows it) and stays black: the game clears its
