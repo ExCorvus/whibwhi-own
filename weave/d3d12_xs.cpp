@@ -1767,6 +1767,82 @@ bool is_plain_pc_shader(const void* code, std::size_t size) {
     return dxil;
 }
 
+// What a console compute shader handed to slot 62 carries: its parts by name and size and, for a DXIL part, the
+// program kind and version it states and whether LLVM bitcode follows. Each distinct list of part names is logged
+// once, with the first shader's size and how many shaders so far had that list. Numbers only.
+void log_console_shader_parts(const void* code, std::size_t size) {
+    static SRWLOCK lock = SRWLOCK_INIT;
+    static std::map<std::string, unsigned> seen;
+    const auto* b = static_cast<const unsigned char*>(code);
+    std::string names;
+    std::string detail;
+    char text[160];
+    if (!b || size < 32 || std::memcmp(b, "DXBC", 4) != 0) {
+        std::uint32_t head = 0;
+        if (b && size >= 4) {
+            std::memcpy(&head, b, 4);
+        }
+        std::snprintf(text, sizeof(text), "not a DXBC container (first word 0x%08x)", head);
+        names = text;
+    } else {
+        std::uint32_t count = 0;
+        std::memcpy(&count, b + 28, 4);
+        for (std::uint32_t i = 0; i < count && i < 64 && 32 + 4ull * (i + 1) <= size; ++i) {
+            std::uint32_t at = 0;
+            std::uint32_t bytes = 0;
+            std::memcpy(&at, b + 32 + 4 * i, 4);
+            if (at + 8ull > size) {
+                names += " (part outside the container)";
+                break;
+            }
+            std::memcpy(&bytes, b + at + 4, 4);
+            names += (names.empty() ? "" : ",") + std::string(reinterpret_cast<const char*>(b + at), 4);
+            std::snprintf(text, sizeof(text), " %.4s %u", reinterpret_cast<const char*>(b + at), bytes);
+            detail += text;
+            if (std::memcmp(b + at, "DXIL", 4) == 0 && bytes >= 24 && at + 8ull + 24 <= size) {
+                const unsigned char* p = b + at + 8;
+                std::uint32_t version = 0;
+                std::uint32_t offset = 0;
+                std::memcpy(&version, p, 4);
+                std::memcpy(&offset, p + 16, 4);
+                const unsigned long long code_at = at + 8ull + 8 + offset;
+                const bool bitcode = code_at + 4 <= size && b[code_at] == 'B' && b[code_at + 1] == 'C' &&
+                                     b[code_at + 2] == 0xC0 && b[code_at + 3] == 0xDE;
+                std::snprintf(text, sizeof(text), " (kind %u, version %u.%u, %s)", version >> 16, (version >> 4) & 0xf,
+                              version & 0xf, bitcode ? "LLVM bitcode follows" : "no LLVM bitcode where stated");
+                detail += text;
+                std::uint32_t words = 0;
+                std::uint32_t magic = 0;
+                std::uint32_t dxil_version = 0;
+                std::uint32_t code_bytes = 0;
+                std::uint32_t first = 0;
+                std::memcpy(&words, p + 4, 4);
+                std::memcpy(&magic, p + 8, 4);
+                std::memcpy(&dxil_version, p + 12, 4);
+                std::memcpy(&code_bytes, p + 20, 4);
+                if (code_at + 4 <= size) {
+                    std::memcpy(&first, b + code_at, 4);
+                }
+                std::snprintf(text, sizeof(text),
+                              " [header: %u words, magic 0x%08x, DXIL version 0x%x, code offset %u, code %u bytes, "
+                              "first word there 0x%08x]",
+                              words, magic, dxil_version, offset, code_bytes, first);
+                detail += text;
+            }
+        }
+    }
+    AcquireSRWLockExclusive(&lock);
+    const unsigned n = ++seen[names];
+    const std::size_t lists = seen.size();
+    ReleaseSRWLockExclusive(&lock);
+    if (n == 1 && lists <= 16) {
+        logf("device slot 62: a console compute shader of %llu bytes carries the parts %s:%s\n",
+             static_cast<unsigned long long>(size), names.c_str(), detail.c_str());
+    } else if (n == 10 || n == 100 || n == 1000) {
+        logf("device slot 62: %u console compute shaders so far carry the parts %s\n", n, names.c_str());
+    }
+}
+
 HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, void* zero2, void* identifier,
                                   void** out) {
     if (out) {
@@ -1778,6 +1854,7 @@ HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, vo
     D3D12_COMPUTE_PIPELINE_STATE_DESC pc{};
     std::memcpy(&pc, description, sizeof(pc));
     if (!is_plain_pc_shader(pc.CS.pShaderBytecode, pc.CS.BytecodeLength)) {
+        log_console_shader_parts(pc.CS.pShaderBytecode, pc.CS.BytecodeLength);
         static std::once_flag once;
         void* const returns_to = _ReturnAddress();
         std::call_once(once, [&] {
