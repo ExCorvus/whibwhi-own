@@ -2041,3 +2041,28 @@ What this means for decoding (not built yet): each voice is one XMA2 stream of o
 rates. FFmpeg's XMA2 decoder (libavcodec/wmaprodec.c, xma_decode_init) takes exactly that: a stream count, the
 channel count, the sample rate and 2048-byte packets. Starting at a bit position inside a packet and the loop
 points are open: FFmpeg decodes whole packets.
+## 2026-11-27 - the sound chip answers; the next stop is the stream channel (game test 14:46, measured)
+
+The weave now hands out a sound chip (weave/acp_chip.cpp). It answers what the program measurably gives it (entries
+above and measure/audio.py): method 0 starts it, opcode 2 sets it up, opcode 5 starts a voice (decoding that voice's
+XMA2 packets through FFmpeg's XMA2 decoder into the voice's ring and moving "decoded up to"), opcode 7 stops one,
+opcode 0x12 moves "taken out up to". FFmpeg is built separately by scripts/setup_ffmpeg.ps1 (only the XMA1/XMA2
+decoders) and loaded at run time. Read in the executable before it was built: the voice number in opcodes 5 and 7 is
+the record number (fn 0x43a73e0 and fn 0x925e0 use the same index for the voice table), and "start voice" is sent once
+per voice (fn 0x78120 sends it only when the voice table's +0x34 is 0 and then sets it to 2; stopping sets it to 0).
+
+Game test 14:46 (run-20261127-144642, visible, PASS: alive after 60 s, copy's folder unchanged, all 12 measurement
+scripts the same):
+- The program created the chip (AcpHalCreate), started it (method 0 with 4096 and 4096) and set it up (opcode 2,
+  value 0xf0f0f0f0, block word 0xc0); each answer was taken.
+- It then asked the second half of the sound system, the stream channel: XApuConnect (xapu.dll), still refused by the
+  weave ("no audio command channel exists on a PC"). The program stopped itself at the same int3 as before
+  (image+0x43ad94e), now reached the fourth of the four ways measure/stops.py lists: after the stream channel's
+  connect (fn 0x43aee50).
+- No voice was started yet (no opcode 5), so the decoding itself has not run on the program's data.
+- New in this run: Bink (BinkSetSoundSystem, BinkStartAsyncThread, BinkSetMemory), CoCreateInstance, WriteFile and
+  BCryptGenRandom were called for the first time, and 180 imports in all (153-177 before).
+
+Not measured, the weave's choices (each logged once when used): "taken out up to" is moved by the amount the program
+names in opcode 0x12 (inferred: the program never writes it); the ring is marked empty again when both positions
+meet after a take; a voice starts and loops at whole 2048-byte packets, because FFmpeg decodes whole packets.
