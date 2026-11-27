@@ -1981,3 +1981,20 @@ as before (image+0x43ad94e).
   read yet.
 - The window pictures did not work in this run (the tool found no visible window although the log says the
   program showed it); not followed.
+## 2026-11-27 - the T: drive: what the program keeps there (measured, no run)
+
+Follow-up to the file trace of 13:37, read in the executable and in Microsoft's public GDK documentation.
+- The program names T: in four places of its own code: fn 0x1dec9c0 builds `t:\` + `telemetrycache.dat` (format
+  `%s%s`), opens it through its own file layer and reads up to 0x200000 bytes into a buffer; when the file is not
+  there it notes the failure with an error code and carries on (it is not what stops a run). fn 0x58d7840 hands out
+  `t:\` as a root path. fn 0x2213d00 and fn 0x2214540 put a wide `t:\` in front of a name and write the file
+  ("WER - Saving %ls - %I64u bytes": crash reports). fn 0x308240 builds `T:\` + `%s/studiocache/%s/%d`, next to a
+  `D:\` string.
+- Microsoft's public page "Local storage on Xbox console" names the console's drives: G:\ installed game data
+  (read-only), **T:\ temporary local storage** (2 GB, written by the title while it runs, content deleted after the
+  title ends, kept across suspend), D:\ developer scratch partition (development only). Persistent local storage
+  has no drive letter; the title asks for its path (XPersistentLocalStorageGetPath). The installation's
+  MicrosoftGame.config asks for 2048 MB of persistent local storage.
+- So T: is not the installation: it is a writable place of the program's own that starts empty. That the telemetry
+  cache is missing at the start is what a console shows too.
+- What the weave answers today: G:\ only. A call for T:\ goes to Windows as written and fails (error 3).
