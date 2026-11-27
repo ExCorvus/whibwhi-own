@@ -150,6 +150,28 @@ struct File {
     Com com;
     HANDLE handle = nullptr;
     std::wstring path;  // the file on the PC, for the log only
+    std::atomic<int> reads_open{0};  // reads on this file at this moment (measurement only)
+    std::atomic<int> most_open{0};
+};
+
+// Measurement: one line each time a file reaches a new highest number of reads open at once (first 32 lines),
+// naming the thread that started the read.
+std::atomic<int> g_overlap_lines{0};
+
+struct OpenRead {
+    File* file;
+    int open_at_start;
+    OpenRead(File* f, unsigned long long number) : file(f) {
+        open_at_start = file->reads_open.fetch_add(1) + 1;
+        int most = file->most_open.load();
+        while (open_at_start > most && !file->most_open.compare_exchange_weak(most, open_at_start)) {
+        }
+        if (open_at_start > 1 && open_at_start > most && g_overlap_lines.fetch_add(1) < 32) {
+            logf("measure: request #%llu on thread %lu: %d reads open at once on \"%ls\" (the most so far)\n",
+                 number, GetCurrentThreadId(), open_at_start, file->path.c_str());
+        }
+    }
+    ~OpenRead() { file->reads_open.fetch_sub(1); }
 };
 
 constexpr long kPending = static_cast<long>(0x8000000AL);  // E_PENDING: no result yet
@@ -460,23 +482,49 @@ bool can_write(unsigned long long address, unsigned long long bytes) {
     return true;
 }
 
-// Reads exactly `bytes` at `offset`. The handle was opened for overlapped use.
+// The reading thread's own event for its overlapped reads. Without one, Windows signals the file handle itself,
+// and with several reads open on one file at once a wait can return for another read's completion (Windows'
+// documentation of OVERLAPPED and GetOverlappedResult). Measured in game test 18:20: two reads open at once on one
+// file, the read answered "end of file" inside the file, and its completion then wrote its status and byte count
+// into stack memory the OVERLAPPED no longer owned.
+HANDLE read_event() {
+    struct Event {
+        HANDLE handle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        ~Event() {
+            if (handle) {
+                CloseHandle(handle);
+            }
+        }
+    };
+    thread_local Event event;
+    return event.handle;
+}
+
+// Reads exactly `bytes` at `offset`. The handle was opened for overlapped use; each read has its own event and
+// its result is always taken through GetOverlappedResult, which waits for that read alone.
 bool read_exactly(HANDLE file, unsigned long long offset, void* to, unsigned long bytes, unsigned long& error) {
+    const HANDLE event = read_event();
+    if (!event) {
+        error = GetLastError();
+        return false;
+    }
     unsigned long done = 0;
     while (done < bytes) {
         OVERLAPPED ov{};
         const unsigned long long at = offset + done;
         ov.Offset = static_cast<unsigned long>(at & 0xFFFFFFFFull);
         ov.OffsetHigh = static_cast<unsigned long>(at >> 32);
+        ov.hEvent = event;
         DWORD got = 0;
-        if (!ReadFile(file, static_cast<unsigned char*>(to) + done, bytes - done, &got, &ov)) {
+        if (!ReadFile(file, static_cast<unsigned char*>(to) + done, bytes - done, nullptr, &ov)) {
             error = GetLastError();
-            if (error != ERROR_IO_PENDING || !GetOverlappedResult(file, &ov, &got, TRUE)) {
-                if (error == ERROR_IO_PENDING) {
-                    error = GetLastError();
-                }
+            if (error != ERROR_IO_PENDING) {
                 return false;
             }
+        }
+        if (!GetOverlappedResult(file, &ov, &got, TRUE)) {
+            error = GetLastError();
+            return false;
         }
         if (got == 0) {
             error = ERROR_HANDLE_EOF;
@@ -491,19 +539,20 @@ bool read_exactly(HANDLE file, unsigned long long offset, void* to, unsigned lon
 // The failure line of a read: which file, how large it is on the PC, and where the piece lies against its end.
 void log_read_failure(unsigned long long number, const File* file, unsigned long long options,
                       unsigned long long offset, unsigned long source_bytes, unsigned long destination_bytes,
-                      unsigned long error) {
+                      unsigned long error, int open_at_start) {
     LARGE_INTEGER size{};
     const bool sized = GetFileSizeEx(file->handle, &size) != 0;
     const unsigned long long file_bytes = sized ? static_cast<unsigned long long>(size.QuadPart) : 0;
     const unsigned long long end = offset + source_bytes;
     logf("request #%llu: reading %lu bytes at offset 0x%llx failed, error %lu - file \"%ls\", %s%llu bytes (0x%llx); "
-         "the piece ends at 0x%llx, %s; option %llu, %lu bytes asked for at the destination\n",
+         "the piece ends at 0x%llx, %s; option %llu, %lu bytes asked for at the destination; thread %lu, %d "
+         "read(s) open on this file when it started\n",
          number, source_bytes, offset, error, file->path.c_str(), sized ? "" : "size not read, ", file_bytes,
          file_bytes, end,
          !sized ? "against an unknown end" : offset >= file_bytes ? "and starts at or past the file's end"
                                            : end > file_bytes  ? "past the file's end"
                                                                : "inside the file",
-         options, destination_bytes);
+         options, destination_bytes, GetCurrentThreadId(), open_at_start);
 }
 
 // A request is eight 64-bit words. Layout as the image fills it, read off a run (every request the image made
@@ -563,10 +612,12 @@ long carry_out(Queue* q, const unsigned char* r, unsigned long long number) {
         return refuse("the destination is not memory that can be written", kInvalidArgument);
     }
 
+    const OpenRead open_read(const_cast<File*>(file), number);
     unsigned long error = 0;
     if (options == 0) {
         if (!read_exactly(file->handle, offset, reinterpret_cast<void*>(destination), source_bytes, error)) {
-            log_read_failure(number, file, options, offset, source_bytes, destination_bytes, error);
+            log_read_failure(number, file, options, offset, source_bytes, destination_bytes, error,
+                             open_read.open_at_start);
             return kFail;
         }
         if (number <= 3) {
@@ -578,7 +629,8 @@ long carry_out(Queue* q, const unsigned char* r, unsigned long long number) {
 
     std::vector<std::uint8_t> packed(source_bytes);
     if (!read_exactly(file->handle, offset, packed.data(), source_bytes, error)) {
-        log_read_failure(number, file, options, offset, source_bytes, destination_bytes, error);
+        log_read_failure(number, file, options, offset, source_bytes, destination_bytes, error,
+                         open_read.open_at_start);
         return kFail;
     }
     const whiwhi::weave::InflateOutcome o = whiwhi::weave::inflate_zlib(
