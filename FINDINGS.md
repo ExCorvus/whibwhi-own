@@ -1681,4 +1681,17 @@ back, before any answer. Read in fn 0x43aec40 (the setup) and the places that us
   records is not shown). From their difference the program works out how much of the ring the device has used,
   refills that much and sends opcode 0x12. So the device must keep these positions current as it consumes the
   data. Where the decoded sound itself goes is still not read: nothing in these two functions reads decoded
-  samples back (the 0x200-byte area is only copied between two records of the same stream).
+  samples back (the 0x200-byte area is only copied between two records of the same stream).- Follow-up: where the stream channel's decoded sound goes (fn 0x4e64b10, the only other reader of the payload
+  area 0x9ae98a8). Per stream it takes the count the device reported (the stream's state entry +0x334, in
+  bytes, /4 = samples), reads that many 4-byte values from the stream's output area (0x9ae98a8 + 0x14010 +
+  index x 0x1e00), multiplies each by 32767.0 and packs them to signed 16-bit (vcvtps2dq + vpackssdw) - so the
+  device's output is float samples in -1..1 (measured: the constant 32767.0 at .rdata 0x615b954). The 16-bit
+  samples go through fn 0x4e64f00 into a ring inside the program's own object (+0x100), then the stream's state
+  is set to 4 (fn 0x4eaa940). fn 0x4e64f00 is the program's ring copy (a direction flag: 0 = into the ring, 1 =
+  out of it); fn 0x78120 uses it with flag 1 to copy from a ring in its own object (+0x10) into a sound-device
+  voice's 0x1700-byte input ring, and counts what it copied as bytes / 2 / channels ([obj+0x2004]) - 16-bit
+  samples. So the sound device's voices are also fed 16-bit samples, not only XMA2 (measured for the counting;
+  that the stream channel's ring and the voice's source ring are the same ring is NOT shown - the two objects'
+  layouts differ). Picture so far: the stream channel decodes (960 samples per packet) and hands float samples
+  back; the program turns them into 16-bit samples and gives them to the sound device's voices, whose mixing
+  and output are the device's (not read). Nothing in the program reads mixed sound back.
