@@ -1735,3 +1735,18 @@ so nobody else could repeat them.
   stage and thread groups, insertvalue in five shaders, the 33 console shader compiler functions (9 shaders use
   none), the 32-lane switch in 42, the compiler named in all. 13 of 13 the same. The functions' operation numbers
   are not repeated by a script yet.
+## 2026-11-27 - the builder's pipelines made repeatable: measure/builder_pipelines.cpp (measured)
+
+- `measure/builder_pipelines.cpp` repeats the entry "the builder's 52 shaders made with their own root
+  signatures" outside the program, on anyone's own copy: it reads XboxBvhBuilder.dll read-only into memory and
+  makes all 52 compute pipelines on one device of the vkd3d-proton fork, each with the root signature from the
+  shader's own RTS0 part, in the builder's order measured in game test 01:13. Nothing is dispatched.
+- Run 2026-11-27 with the fork's libraries and the Vulkan validation layer: 9 of 9 the same - 52 containers, 49
+  of them found in the measured order, 52 root signatures, 52 pipelines made, none refused, the bits 0x3000000
+  noted and taken, no error line of the PC library, the validation layer loaded and silent.
+- The same program beside an unchanged vkd3d-proton (71cae09): 9 pipelines made, 43 refused, 81 error lines. The
+  9 made are exactly the 9 shaders that use none of the console shader compiler's functions (compared by size
+  with the per-shader list). So the check can tell the fork's work from its absence.
+- The earlier checker that passed shaders through the translator alone is not part of measure/: it gave every
+  buffer to the shaders by GPU address, which is how the false "52 of 52 accepted" came about (entry above).
+  This program takes the path the PC library itself takes.
