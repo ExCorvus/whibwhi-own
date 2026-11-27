@@ -1561,3 +1561,23 @@ driver after vkd3d-proton's "Invalid primitive topology type #13". The copy's fo
   that the program sets on its lists (seen in earlier runs; the weave holds draws while it is set). Where that class becomes the
   description's type 19 is not read (fn 0xb5a5d0 hashes the key and hands a request on; the request is filled
   elsewhere).
+## 2026-11-27 - the program's topology numbers 0x11 and 0x13 are the AMD rectangle list and quad list (read in the executable)
+
+- The renderer's state keeps the topology number at +0x1237d of its context object; 211 instructions in the
+  executable read or write it (list in a local file). 39 places write 0x11 and 2 write 0x13; the others write the
+  public numbers. The draw path (fn 0x32520) passes it to command-list slot 20 (IASetPrimitiveTopology) and sorts it
+  into its own class for the pipeline key (previous entry).
+- What the program draws with 0x11, read at one of the 39 places (0x124995): it sets 0x11, asks a vertex area of 3
+  vertices of 24 bytes (call 0x517a290, 3 and 0x18), and writes three corners of the screen: (-1, 1), (-1, -1) and
+  (1, -1), each followed by its other values; the fourth corner, (1, 1), is not written. Then it draws. Three corners
+  of an axis-aligned rectangle, the fourth left to the hardware: that is a rectangle list.
+- AMD's own numbering of hardware primitive types (public, in Mesa's register description
+  src/amd/registers/gfx10.json, VGT primitive type): DI_PT_RECTLIST = 17 (0x11), DI_PT_LINELOOP = 18, DI_PT_QUADLIST =
+  19 (0x13), DI_PT_QUADSTRIP = 20, DI_PT_POLYGON = 21. The program's two extra topology numbers are exactly AMD's
+  rectangle list and quad list. The public D3D12 numbers it also uses (1 to 5, 10 to 13, 33 and above) are D3D's
+  own. That the console's library passes 0x11 and 0x13 to the GPU as these hardware types is inferred from the
+  numbers and from what the program draws with 0x11.
+- The one pipeline description with topology type 19 (previous entry) therefore names the quad list (inferred:
+  the same number, 0x13).
+- On a PC: AMD's hardware has these primitive types, but Vulkan (and so vkd3d-proton) offers neither a rectangle
+  list nor a quad list; the PC library has no number for them. Nothing was changed.
