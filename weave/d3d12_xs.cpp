@@ -3190,7 +3190,9 @@ HRESULT __stdcall w_device_slot73(Wrap* self, const unsigned int* desc, void* al
 //     until the next one;
 //   - flag bit 2 (the image passes it together with a zero timeout and treats a failure as fatal) answers at
 //     once with the current frame's token;
-//   - a token passed in with an event type other than 0 names the frame to wait for;
+//   - a token passed in with an event type other than 0 names the frame to wait for: token t is waited for until
+//     frame t has come (changed 2026-11-27 after the frame ledger: with t - 1 every such wait had long passed and the
+//     program ran its frame loop about 900 times a second instead of at the interval it set);
 //   - a wait that runs out of time answers the Windows "wait timed out" failure.
 constexpr unsigned kFrameEventTypes = 4;
 
@@ -3203,7 +3205,6 @@ struct FrameClock {
     unsigned offset_us[kFrameEventTypes] = {};
     bool scheduled[kFrameEventTypes] = {};
     unsigned long long handed_out[kFrameEventTypes] = {};  // frame number + 1 of the last event handed out
-    unsigned long long next_free = 0;  // the first frame no presented picture has been shown in yet
 };
 FrameClock g_clock;
 
@@ -3227,33 +3228,21 @@ void sleep_until_us(long long target_us) {
     }
 }
 
-// One presented picture per interval of the frame clock: a present that comes while the current interval has
-// already shown one waits for the start of the next free interval (at most two intervals), and takes it.
-// Returns the frame it was given, or all ones when the image has not set an interval.
-//
-// This is the weave's choice, not measured console behaviour. What is measured is that the image does not
-// pace itself where it presents: at a frame's start it only asks for the current frame without waiting
-// (+0x2482448), and before a present it waits for event type 2 of the frame two back (+0x2482405), which has
-// long passed on this clock. Left alone it presented several hundred times a second. A display shows one
-// picture per interval, so that is what the present is held to.
-unsigned long long take_display_interval() {
-    AcquireSRWLockExclusive(&g_clock.lock);
-    const unsigned interval = g_clock.interval_us;
-    if (interval == 0) {
-        ReleaseSRWLockExclusive(&g_clock.lock);
-        return ~0ull;
+// The frame ledger: a measurement only. Every frame call (slots 78 to 81) is written as one line - time on the
+// frame clock, thread, where in the program the call returns to, the values going in and coming out, and how long
+// the weave held the call - so the program's frame numbers can be set beside the weave's. Answers do not change.
+// The first kFrameLedgerLines calls are written.
+constexpr int kFrameLedgerLines = 1500;
+
+void frame_ledger(const char* what, void* returns_to, unsigned a, unsigned b, unsigned c, unsigned long long in,
+                  unsigned long long out, long long held_us) {
+    static std::atomic<int> lines{0};
+    if (lines.fetch_add(1) >= kFrameLedgerLines) {
+        return;
     }
-    const unsigned long long current = static_cast<unsigned long long>(clock_now_us()) / interval;
-    unsigned long long frame = current > g_clock.next_free ? current : g_clock.next_free;
-    if (frame > current + 2) {
-        frame = current + 2;
-    }
-    g_clock.next_free = frame + 1;
-    ReleaseSRWLockExclusive(&g_clock.lock);
-    if (frame > current) {
-        sleep_until_us(static_cast<long long>(frame) * interval);
-    }
-    return frame;
+    const long long at = g_clock.frequency ? clock_now_us() : -1;
+    logf("[frames] %lld us, thread %lu, %s, returns to %p, %u %u 0x%x, in 0x%llx, out 0x%llx, held %lld us\n", at,
+         GetCurrentThreadId(), what, returns_to, a, b, c, in, out, held_us);
 }
 
 HRESULT __stdcall w_set_frame_interval(Wrap*, void* output, void* length_us, void* period, void* flags, void*,
@@ -3286,6 +3275,9 @@ HRESULT __stdcall w_set_frame_interval(Wrap*, void* output, void* length_us, voi
          static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(output)), length,
          static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(period)),
          static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(flags)));
+    frame_ledger("interval", _ReturnAddress(), length, static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(period)),
+                 static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(flags)),
+                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(output)), 0, 0);
     return 0;
 }
 
@@ -3304,7 +3296,27 @@ HRESULT __stdcall w_schedule_frame_event(Wrap*, void* type_arg, void* offset_arg
     logf("ScheduleFrameEventX: event type %u at %u microseconds into the interval, fence 0x%llx, flags 0x%x\n",
          type, offset, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(fence)),
          static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(flags)));
+    frame_ledger("schedule", _ReturnAddress(), type, offset, static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(flags)),
+                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(fence)), 0, 0);
     return 0;
+}
+
+// Device slot 81 (GetFrameStatisticsX in Microsoft's public samples: frame token, a set of statistics types, a
+// place for the count, the statistics). Not provided yet: answered as before (not implemented), and written into the
+// frame ledger with what the program passed, so the program's frame numbers here can be set beside the others.
+HRESULT __stdcall w_device_slot81(Wrap*, void* token_arg, void* types_arg, unsigned* count, void* stats, void*,
+                                  void*, void*, void*) {
+    static std::once_flag once;
+    void* const returns_to = _ReturnAddress();
+    std::call_once(once, [returns_to] {
+        logf("device: method slot 81 (offset 0x288) called - not provided yet, answered not implemented (returns to "
+             "%p)\n", returns_to);
+    });
+    frame_ledger("statistics", returns_to, static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(types_arg)),
+                 count ? *count : 0xFFFFFFFFu, 0,
+                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(token_arg)),
+                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(stats)), 0);
+    return 0x80004001L;  // E_NOTIMPL
 }
 
 HRESULT __stdcall w_wait_frame_event(Wrap*, void* type_arg, void* timeout_arg, void* fence, void* flags_arg,
@@ -3312,6 +3324,7 @@ HRESULT __stdcall w_wait_frame_event(Wrap*, void* type_arg, void* timeout_arg, v
     const unsigned type = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(type_arg));
     const unsigned timeout_ms = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(timeout_arg));
     const unsigned flags = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(flags_arg));
+    void* const returns_to = _ReturnAddress();
     static std::atomic<int> shown{0};
     const bool show = shown.fetch_add(1) < 6;
     if (type >= kFrameEventTypes || !token) {
@@ -3334,7 +3347,9 @@ HRESULT __stdcall w_wait_frame_event(Wrap*, void* type_arg, void* timeout_arg, v
     if (flags & 2u) {
         frame = current;
     } else if (type != 0 && token_in != 0 && token_in <= current + 64) {
-        frame = token_in - 1;
+        // The token the program holds came from the frame start it asked for (frame k, token k + 1); its wait
+        // for another event of that token returns when that frame has actually come on the clock, not at once.
+        frame = token_in;
     } else {
         // The newest event that has passed and was not handed out yet, else the next one.
         const unsigned long long passed = now >= static_cast<long long>(offset)
@@ -3369,6 +3384,7 @@ HRESULT __stdcall w_wait_frame_event(Wrap*, void* type_arg, void* timeout_arg, v
     }
     ReleaseSRWLockExclusive(&g_clock.lock);
     *token = frame + 1;
+    frame_ledger("wait", returns_to, type, timeout_ms, flags, token_in, frame + 1, clock_now_us() - now);
     return 0;
 }
 
@@ -4287,8 +4303,8 @@ HRESULT __stdcall w_queue_slot31(Wrap*, void* batch_count, void* batches, void* 
 // window is exactly what the image's own commands left in its surface - nothing is drawn by the weave.
 //
 // Stated limits: only the first plane is shown (more than one is logged); the rectangle, the colour space, the
-// frame token and the present parameters are not used; one picture is shown per interval of the frame clock
-// (see take_display_interval - the weave's choice). The image's surface is copied without a state change of
+// frame token and the present parameters are not used; a picture is shown when the program presents it (no
+// rhythm of the weave's own: the program keeps its own timing). The image's surface is copied without a state change of
 // its own: which state the image left it in is not tracked.
 const GUID kVkSwapChainFactoryId = {0xe7d6c3ca, 0x23a0, 0x4e08, {0x9f, 0x2f, 0xea, 0x52, 0x31, 0xdf, 0x66, 0x33}};
 const GUID kVkSurfaceFactoryId = {0x1e7895a1, 0x1bc3, 0x4f9c, {0xa6, 0x70, 0x29, 0x0a, 0x4b, 0xc9, 0x58, 0x1a}};
@@ -4445,10 +4461,7 @@ bool presenter_start(Presenter& p, Wrap* queue, const D3D12_RESOURCE_DESC& surfa
     const bool hidden = !IsWindowVisible(p.window);
     logf("PresentX: the image's window is %p (class \"%s\", client area %ld x %ld, %s)\n",
          static_cast<void*>(p.window), name, r.right - r.left, r.bottom - r.top,
-         hidden ? "hidden - the weave shows it, because the window is where the picture goes" : "visible");
-    if (hidden) {
-        ShowWindowAsync(p.window, SW_SHOWNOACTIVATE);
-    }
+         hidden ? "hidden - left as the program has it; the program shows its window itself" : "visible");
 
     VkSwapChainFactoryInterface* factory = nullptr;
     HRESULT hr = static_cast<IUnknown*>(queue->pc)->QueryInterface(kVkSwapChainFactoryId,
@@ -4572,7 +4585,6 @@ HRESULT __stdcall w_presentx(Wrap* self, unsigned int plane_count, const unsigne
             return 0x80004001L;
         }
     }
-    const unsigned long long display_frame = take_display_interval();
     ID3D12Resource* back = nullptr;
     HRESULT hr = p.chain->GetImage(p.chain->GetImageIndex(), IID_PPV_ARGS(&back));
     if (hr == 0) {
@@ -4619,10 +4631,10 @@ HRESULT __stdcall w_presentx(Wrap* self, unsigned int plane_count, const unsigne
         ++p.shown;
     }
     if (hr != 0 || (p.shown & (p.shown - 1)) == 0) {
-        logf("PresentX: frame token %llu - the image's surface (%llu x %u) copied and presented to the window in "
-             "interval %llu of the frame clock, 0x%lx; %llu frame(s) presented so far; the window is %s (its "
-             "thread %lu, this thread %lu)\n",
-             token, desc.Width, desc.Height, display_frame, static_cast<unsigned long>(hr), p.shown,
+        logf("PresentX: frame token %llu - the image's surface (%llu x %u) copied and presented to the window when "
+             "the program presented it, 0x%lx; %llu frame(s) presented so far; the window is %s (its thread %lu, "
+             "this thread %lu)\n",
+             token, desc.Width, desc.Height, static_cast<unsigned long>(hr), p.shown,
              IsWindowVisible(p.window) ? "visible" : "still hidden", GetWindowThreadProcessId(p.window, nullptr),
              GetCurrentThreadId());
     }
@@ -4738,7 +4750,8 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {133, reinterpret_cast<void*>(&w_device_slot133)},
          {78, reinterpret_cast<void*>(&w_set_frame_interval)},
          {79, reinterpret_cast<void*>(&w_schedule_frame_event)},
-         {80, reinterpret_cast<void*>(&w_wait_frame_event)}});
+         {80, reinterpret_cast<void*>(&w_wait_frame_event)},
+         {81, reinterpret_cast<void*>(&w_device_slot81)}});
     *device = g_device;
     logf("D3D12XboxCreateDevice: PC device created, wrapper returned\n");
     return 0;
