@@ -115,12 +115,17 @@ Environment variables read by the tools and libraries:
 
 The weave prefers a vkd3d-built `d3d12.dll` (renamed `d3d12_vk.dll`) placed beside `boot_image.exe`, with its
 `d3d12core.dll`; otherwise it uses the system's native `d3d12.dll`. Build vkd3d-proton yourself (LGPL-2.1, see
-`NOTICE.md`):
+`NOTICE.md`), from the fork this project uses: <https://github.com/ExCorvus/vkd3d-proton>, branch `whibwhi-own`.
+Its shader translator comes from <https://github.com/ExCorvus/dxil-spirv> (branch `whibwhi-own`, a submodule of
+the fork). The fork adds what the installation's own libraries need: their shaders call the console shader
+compiler's own functions (`xbox.*`) and use instructions the original translator did not read (see FINDINGS.md,
+2026-11-26 and 2026-11-27). With the original vkd3d-proton the installation's XboxBvhBuilder.dll cannot make its
+pipelines and the run stops about 5 seconds in.
 
 ```
-git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/HansKristian-Work/vkd3d-proton.git vkd3d-proton
+git clone --recurse-submodules -b whibwhi-own https://github.com/ExCorvus/vkd3d-proton.git vkd3d-proton
 # install meson, ninja, and widl (e.g. the MSYS2 mingw-w64-x86_64-tools package) first
-meson setup build --buildtype release -Denable_tests=false   # inside an MSVC vcvars64 weave, LC_ALL=C
+meson setup build --buildtype release -Denable_tests=false   # inside an MSVC vcvars64 command prompt, LC_ALL=C
 meson compile -C build
 copy build\libs\d3d12\d3d12.dll  weave\build\d3d12_vk.dll
 copy build\libs\d3d12core\d3d12core.dll  weave\build\d3d12core.dll
