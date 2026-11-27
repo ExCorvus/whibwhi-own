@@ -1961,4 +1961,8 @@ Nothing in the weave was changed. Whether any of the newly reachable places is r
   rule was the cause. Still missing: the frame statistics, and the sound device.
 - Also measured today, read-only: the program creates Windows' own spatial audio stream itself (ISpatialAudioClient
   in fn 0x1e7f580, set up from the audio engine start); both console sound chips only decode, and the program copies
-  the decoded samples out and mixes itself. The weave must not make a sound output of its own.
+  the decoded samples out and mixes itself. The weave must not make a sound output of its own.- The watchdog is the weaver (ExCorvus). It does not pace the frames or run any of the work itself. It checks that
+  the threads of the one program keep moving together: two threads renew its progress stamp (the run loop fn
+  0x1c82b20, and fn 0x120790 with fn 0xc9e350, reached through a table), and when the stamp stands still for about
+  30 seconds the program stops itself. Its progress reports are therefore the measure of whether the web holds; the
+  frame pacer, the timing table and the frame statistics are threads it watches, not parts of it.
