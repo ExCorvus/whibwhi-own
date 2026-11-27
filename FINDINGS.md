@@ -2184,4 +2184,10 @@ XboxBvhBuilder.dll 884,224 bytes, SHA-256 99f803ac22c01ef329dddb1d40be67238d2a81
 measurements hold, 313 statements, in one run with the scripts side by side.- Posted on the copysign change (dxil-spirv PR 384) the same day: the measurement, the link to the evidence
   program, and the question whether dxil-spirv wants Xbox Series DXIL support as one described set (only for shaders
   with the `dxil-ms-xb2` target, so PC DXIL is not touched). Not yet shown and said so: that the builder's shaders
-  compute the same results as on the console.
+  compute the same results as on the console.- **Correction (same day):** the list above of functions "no longer called" at 16:52 (XApuConnect, the name lookups,
+  the HTTP client start, BCrypt, the C++ stream functions, some file writes) is wrong. The run's log shows
+  XApuConnect called and refused at 16:52 exactly as before; the call ledger (calls.tsv) has 0 for it because the
+  process was ended by Windows at the breakpoint before the ledger's last counts were written. So nothing shows that
+  the program took another path: it stops where it stopped before, at the stream channel (XApuConnect refused, way 4
+  into image+0x43ad94e). The ledger's counts are only complete for a run that ends the ledger's own way; a run
+  Windows ends gives a lower bound.
