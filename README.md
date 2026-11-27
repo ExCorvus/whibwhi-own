@@ -10,6 +10,10 @@ whibwhi started as a shell: something wrapped around an unmodified program, answ
 from the console it was made for. By its code it still is one. But measuring the program showed that it is not
 wrapped around the executable. It is woven all through it.
 
+**A weave, not a web.** The program itself is the web: everything in it hangs together. The weave is the active
+process, what happens while the executable runs: call by call, the program and the weave work through each other.
+The name refers to that process, to how the executable behaves when it runs, not to a structure that sits still.
+
 **One fabric, not layers next to each other.** The program, the console libraries it imports, the libraries the
 installation ships beside it, its shaders, and the memory that the processor and the graphics chip both use do not
 sit side by side. They sit inside each other, like the loops of a crochet: every loop holds the loops beside it.
@@ -68,6 +72,8 @@ the program file itself, not the length of a run, as the reference. The longer a
 [docs/EARLY-HISTORY.md](docs/EARLY-HISTORY.md).
 
 ## Where it stands
+
+The weave is tested first with Grand Theft Auto VI (Xbox Series 1.0.2.1), chosen as the hardest case.
 
 Points 1, 2, 3 and 5 work far enough that the game starts, sets itself up, opens all its packages, creates its
 window and presents frames. **The window is black**: that is the game's cleared surface, because point 4 is
