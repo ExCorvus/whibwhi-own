@@ -46,8 +46,12 @@ only; they are not proof that the weave works with the game (AGENTS.md rule 11).
 powershell -ExecutionPolicy Bypass -File scripts\game_test.ps1 -Game <your game folder> [-Seconds 60] [-Accept]
 ```
 
-It builds the weave, runs the real game from your copy inside it once (read-only; the folder is checked
-unchanged afterwards), and records what the game did:
+It builds the weave, then runs every measurement in [measure/](../measure/README.md) on your copy (read-only; each
+checks results of FINDINGS.md and says `same` or `DIFFERS`; the output goes to `measure.txt` of the run; the C++
+one is compiled with the weave's compiler and run beside the weave's PC graphics library, so it needs Python with
+numpy and capstone and the fork's `d3d12_vk.dll` and `d3d12core.dll` in `weave\build`). Then it runs the real game
+from your copy inside the weave once (read-only; the folder is checked unchanged afterwards), and records what the
+game did:
 
 - every function the game imports, how often the game called it during the run, and whether the weave provides
   it (the loader puts a small counting stub in each import slot; `WHIWHI_CALL_LEDGER` names the file);
@@ -58,7 +62,8 @@ unchanged afterwards), and records what the game did:
   entry is right: parts of the map were written in stretches that later proved wrong.
 
 It compares that with the last run you accepted (`-Accept` makes a passing run the baseline) and says PASS or
-FAIL: FAIL when the game folder changed, when the baseline was alive at its end and this run is not, or when an
+FAIL: FAIL when the game folder changed, when a measurement says a FINDINGS result no longer holds on your copy
+(or a measurement names no file to read), when the baseline was alive at its end and this run is not, or when an
 import the game called in the baseline is not provided any more. Every other difference is listed as a note.
 The records stay on your PC (`%LOCALAPPDATA%\whiwhi\game-tests`, or `-Out`); they hold names, counts and
 addresses only, nothing of the game itself.
