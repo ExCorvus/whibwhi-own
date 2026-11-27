@@ -14,6 +14,13 @@ wrapped around the executable. It is woven all through it.
 process, what happens while the executable runs: call by call, the program and the weave work through each other.
 The name refers to that process, to how the executable behaves when it runs, not to a structure that sits still.
 
+**A consideration for other games.** The weave is measured on one program so far. Every game on the Xbox is its
+own web: it hangs its parts together in its own way, asks the console libraries in its own order, and makes its own
+choices about timing, memory, shaders and sound. What holds here (the meeting points, the order of the flow, which
+parts sit inside the weave) is not assumed to hold for another game. Each game's web has to be followed and mapped
+on its own, with its own tests, the errors met along the way and the odd behaviours seen. The method carries over;
+the map does not.
+
 **One fabric, not layers next to each other.** The program, the console libraries it imports, the libraries the
 installation ships beside it, its shaders, and the memory that the processor and the graphics chip both use do not
 sit side by side. They sit inside each other, like the loops of a crochet: every loop holds the loops beside it.
