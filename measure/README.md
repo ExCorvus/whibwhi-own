@@ -29,4 +29,6 @@ The last line says how many statements are the same as FINDINGS.md; the exit cod
 | `pe_image.py` | not a measurement: the shared reader (sections, functions from the executable's own `.pdata`, callers, rip-relative references, the number or offset in one instruction) |
 | `audio.py` | FINDINGS 2026-11-27, "the program's audio setup" and its follow-ups: the 350 sound records, the setup/start/stop/data commands, the XMA2 packet walk, what the device writes back, the stream channel's float output turned into 16-bit samples |
 
+| `topology.py` | FINDINGS 2026-11-27, the topology entries: the renderer's topology field, the places that set rectangle lists (0x11) and quad lists (0x13), the rectangle drawn from three vertices, the class the draw path makes for the pipeline key |
+
 More scripts are added as the earlier results are turned into repeatable steps.
