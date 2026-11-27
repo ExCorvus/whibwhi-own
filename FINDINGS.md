@@ -2181,4 +2181,7 @@ the graphics card runs only when its built program is passed with --pipelines.
 
 On this copy (executable 120,181,760 bytes, SHA-256 e95020b2fa4a721db3df59fdecf75621730ac559d8835252f6c3b658d5a08993;
 XboxBvhBuilder.dll 884,224 bytes, SHA-256 99f803ac22c01ef329dddb1d40be67238d2a812d01e8d040b3cb5135bc23707e): all 11
-measurements hold, 313 statements, in one run with the scripts side by side.
+measurements hold, 313 statements, in one run with the scripts side by side.- Posted on the copysign change (dxil-spirv PR 384) the same day: the measurement, the link to the evidence
+  program, and the question whether dxil-spirv wants Xbox Series DXIL support as one described set (only for shaders
+  with the `dxil-ms-xb2` target, so PC DXIL is not touched). Not yet shown and said so: that the builder's shaders
+  compute the same results as on the console.
