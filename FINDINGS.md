@@ -1868,3 +1868,32 @@ Corrections written into the map:
   negative result stops the program (int3); at the third place it returns.
 
 What the slots mean on the PC is not checked by the script; the map still marks most of it unknown.
+## 2026-11-27 - the console libraries' call sites made repeatable: measure/console_libs.py, and two corrections (measured, no run)
+
+measure/console_libs.py repeats what docs/console-libs/ says about where the program asks chad.dll, XCRDAPI.dll,
+xg_xs.dll, the three network libraries and the run-time loaded xgameruntime.dll (the sound libraries are in
+measure/audio.py). On this copy: 53 of 53 the same, after these readings:
+
+- **XDspActivate is not dead code** (chad.md section 2 said its wrapper has no referrer at all). The wrapper is
+  reached by a jump at 0x11d4740 that ends a small function at 0x11d4720 with no `.pdata` entry, which is why a
+  search over the `.pdata` functions did not see it. That function is called at 0x3b97e (fn 0x3b770) and 0x43b3966
+  (fn 0x43b3920). fn 0x3b770 hands the address of the stream's +0x70, uses the index at +0xac and keeps the result
+  at +0x60 - the fields XDspDeactivate's caller reads (section 3). Whether a run reaches these two functions is not
+  measured; what the arguments mean is not read. chad.md corrected; its proposal for this function is left as it
+  was, for ExCorvus to decide.
+- **The storage factory's interface id has a wrong digit in the map and in the weave**: the program asks for
+  `{62959d11-d45f-4884-...}` (bytes `84 48` at 0x62fc7de; the weave's own log of the request in game test 04:06
+  shows `-4884-`). xcrdapi-dstorage.md said `-4888-` and corrected. weave/xcrdapi.cpp, weave/xcrdapi.h and
+  weave/tests/test_xcrdapi.cpp carry the same wrong digit: the weave answers DStorageGetFactory whatever the id, so
+  the runs were not stopped by it, but its log line never adds "the console factory IID the image asks for", and
+  its factory's QueryInterface would not recognise the program's id. Not changed tonight (no weave changes).
+- Smaller: XDspDeactivate's chain has one more jump than chad.md section 3 listed (0x1166020 jumps to the import
+  thunk 0x5f3ff10); added.
+
+Everything else held as written: the five chad imports and their thunks, XDspConnect's chain from the audio start
+fn 0x43ad8b0 (whose order CoInitializeEx, ApuCreateHeap, fn 0x43aec40, fn 0x43aee50, fn 0x5b52510 is repeated),
+the six XDspSubmitCommand sites, XDspDisconnect from the teardown; DStorageGetFactory's one site, its arguments,
+int3, the 32 MiB call and the guard's six callers; the texture library's four plus two sites, their argument shape
+and callers; the network import counts, WSAStartup's single site with its int3 and its start-up chain, the socket,
+bind, listen, accept and connect sites; and the runtime loader, its six cached exports, the query helper's 161
+callers and the 58 wrappers that poke the runtime first.
