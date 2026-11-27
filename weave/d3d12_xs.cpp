@@ -2592,6 +2592,34 @@ void check_shader_tables(const void* signature, const std::uint8_t* container, s
             }
             check_claim("second table arrival 3: the named table has a range of this class holding word 2's register",
                         position >= 0, part);
+            // The other way round: which range of the named table covers the resource's own place in the table
+            // (word 1, counted as 32-byte records or as records of word 4's low byte), and is it of this class.
+            for (const unsigned unit : {8u, words}) {
+                if (unit == 0 || offset % unit != 0) {
+                    continue;
+                }
+                const unsigned place = offset / unit;
+                int covering = -1;
+                at = 0;
+                for (UINT i = 0; i < q.DescriptorTable.NumDescriptorRanges; ++i) {
+                    const D3D12_DESCRIPTOR_RANGE1& g = q.DescriptorTable.pDescriptorRanges[i];
+                    const int start = g.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
+                                          ? at
+                                          : static_cast<int>(g.OffsetInDescriptorsFromTableStart);
+                    const bool unbounded = g.NumDescriptors == UINT_MAX;
+                    if (static_cast<int>(place) >= start &&
+                        (unbounded || static_cast<int>(place) < start + static_cast<int>(g.NumDescriptors))) {
+                        covering = g.RangeType == class_range_type(resource_class) ? 1 : 0;
+                        break;
+                    }
+                    at = start + (unbounded ? 0 : static_cast<int>(g.NumDescriptors));
+                }
+                check_claim(unit == 8u ? "second table arrival 3: at place word 1 / 8 the named table has a range of "
+                                         "this class"
+                                       : "second table arrival 3: at place word 1 / (low byte of word 4) the named "
+                                         "table has a range of this class",
+                            covering == 1, part);
+            }
             if (position >= 0) {
                 check_claim("second table arrival 3: word 1 is 8 words times the register's position in the table",
                             offset == 8u * static_cast<unsigned>(position), part);
