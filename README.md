@@ -76,12 +76,11 @@ described are our own.
    the answers behind it are right.
 
 **Other attempts to run Xbox programs on a PC.** There are also projects, not built for one game, that run Xbox
-programs on a PC. As far as ExCorvus can see from their public descriptions (her reading, not measured here), they
-map around the weave: they recreate, one by one, the console libraries a program asks for, and translate its
-shaders on their own terms. Each recreated library is a piece of the program's fabric rewritten from outside, and
-it has to match what the program expects in every detail, including the details nobody has read yet. The weave
-goes the other way: what Windows already has, Windows answers; the weave answers only where the program reaches
-past it, and only with what was measured in the executable.
+programs on a PC, in the spirit of Wine. Their public descriptions say they provide their own, independently
+written versions of the console libraries the PC lacks, and recompile the console's shaders with their own
+translators (checked against their READMEs on 2026-11-27). The weave has to answer some of the same libraries. The
+difference ExCorvus sees (her reading, not measured here) is that they map around the weave, while the weave
+answers each call with what was measured in the executable it runs, and leaves to Windows every part Windows has.
 
 What this project does instead, as fixed rules ([AGENTS.md](AGENTS.md)): provide what the game expects and never
 change its checks; never answer "done" for work that was not done; treat the game's memory as one whole; and take
