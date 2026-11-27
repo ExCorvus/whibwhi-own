@@ -134,6 +134,9 @@ cannot be given meanings from our side.
 image afterwards; the same function uses an `CreateEventA` event at `0x9ae98c0` and `SetEvent`s it on the way
 down. **I** `0x9ae98c8` is the driver's asynchronous status word, written by the driver (or its callback) on
 another thread — which is exactly why a skeleton that fakes success would hang the boot here for ever.
+**Corrected 2026-11-27 (measured):** the image writes the word once, `0` at `0x43aec56` before the create, and only
+reads it afterwards. A device that never writes it leaves it at `0`, which passes both waits (`jns` at start-up,
+`> 0` at shut-down). So a fake success would not hang here; what the word means stays **U**.
 
 ### 3.2 AcpHalReleaseShapeContexts — 1 call site
 
@@ -255,6 +258,11 @@ The console's APU is hardware: a heap the DSP owns, a shape-context array the DS
 window, and a command/result queue the DSP drains. None of it exists here, and nothing in the image can be made
 to stand still for it. So the honest PC answer is "refuse, and say what was asked", which is what
 `weave/acp_hal.cpp` and `weave/xapu.cpp` do:
+
+**Corrected 2026-11-27:** this table is older than the weave. Today `AcpHalAllocateShapeContexts` hands out a real
+zeroed array, `ApuCreateHeap` makes a real heap below 4 GiB, `ApuAlloc` hands out parts of it, and the three
+address functions are the identity map inside that heap (see the comment at the top of `weave/acp_hal.cpp`).
+`AcpHalCreate` and the `XApu*` functions are still answered as below.
 
 | function | answer | why that value |
 | --- | --- | --- |
