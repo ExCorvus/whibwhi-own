@@ -9,10 +9,13 @@
 //   - ApuIsVirtualAddressValid checks the range is really committed host memory; ApuMapVirtualAddress /
 //     ApuMapApuAddress are the identity map (valid below 4 GiB by construction of the heap; above it the map
 //     answers 0 and logs, because a truncated identity would be a lie).
-// The one thing a PC cannot provide is the audio device itself: AcpHalCreate still answers E_NOTIMPL and writes
-// no handle, because the image waits on an async status word only the console's driver writes.
+// AcpHalCreate hands out the sound chip (acp_chip.cpp): it decodes the program's XMA2 voices into their rings
+// through FFmpeg's XMA2 decoder; without FFmpeg it answers not implemented and writes no handle. (An earlier
+// comment here said the program waits on a status word only the console's driver writes; measured, it does not:
+// the status word is written only by the program, FINDINGS.md 2026-11-27.)
 // WHIWHI_ACP_TRACE=1 logs every call, not only the first of each.
 #include "acp_hal.h"
+#include "acp_chip.hpp"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -89,6 +92,7 @@ long AcpHalAllocateShapeContexts(void* config) {
         return WHIWHI_ACP_HAL_NOT_PROVIDED;
     }
     g_shape_contexts = array;
+    whiwhi::acp::set_records(array, count);
     *reinterpret_cast<void**>(static_cast<unsigned char*>(config) + 0x38) = array;
     report(once, trace_enabled(), "AcpHalAllocateShapeContexts: %llu contexts (%llu bytes) at %p - real zeroed memory",
            count, bytes, array);
@@ -96,17 +100,16 @@ long AcpHalAllocateShapeContexts(void* config) {
 }
 
 long AcpHalCreate(void** handle) {
-    static long once = 0;
-    report(once, trace_enabled(),
-           "AcpHalCreate(handle=%p): the audio device itself is not provided on a PC (the image then waits on an "
-           "async status only the console driver writes); answering E_NOTIMPL, no handle written",
-           static_cast<void*>(handle));
-    return WHIWHI_ACP_HAL_NOT_PROVIDED;
+    if (!handle) {
+        return WHIWHI_ACP_HAL_NOT_PROVIDED;
+    }
+    return whiwhi::acp::create_chip(handle);
 }
 
 long AcpHalReleaseShapeContexts(void* config) {
     (void)config;
     if (g_shape_contexts) {
+        whiwhi::acp::set_records(nullptr, 0);
         VirtualFree(g_shape_contexts, 0, MEM_RELEASE);
         g_shape_contexts = nullptr;
     }
