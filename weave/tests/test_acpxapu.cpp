@@ -110,7 +110,7 @@ void test_acp_hal(const AcpHal& api) {
     CHECK(api.allocate_shape_contexts(nullptr) < 0);
     CHECK(api.release_shape_contexts(nullptr) == 0);
 
-    // The audio device itself is still not provided: no handle is invented.
+    // Before the program has its voice records the sound chip is not handed out: no handle is invented.
     void* handle = reinterpret_cast<void*>(kSentinel);
     CHECK(api.create(&handle) < 0);
     CHECK(handle == reinterpret_cast<void*>(kSentinel));
