@@ -1,7 +1,11 @@
-// Tests for the chad.dll skeleton (no game data, no GPU, no audio device): the built chad.dll must export the
-// five console entry points by those exact names, and every one of them must answer 0 — failure — because the
-// weave has no DSP path yet. A stub that answered success would let the image run on a lie.
+// Tests for chad.dll (no game data, no GPU, no audio device; hand-made blocks, so no proof with the program, rule
+// 11): the built chad.dll must export the five console entry points by those exact names. 0 is success, as the
+// image reads it: connect writes a channel handle, activate a status block and a stream handle, and a submitted
+// page comes back with a completion number that the status block carries too. Anything that is not a handle of
+// this library is refused (non-zero) without writing.
 #include "chad.h"
+
+#include <cstring>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -18,7 +22,7 @@ static int failures = 0;
         }                                                                                                              \
     } while (0)
 
-using Activate = long(__stdcall*)(unsigned long long, unsigned long long, unsigned long long, unsigned long long);
+using Activate = long(__stdcall*)(void*, const void*, void**, void**);
 using Connect = long(__stdcall*)(void*, unsigned long, unsigned long, unsigned long, unsigned long, void**);
 using Deactivate = long(__stdcall*)(void*);
 using Disconnect = long(__stdcall*)(void*);
@@ -50,36 +54,60 @@ int main(int argc, char** argv) {
     }
 
     // The arguments are the shapes the image passes; made up, because the test must not need game memory.
-    unsigned long long ring[0x1000 / sizeof(unsigned long long)] = {};
+    static unsigned char ring[0x2000] = {};
     void* connection = nullptr;
+    CHECK(connect(ring, sizeof(ring), 30, 0x80, 1, nullptr) != 0); // no slot: refused
     CHECK(connect(ring, sizeof(ring), 30, 0x80, 1, &connection) == 0);
-    CHECK(connection == nullptr); // nothing was published: the caller must not see a channel
+    CHECK(connection != nullptr);
 
+    // Activate as the image calls it: channel, description, where the status block goes, where the stream goes.
+    unsigned char description[0x1c] = {1};
+    void* status = nullptr;
+    void* stream = nullptr;
+    CHECK(activate(nullptr, description, &status, &stream) != 0);
+    CHECK(status == nullptr && stream == nullptr);
+    CHECK(activate(connection, description, &status, &stream) == 0);
+    CHECK(status != nullptr && stream != nullptr);
+
+    // A page round trip: the completion number comes back in the out dword and in the status block (+4), the
+    // status block's +0xc stays 0, and the answer page is written (today: the input page unchanged, a test).
+    for (unsigned i = 0; i < 0x1000; ++i) {
+        ring[i] = static_cast<unsigned char>(i * 7);
+    }
     WhiwhiChadCommand command{};
     command.gain_in = 1.0f;
     command.gain_out = 1.0f;
     command.input = ring;
-    command.output = ring + 0x800 / sizeof(unsigned long long);
+    command.output = ring + 0x1000;
     unsigned long answer = 0;
-    CHECK(submit(nullptr, &command, &answer) == 0);
-    CHECK(answer == 0); // the library did not write the answer slot
-    CHECK(submit(nullptr, nullptr, nullptr) == 0);
+    CHECK(submit(stream, &command, &answer) == 0);
+    unsigned long words[4] = {};
+    if (status) {
+        std::memcpy(words, status, sizeof(words));
+    }
+    CHECK(answer != 0 && words[1] == answer && words[3] == 0);
+    CHECK(std::memcmp(ring, ring + 0x1000, 0x1000) == 0);
+    unsigned long second = 0;
+    CHECK(submit(stream, &command, &second) == 0);
+    if (status) {
+        std::memcpy(words, status, sizeof(words));
+    }
+    CHECK(second != answer && words[1] == second);
 
-    CHECK(deactivate(nullptr) == 0);
-    CHECK(disconnect(nullptr) == 0);
-    CHECK(activate(0, 0, 0, 0) == 0);
+    // Not a handle of this library: refused, nothing written.
+    unsigned long untouched = 0;
+    CHECK(submit(nullptr, &command, &untouched) != 0);
+    CHECK(submit(ring, &command, &untouched) != 0);
+    CHECK(untouched == 0);
+    CHECK(deactivate(nullptr) != 0);
+    CHECK(disconnect(nullptr) != 0);
 
-    // A second round through every export: still failure, and still nothing written to the caller's memory.
-    CHECK(connect(ring, 0, 24, 0, 0, &connection) == 0);
-    CHECK(connection == nullptr);
-    CHECK(submit(reinterpret_cast<void*>(0x1000), &command, &answer) == 0);
-    CHECK(answer == 0);
-    CHECK(deactivate(reinterpret_cast<void*>(0x1000)) == 0);
-    CHECK(disconnect(reinterpret_cast<void*>(0x1000)) == 0);
+    CHECK(deactivate(stream) == 0);
+    CHECK(disconnect(connection) == 0);
 
     FreeLibrary(lib);
     if (failures == 0) {
-        std::printf("test_chad: all checks passed (five exports, every one answered with failure)\n");
+        std::printf("test_chad: all checks passed (five exports; channel, stream and a page round trip)\n");
     }
     return failures == 0 ? 0 : 1;
 }
