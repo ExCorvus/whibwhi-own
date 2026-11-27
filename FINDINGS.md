@@ -2323,3 +2323,20 @@ the audio part of the weave.
   failure skips the store. So today the program chooses its frame interval without the display's refresh rate. On a
   PC an ID3D12Device does not give IDXGIDevice; which method sits at +0xa8 of the console's output object is not
   established (on a PC, +0xa8 of IDXGIOutput1 is GetDisplaySurfaceData1).
+## 2026-11-27 - the device's IDXGIDevice answered from Windows' adapter and monitor (game test 20:27, measured)
+
+- weave/d3d12_xs.cpp: the device now gives IDXGIDevice (until now refused). Three objects with the method order the
+  image calls (fn 0x2481ca0; the same steps as Microsoft's public sample Simple120Hz): IDXGIDevice +0x38 GetAdapter =
+  Windows' adapter of the device's LUID; IDXGIAdapter +0x38 EnumOutputs = Windows' own answer; IDXGIOutput +0xa8
+  GetDisplayModeListX = Windows' mode list in the console's 32-byte entries (DXGI_MODE_DESC, then a flags word 0).
+  Every other method of the three is logged and answered not implemented. The weave's stated choice: the image passes
+  format 0, for which Windows lists no modes (measured on the user's PC with a small test program, no game code); the
+  modes are then asked in format 28, the format of the picture the image presents.
+- Run 20:27 (PASS, copy's folder unchanged, every measurement the same; ended at 69 s at the fault image+0x161b994 as
+  before): the image asked three times; Windows gave the RX 9070 XT (LUID 0001698b) and its output 0 (DISPLAY1), 369
+  modes with refresh rates 30, 60, 75, 100, 120, 144, 165, 180 /1 and 4800/100. No other method of the three was
+  called. SetFrameIntervalX was the same as without the answer: 33,333 us, period 3 (three times).
+- Read in the image: the interval comes from a table at 0x61ece60, 60-Hz row 16667 16667 33333 50000 66667 and
+  120-Hz row 8333 8333 16667 25000 33333, by the 120-Hz byte and a divider. 33,333 us is in both rows (60 Hz divider
+  2, 120 Hz divider 4) - the image's target is 30 frames per second either way (inferred; which row it took is not
+  read at run time).
