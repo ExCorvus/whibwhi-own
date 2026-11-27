@@ -1810,3 +1810,22 @@ ExCorvus asleep; read-only work on the copy, no game or GPU run.
   (the test against 8 lay one instruction past the window it looked in); the map was right.
 - Not repeated: what the values mean (MAP.md marks those U or I), and section 1.4/1.5, which are reasoning and
   hosting, not readings.
+## 2026-11-27 - the descriptor map made repeatable: measure/descriptors.py, and a correction (measured, no run)
+
+ExCorvus asleep; read-only work on the copy, no game or GPU run.
+
+- New `measure/descriptors.py`, 29 of 29 the same after the correction below: docs/exe-map/DESCRIPTORS.md
+  section C. The record size 0x75e7000 (slot 15 asked for heap types 0-4 in a row, only the first answer stored,
+  at 0x2478e4c; the four places it multiplies an index), the sampler heap offset 0x75e7010 (one store); the five
+  places where the program copies 32-byte descriptors itself, each of which loads the device, tests its byte
+  +0x18 and otherwise calls device slot 24; the canned null descriptors (format 0x2a, view dimension 2, mapping
+  0x1688, five made through the public view call, their addresses turned into indices); the type-0 heap's
+  requested address and the int3 at 0x1cf336c; the staging sampler heap asked for without an address.
+- Correction (DESCRIPTORS.md C.2 point 2, changed in the map): the three record copy functions take the place from
+  bits 16..25 of the record (`bextr` control 0xa10), not bits 4..11. They do not share one null table: fn
+  0x4fd2b50 falls back to five null descriptors at 0x75e7540 (index bits 12..13, or 4), fn 0x4fd2c60 to a second
+  set of five at 0x75e7570, fn 0x4fd2bf0 to one descriptor at 0x75e7598 and writes to its first argument itself
+  (not to its +0x10). What the second set and the single descriptor are was not read: they lead into the
+  descriptor tables, which are not followed tonight.
+- Not repeated: the device byte's other places found on 2026-11-26 (they were written only in a working note,
+  not in FINDINGS or the map).
