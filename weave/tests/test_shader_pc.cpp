@@ -261,11 +261,11 @@ struct SampleCall {
 struct PcMachine {
     std::vector<Vec4> temps;
     std::map<std::uint32_t, Vec4> inputs, outputs;
-    // The weave's arguments buffer (weave_layout in shader_pc.hpp): word n = s<n>; words not set read as 0, so
-    // both heaps start at address 0 and a place is the address / 16.
-    std::uint32_t arguments_id = 0xFFFFFFFFu;
+    // The program's root constants (program_layout in shader_pc.hpp): arguments[n] = s<n>, the value the
+    // console's system puts in starting register n; each root constant buffer's id -> its first register.
+    std::map<std::uint32_t, std::uint32_t> root_constants;
     std::map<std::uint32_t, std::uint32_t> arguments;
-    // Any other constant buffer: its id, its place in the weave's heap (or its register), element, component.
+    // Any other constant buffer: its id, its register (its place in the table), element, component.
     std::function<std::uint32_t(std::uint32_t id, std::uint32_t place, std::uint32_t element, unsigned component)>
         constant;
     std::function<std::uint32_t(std::uint32_t id, std::uint32_t place, std::uint32_t byte)> raw;
@@ -318,8 +318,9 @@ struct PcMachine {
                 }
                 const std::uint32_t place = place_of(o, true);
                 for (unsigned i = 0; i < 4; ++i) {
-                    if (o.index0 == arguments_id) {
-                        const auto found = arguments.find(element * 4 + i);
+                    const auto root = root_constants.find(o.index0);
+                    if (root != root_constants.end()) {
+                        const auto found = arguments.find(root->second + element * 4 + i);
                         v.c[i] = found == arguments.end() ? 0u : found->second;
                     } else {
                         v.c[i] = constant ? constant(o.index0, place, element, i) : 0;
@@ -612,8 +613,8 @@ PcMachine machine_for(const PcShader& shader) {
     PcMachine machine;
     machine.temps.resize(shader.temps);
     for (const PcBinding& binding : shader.bindings) {
-        if (binding.kind == PcBindingKind::kArguments) {
-            machine.arguments_id = binding.id;
+        if (binding.kind == PcBindingKind::kConstantBuffer && binding.root_constants) {
+            machine.root_constants[binding.id] = binding.scalar_register;
         }
     }
     return machine;
@@ -1572,14 +1573,15 @@ int main() {
 
     // ---- 4a. a textured pixel program -------------------------------------------------------------------
     // Root parameters as the module's first table gives them: a descriptor table in s8 holding a texture
-    // (register 7), two constants in s9 and s10 (register 300), the sampler heap in s11. The register after
-    // them, s12, goes to the interpolation instructions. The first constant chooses the sampler.
+    // (register 7, place 0; parameter 0), two constants in s9 and s10 (register 300; parameter 1), a table of
+    // samplers in s11 (parameter 2). The register after them, s12, goes to the interpolation instructions. The
+    // sampler is the one at place 5 of its table (byte 0x50).
     {
         ModuleTables tables;
         tables.found = true;
         tables.understood = true;
         tables.layout = {layout_entry(3, 0, 1, 7, 8, 0), layout_entry(0, 0, 2, 300, 9, 1),
-                         layout_entry(6, 0, 1, 0, 11, 0)};
+                         layout_entry(6, 0, 1, 0, 11, 2)};
         tables.resources = {resource_entry(0, 3, 0, 7, 8, 8, 0), resource_entry(2, 0, 0, 300, 4, 9, 1)};
         DeclaredResources declared;
         declared.found = true;
@@ -1608,7 +1610,7 @@ int main() {
             vintrp(p, 1, 3, 0, 1, 1);
             sop2(p, 15, 126, 126, 14);         // EXEC = EXEC AND s14:s15
             sop2(p, 30, 14, 2, I(4));          // s14 = s2 * 16: the sampler's place in bytes
-            smem(p, 2, 28, 16, 14, 0);         // the sampler's four words through s16:s17 at s14
+            smem(p, 2, 28, 16, kNoRegister, 0x50); // the sampler's four words through s16:s17, place 5
             sopp(p, 12, 0xC07F);               // s_waitcnt
             mimg(p, 32, 1, 0xF, 20, 2, 0, 28); // sample the 2-D texture at (v2, v3) into v0..v3
             if (clear_exec) {
@@ -1634,25 +1636,23 @@ int main() {
             ++failures;
         } else {
             CHECK(shader.console_instructions == program.instructions.size());
-            // Bound to the weave's layout: the arguments buffer, the 2-D textures and the sampler heap.
-            const PcBinding* arguments = binding_of(shader, PcBindingKind::kArguments);
+            // Named by the program's own root parameters (program_layout): the constants as b0 of space 1, the
+            // texture at place 0 of table 0 as t0 of space 0, the sampler at place 5 of table 2 as s5 of space 2.
+            const PcBinding* arguments = binding_of(shader, PcBindingKind::kConstantBuffer);
             const PcBinding* texture = binding_of(shader, PcBindingKind::kTexture);
-            const PcBinding* heap = binding_of(shader, PcBindingKind::kSamplerHeap);
+            const PcBinding* heap = binding_of(shader, PcBindingKind::kSampler);
             CHECK(shader.bindings.size() == 3 && arguments && texture && heap);
             if (arguments && texture && heap) {
-                CHECK(arguments->space == weave_layout::kArgumentsSpace && !arguments->unbounded);
-                CHECK(texture->shader_register == 0 && texture->unbounded);
-                CHECK(texture->space == weave_layout::kTextureSpace +
-                                            static_cast<std::uint32_t>(dx::ResourceDimension::kTexture2d));
+                CHECK(arguments->space == 1 && arguments->shader_register == 0 && arguments->root_constants &&
+                      arguments->values == 2);
+                CHECK(texture->shader_register == 0 && texture->space == 0 && !texture->unbounded);
                 CHECK(texture->dimension == static_cast<std::uint32_t>(dx::ResourceDimension::kTexture2d));
-                CHECK(heap->space == weave_layout::kSamplerSpace && heap->unbounded);
+                CHECK(heap->space == 2 && heap->shader_register == 5 && !heap->unbounded);
             }
             PcMachine machine = machine_for(shader);
             machine.inputs[1].c[0] = fbits(0.125f);
             machine.inputs[1].c[1] = fbits(0.875f);
-            // The table in s8 is at address 0x70 (place 7 of the resource heap); the first constant, s9, is 5;
-            // the sampler heap's address in s11 is 0.
-            machine.arguments[8] = 0x70;
+            // The first constant, s9, is 5. The table addresses in s8 and s11 are not numbers on the PC.
             machine.arguments[9] = 5;
             machine.constant = [](std::uint32_t, std::uint32_t, std::uint32_t, unsigned) { return 0xBADu; };
             machine.sample = [](const SampleCall&) {
@@ -1669,8 +1669,8 @@ int main() {
             if (machine.samples.size() == 1 && texture && heap) {
                 const SampleCall& call = machine.samples[0];
                 CHECK(call.how == dx::Opcode::kSample);
-                CHECK(call.texture_id == texture->id && call.texture_register == 7);
-                CHECK(call.sampler_id == heap->id && call.sampler_by_number && call.sampler_number == 5);
+                CHECK(call.texture_id == texture->id && call.texture_register == 0);
+                CHECK(call.sampler_id == heap->id && !call.sampler_by_number && call.sampler_number == 5);
                 CHECK(call.where.c[0] == fbits(0.125f) && call.where.c[1] == fbits(0.875f));
             }
             CHECK(machine.outputs[0].c[0] == fbits(0.25f) && machine.outputs[0].c[1] == fbits(0.5f));
@@ -1682,23 +1682,21 @@ int main() {
             for (const PcInstruction& instruction : shader.listing) {
                 if (instruction.opcode == dx::Opcode::kSample && instruction.operands.size() == 4) {
                     char text[160];
-                    std::snprintf(text, sizeof text,
-                                  "sample r%u.xyzw, r%u.xyzw, T%u[r%u.x + 0].xyzw, S%u[r%u.x + 0]",
+                    std::snprintf(text, sizeof text, "sample r%u.xyzw, r%u.xyzw, T%u[0].xyzw, S%u[5]",
                                   instruction.operands[0].index0, instruction.operands[1].index0,
-                                  instruction.operands[2].index0, instruction.operands[2].relative_temp,
-                                  instruction.operands[3].index0, instruction.operands[3].relative_temp);
+                                  instruction.operands[2].index0, instruction.operands[3].index0);
                     sample_line = text;
                 }
             }
             CHECK(!sample_line.empty());
             char constants_line[120], heap_line[120], texture_line[120], temps_line[40];
             std::snprintf(constants_line, sizeof constants_line,
-                          "dcl_constantbuffer CB%u[0:0][17], immediateIndexed, space=%u",
-                          arguments ? arguments->id : 0, weave_layout::kArgumentsSpace);
-            std::snprintf(heap_line, sizeof heap_line, "dcl_sampler S%u[0:*], mode_default, space=%u",
-                          heap ? heap->id : 0, weave_layout::kSamplerSpace);
+                          "dcl_constantbuffer CB%u[0:0][1], immediateIndexed, space=1",
+                          arguments ? arguments->id : 0);
+            std::snprintf(heap_line, sizeof heap_line, "dcl_sampler S%u[5:5], mode_default, space=2",
+                          heap ? heap->id : 0);
             std::snprintf(texture_line, sizeof texture_line,
-                          "dcl_resource_texture2d (float,float,float,float) T%u[0:*], space=%u",
+                          "dcl_resource_texture2d (float,float,float,float) T%u[0:0], space=%u",
                           texture ? texture->id : 0, texture ? texture->space : 0);
             std::snprintf(temps_line, sizeof temps_line, "dcl_temps %u", shader.temps);
             expect_lines(disassembler, "pixel program", shader.container,
@@ -1809,7 +1807,7 @@ int main() {
             vintrp(p, 1, 3, 0, 1, 1);
             sop2(p, 15, 126, 126, 14);         // EXEC = EXEC AND s14:s15
             sop2(p, 30, 14, 2, I(4));          // s14 = s2 * 16
-            smem(p, 2, 28, 24, 14, 0);         // the sampler's four words through s24:s25 at s14
+            smem(p, 2, 28, 24, kNoRegister, 0x50); // the sampler's four words through s24:s25, place 5
             sopk(p, 0, 3, 2);                  // s3 = 2: the loop's counter
             const int head = static_cast<int>(p.size());
             mimg(p, 32, 1, 0xF, 4, 2, 8, 28);  // sample the 2-D texture at (v2, v3) into v8..v11
@@ -1834,12 +1832,11 @@ int main() {
                 ++failures;
             } else {
                 const PcBinding* texture = binding_of(written, PcBindingKind::kTexture);
-                const PcBinding* heap = binding_of(written, PcBindingKind::kSamplerHeap);
-                CHECK(texture && heap && texture->unbounded && heap->unbounded);
+                const PcBinding* heap = binding_of(written, PcBindingKind::kSampler);
+                CHECK(texture && heap && !texture->unbounded && !heap->unbounded);
                 PcMachine machine = machine_for(written);
                 machine.inputs[1].c[0] = fbits(0.125f);
                 machine.inputs[1].c[1] = fbits(0.875f);
-                machine.arguments[8] = 0x70;  // the table: place 7
                 machine.arguments[9] = 5;     // the first constant
                 machine.constant = [](std::uint32_t, std::uint32_t, std::uint32_t, unsigned) { return 0xBADu; };
                 machine.sample = [](const SampleCall&) {
@@ -1854,7 +1851,7 @@ int main() {
                 CHECK(machine.error.empty() && machine.finished && !machine.discarded);
                 CHECK(machine.samples.size() == 2);
                 for (const SampleCall& call : machine.samples) {
-                    CHECK(call.texture_register == 7 && call.sampler_by_number && call.sampler_number == 5);
+                    CHECK(call.texture_register == 0 && !call.sampler_by_number && call.sampler_number == 5);
                     CHECK(call.where.c[0] == fbits(0.125f) && call.where.c[1] == fbits(0.875f));
                 }
                 CHECK(machine.outputs[0].c[0] == fbits(0.25f) && machine.outputs[0].c[3] == fbits(1.0f));
@@ -2027,13 +2024,13 @@ int main() {
             continue;
         }
         const PcBinding* texture = binding_of(shader, PcBindingKind::kTexture);
-        CHECK(shader.bindings.size() == 2 && texture != nullptr);
+        CHECK(shader.bindings.size() == 1 && texture != nullptr);
         if (texture != nullptr) {
-            CHECK(texture->shader_register == 0 && texture->unbounded);
+            // The entry at word 8 of the table of parameter 0: place 1, so t1 of space 0.
+            CHECK(texture->shader_register == 1 && texture->space == 0 && !texture->unbounded);
             CHECK(texture->dimension == static_cast<std::uint32_t>(dx::ResourceDimension::kTexture2d));
         }
         PcMachine machine = machine_for(shader);
-        machine.arguments[8] = 0x150;  // the table; its entry at byte 0x20 is at place (0x150 + 0x20) / 16 = 23
         machine.inputs[0].c[0] = fbits(100.5f);
         machine.inputs[0].c[1] = fbits(7.5f);
         machine.sample = [](const SampleCall&) {
@@ -2050,7 +2047,7 @@ int main() {
         if (machine.samples.size() == 1 && texture != nullptr) {
             const SampleCall& call = machine.samples[0];
             CHECK(call.how == dx::Opcode::kLd);
-            CHECK(call.texture_id == texture->id && call.texture_register == 23);
+            CHECK(call.texture_id == texture->id && call.texture_register == 1);
             // Whole-number coordinates, nothing in the third place, level 0 in the fourth.
             CHECK(call.where.c[0] == 100 && call.where.c[1] == 7 && call.where.c[2] == 0 && call.where.c[3] == 0);
         }
@@ -2058,13 +2055,12 @@ int main() {
         CHECK(machine.outputs[0].c[2] == fbits(127.5f) && machine.outputs[0].c[3] == fbits(63.75f));
         char texel_texture_line[120];
         std::snprintf(texel_texture_line, sizeof texel_texture_line,
-                      "dcl_resource_texture2d (float,float,float,float) T0[0:*], space=%u",
-                      weave_layout::kTextureSpace + static_cast<std::uint32_t>(dx::ResourceDimension::kTexture2d));
+                      "dcl_resource_texture2d (float,float,float,float) T0[1:1], space=0");
         expect_lines(disassembler, "pixel program that reads a texel", shader.container,
                      {texel_texture_line, "dcl_input_ps_siv linear noperspective v0.xy, position", "ret"});
         long hr = 0;
         const std::string text = disassemble(disassembler, shader.container, &hr);
-        CHECK(hr == 0 && text.find("ld r") != std::string::npos && text.find(", T0[r") != std::string::npos);
+        CHECK(hr == 0 && text.find("ld r") != std::string::npos && text.find(", T0[1]") != std::string::npos);
     }
 
     // ---- 4b. a vertex program ----------------------------------------------------------------------------
@@ -2110,9 +2106,10 @@ int main() {
             ++failures;
         } else {
             const PcBinding* buffer = binding_of(shader, PcBindingKind::kConstantBuffer);
-            CHECK(shader.bindings.size() == 2 && buffer);
+            CHECK(shader.bindings.size() == 1 && buffer);
             if (buffer) {
-                CHECK(buffer->space == weave_layout::kConstantBufferSpace && buffer->unbounded);
+                // Place 0 of the table of parameter 0: b0 of space 0.
+                CHECK(buffer->space == 0 && buffer->shader_register == 0 && !buffer->unbounded);
             }
             PcMachine machine = machine_for(shader);
             machine.inputs[0].c[0] = fbits(1.0f);
@@ -2121,10 +2118,9 @@ int main() {
             machine.inputs[0].c[3] = fbits(99.0f);  // not in the element's mask: must not be used
             machine.inputs[1].c[0] = fbits(0.5f);
             machine.inputs[1].c[1] = fbits(0.25f);
-            machine.arguments[8] = 0x20;  // the table: its buffer at place 2
             machine.constant = [](std::uint32_t, std::uint32_t place, std::uint32_t element_number,
                                   unsigned component) {
-                return place == 2 && element_number == 1 ? fbits(2.0f + static_cast<float>(component)) : 0u;
+                return place == 0 && element_number == 1 ? fbits(2.0f + static_cast<float>(component)) : 0u;
             };
             machine.run(shader.listing);
             CHECK(machine.error.empty() && machine.finished);
@@ -2133,8 +2129,7 @@ int main() {
             CHECK(machine.outputs[0].c[0] == fbits(0.5f) && machine.outputs[0].c[1] == fbits(0.25f));
             char buffer_line[120];
             std::snprintf(buffer_line, sizeof buffer_line,
-                          "dcl_constantbuffer CB%u[0:*][4096], immediateIndexed, space=%u", buffer ? buffer->id : 0,
-                          weave_layout::kConstantBufferSpace);
+                          "dcl_constantbuffer CB%u[0:0][4096], immediateIndexed, space=0", buffer ? buffer->id : 0);
             expect_lines(disassembler, "vertex program", shader.container,
                          {buffer_line, "dcl_input v0.xyz", "dcl_input v1.xy", "dcl_output o0.xy",
                           "dcl_output_siv o1.xyzw, position", "ret"});
@@ -2189,13 +2184,12 @@ int main() {
             ++failures;
         } else {
             const PcBinding* buffer = binding_of(shader, PcBindingKind::kConstantBuffer);
-            CHECK(shader.bindings.size() == 2 && buffer && buffer->indexed);
+            CHECK(shader.bindings.size() == 1 && buffer && buffer->indexed);
             PcMachine machine = machine_for(shader);
             machine.inputs[1].c[0] = fbits(5.0f);
-            machine.arguments[8] = 0x30;  // the table: its buffer at place 3
             machine.constant = [](std::uint32_t, std::uint32_t place, std::uint32_t element_number,
                                   unsigned component) {
-                return place == 3 ? element_number * 16 + component : 0xBADu;
+                return place == 0 ? element_number * 16 + component : 0xBADu;
             };
             machine.run(shader.listing);
             CHECK(machine.error.empty() && machine.finished);
@@ -2209,17 +2203,16 @@ int main() {
                 if (instruction.operands.size() == 2 && instruction.operands[1].file == dx::OperandFile::kConstantBuffer &&
                     instruction.operands[1].relative_index && instruction.operands[1].index2 == 2) {
                     char text[120];
-                    std::snprintf(text, sizeof text, "mov r%u.xyzw, CB%u[r%u.x + 0][r%u.x + 2].xyzw",
+                    std::snprintf(text, sizeof text, "mov r%u.xyzw, CB%u[0][r%u.x + 2].xyzw",
                                   instruction.operands[0].index0, buffer ? buffer->id : 0,
-                                  instruction.operands[1].range_temp, instruction.operands[1].relative_temp);
+                                  instruction.operands[1].relative_temp);
                     read_line = text;
                 }
             }
             CHECK(!read_line.empty());
             char buffer_line[120];
             std::snprintf(buffer_line, sizeof buffer_line,
-                          "dcl_constantbuffer CB%u[0:*][4096], dynamicIndexed, space=%u", buffer ? buffer->id : 0,
-                          weave_layout::kConstantBufferSpace);
+                          "dcl_constantbuffer CB%u[0:0][4096], dynamicIndexed, space=0", buffer ? buffer->id : 0);
             expect_lines(disassembler, "vertex program with an element number", shader.container,
                          {buffer_line, read_line, "ret"});
         }
@@ -2448,12 +2441,12 @@ int main() {
             ModuleTables tables;
             tables.found = true;
             tables.understood = true;
-            tables.layout = {layout_entry(6, 0, 1, 0, 8, 0)};   // the sampler heap in s8
+            tables.layout = {layout_entry(6, 0, 1, 0, 8, 0)};   // a table of samplers in s8 (parameter 0)
             Signature inputs, outputs;
             inputs.found = outputs.found = true;
             P p;
             sopk(p, 0, 2, 7);                        // word 0: s2 = 7
-            sopc(p, 6, 8, I(0));                     // word 1: scc = (s8 == 0), true (s8 reads as zero)
+            sopc(p, 6, 2, I(7));                     // word 1: scc = (s2 == 7), true
             sopp(p, 5, 3);                           // word 2: if scc, go to word 6 (the read)
             smem(p, 2, 0, 8, kNoRegister, 0);        // words 3,4: a sampler's four words over s0..s3
             sopp(p, 2, 1);                           // word 5: go to word 7 (the end)
