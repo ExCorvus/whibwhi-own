@@ -1710,3 +1710,20 @@ back, before any answer. Read in fn 0x43aec40 (the setup) and the places that us
 - ExCorvus, on where the volume is (2026-11-27): "the volume is in the web"; "it's a weave because it is an
   active process while the game runs, but the programm itself is a web". The program is the web; the weave is
   the running process through it. So the volume is to be looked for inside the program, not added by the weave.
+## 2026-11-27 - the measurements made repeatable: measure/ (first script: audio)
+
+ExCorvus (2026-11-27): "we need to commit it in a way that people can repeat the step to here and independently
+verify"; "basically if they have the game, they should be able to help". Until now most readings of the
+executable were made with tools outside the repository (one of them a private local map that is never shared),
+so nobody else could repeat them.
+
+- New folder `measure/` (our own code; not part of the build or the game test, so the commit gate for weave/ and
+  scripts/ does not apply - ExCorvus's choice): `pe_image.py` reads the executable named on the command line,
+  read-only and in memory (sections, functions from its own `.pdata`, direct callers, rip-relative references,
+  the number or offset held by one instruction); `audio.py` checks the statements of today's audio entries and
+  prints `same` / `DIFFERS` for each. Only addresses and numbers are kept in the scripts, no instruction text.
+- `python measure/audio.py <executable>` on this copy: 41 of 41 the same.
+- Correction found by it: the payload area 0x9ae98a8 is used by four functions, not three. The fourth, fn
+  0x5a87480, is the start-up initialisation of that data and only writes it (zero); the earlier reading had
+  dismissed the hit as a false one because the tool used then decoded it wrongly. The statement "fn 0x4e64b10 is
+  the only other reader" still holds.
