@@ -76,6 +76,9 @@ What works today, and where a run currently stops, is in the **Current state** b
 - [docs/console-libs/](docs/console-libs/) — what the executable asks of each console-only library.
 - [docs/SHADER-TRANSLATOR.md](docs/SHADER-TRANSLATOR.md) — the shader translation plan.
 - [FINDINGS.md](FINDINGS.md) — current state and the dated log of measurements.
+- [`measure/`](measure/) — scripts that repeat the measurements on anyone's own copy, read-only
+  ([measure/README.md](measure/README.md)). Not part of the build or the game test. A result read from the
+  executable gets a script here that checks it.
 - [ATTRIBUTION.md](ATTRIBUTION.md), [NOTICE.md](NOTICE.md), [LICENSE](LICENSE) — credit and licence.
 
 ## Build and test
