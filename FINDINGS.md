@@ -2021,3 +2021,23 @@ ring into its own, fn 0x4e64f00 with flag 1, and then sends opcode 0x12 with the
   took (inferred from the order of the calls); and it clears the top bit of +4 when its decoding has filled the
   ring up to the taken-out position (inferred: the only way the "full" case can arise).
 - measure/audio.py checks the four new points (45 of 45 the same).
+## 2026-11-27 - what the voice start hands the sound chip (measured, no run; measure/audio.py 56 of 56)
+
+Read in the executable at the program's voice start (fn 0x785d0), so that the weave's sound chip can take exactly
+what the program gives it. Everything below is repeated by measure/audio.py.
+
+- The voice's data must start on a 2048-byte boundary (the program tests the low 11 bits and stops the voice
+  otherwise). The data is XMA2 packets of 2048 bytes (the packet walk fn 0x55cbd10, entry of 2026-11-27 on audio).
+- The record of the voice gets: the rate class in bits 27-28 of +4 (24,000 Hz or less, 32,000 or less, 44,100 or less,
+  above that), one or two channels in bit 29 of +4 (from the object's channel count), the ring size 0x17 (0x1700
+  bytes) in bits 22-26 of +0, the ring's and the second area's chip addresses at +0x1c and +0x20, the data address at
+  +0x14 and +0x18, the length in 2048-byte packets in the low 12 bits of +0, the bit position of the first frame to
+  play in the low 26 bits of +8, and a loop count in bits 12-19 of +0 (255 when the program's loop count is over 4).
+- Where a loop begins and ends is found by fn 0x43a7440 and written into the low 26 bits of +0xc and +0x10; the
+  samples are counted by fn 0x55cbd70. Neither function was read further.
+- Nothing about volume, mixing or the output is in the record (as before).
+
+What this means for decoding (not built yet): each voice is one XMA2 stream of one or two channels at one of four
+rates. FFmpeg's XMA2 decoder (libavcodec/wmaprodec.c, xma_decode_init) takes exactly that: a stream count, the
+channel count, the sample rate and 2048-byte packets. Starting at a bit position inside a packet and the loop
+points are open: FFmpeg decodes whole packets.
