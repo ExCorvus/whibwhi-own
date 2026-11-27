@@ -50,6 +50,10 @@ struct LoadedImage {
 // Asks the next load_image to count every call the image makes through its import table (for the game test).
 // The stubs keep the image's stack and arguments as they are: they count and jump.
 void set_count_import_calls(bool count);
+// Measurement, together with counting: four thread-storage slots (from TlsAlloc, each below 64) in which every
+// thread keeps the numbers (index into LoadedImage::counted, plus 1; 0 = none) of the last four imports it called,
+// newest in slots[0]. False (and no history kept) when a slot is 64 or above.
+bool set_call_history_slots(const unsigned long slots[4]);
 
 // Decides what an import slot is connected to. Returns nullptr for an import the weave does not provide.
 using ImportResolver = std::function<void*(const std::string& library, const ImportedFunction& fn)>;
