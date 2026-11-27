@@ -2375,3 +2375,21 @@ the audio part of the weave.
   does not check that answer and reads the values the method should have written (they stay the program's own
   zeros). The storage queue's method +0x30 is answered "not recognised" six times early in the run.
 - Nothing changed in the weave for this entry.
+## 2026-11-27 - console formats 118-120 have a size; the program's window made the whole screen from outside (game tests 23:39, 23:56, measured)
+
+- The second stop (image+0x344196, entry above) follows the weave's "no size" answer for a 2560 x 1440 depth-stencil
+  texture of format 118. The program's own format table (fn 0x4d9f3c0 reads the table at 0x61ed5b8, one byte per
+  format, format - 1) gives bits per pixel; checked against the public formats it agrees for every one checked, and
+  for the console-only formats it gives 118, 119, 120: 16 bits; 116, 117, 125, 126: 0; 121-124: 4; 127: 8.
+  measure/texture_formats.py repeats this on anyone's copy. weave/xg_xs.cpp now answers 16 bits for 118-120, as the
+  program's table says (121-124 and 127 are left out: whether they are block formats is not measured).
+  Run 23:39 and run 23:56 passed with it; the program did not ask for that texture in either, so the new answer was
+  not reached yet, and neither run had the second stop.
+- The program's window (fn 0x2478440): one window class whose window function is a single jump to Windows'
+  DefWindowProcA - the program handles no window message, no key, no fullscreen switch; one CreateWindowExA with an
+  ordinary framed style (0xcf0000) at Windows' default place, with a width and height the program sets itself. On
+  the console that window is the screen. Run 23:56: the program's window was 3840 x 2160 (style 0x14cf0000), larger
+  than the monitor (DISPLAY1, 2560 x 1440). scripts/fullscreen_window.ps1 (started by the game test with -Show)
+  asks Windows from outside to make it a frameless window over the whole of DISPLAY1: done, now 2560 x 1440, style
+  0x94000000. The weave and the program are unchanged. The run ended as before at the user-interface fault
+  image+0x161b994; the first progress report came at 50.6 s (55.6 s in run 21:01).
