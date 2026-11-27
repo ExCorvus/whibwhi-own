@@ -168,10 +168,10 @@ struct Wrap {
     // Whether the last primitive topology the image set on the list is one the PC library has. Draws are held
     // while it is not: the PC library would draw them as something else.
     std::atomic<bool> topology_known{true};
-    // A pipeline state written against the weave's layout is set on the list. Its draws need the arguments buffer
-    // and the weave's heaps filled from the game's root arguments, which is not built yet; until it is, they are
-    // held (a draw with the game's own root signature bound would read the wrong places).
-    std::atomic<bool> weave_layout_set{false};
+    // For a root signature the program's own code created (device slot 16): one letter for each parameter
+    // (program_layout_signature) and each table's number of places. Empty for any other.
+    std::string layout_shape;
+    std::vector<UINT> layout_places;
 
     Wrap(void* pc_object, int kind_number, const char* kind_name)
         : vt(nullptr), image_area{}, pc(pc_object), refs(1), kind_id(kind_number), kind(kind_name) {}
@@ -1086,7 +1086,6 @@ void __stdcall w_list_set_pipeline(Wrap* self, void* state) {
     static std::atomic<int> shown{0}, refused{0};
     if (kind_of(state) != kPipeline) {
         self->pipeline_set.store(false);
-        self->weave_layout_set.store(false);
         if (few(refused)) {
             logf("command list slot 25: %p is not a pipeline state of this library - not passed on; draws on this "
                  "list are not carried out until one is set\n",
@@ -1094,13 +1093,12 @@ void __stdcall w_list_set_pipeline(Wrap* self, void* state) {
         }
         return;
     }
-    // Every pipeline state this library makes is written against the weave's layout (device slot 86). It is not
-    // set on the PC list until the list's arguments for that layout are filled; draws are held meanwhile.
-    self->pipeline_set.store(false);
-    self->weave_layout_set.store(true);
+    // Every pipeline state this library makes uses the program's own root signature (device slots 16 and 86), so
+    // it is set on the PC list as it is named; the root arguments the program sets reach the same list.
+    static_cast<ID3D12GraphicsCommandList*>(self->pc)->SetPipelineState(static_cast<ID3D12PipelineState*>(to_pc(state)));
+    self->pipeline_set.store(true);
     if (few(shown)) {
-        logf("command list slot 25: a pipeline state of the weave's layout named - not set on the PC list yet (its "
-             "arguments are not filled yet); draws on this list are held\n");
+        logf("command list slot 25: a pipeline state set on the PC list\n");
     }
 }
 
@@ -1150,16 +1148,6 @@ bool pipeline_ready(Wrap* self, const char* what) {
     }
     if (self->pipeline_set.load()) {
         return true;
-    }
-    if (self->weave_layout_set.load()) {
-        static std::atomic<unsigned long long> held{0};
-        const unsigned long long nth = held.fetch_add(1) + 1;
-        if ((nth & (nth - 1)) == 0) {
-            logf("command list: %s asked with a pipeline state of the weave's layout named (time %llu) - NOT DRAWN, "
-                 "its arguments are not filled yet\n",
-                 what, nth);
-        }
-        return false;
     }
     const unsigned long long nth = g_draws_without_pipeline.fetch_add(1) + 1;
     if ((nth & (nth - 1)) == 0) {
@@ -2087,72 +2075,6 @@ std::shared_ptr<const whiwhi::weave::PcShader> translated_shader(const std::uint
     return made;
 }
 
-// The weave's one root signature, the PC side of the weave's layout (shader_pc.hpp, namespace weave_layout):
-//   0  a table of samplers, s0 onward in the sampler space
-//   1  the arguments buffer, a root constant buffer at b0 of the arguments space
-//   2  a table over the resource heap, every range starting at the table's first place: constant buffers,
-//      raw buffers, and the textures of each dimension, each in its own space
-//   3..18  the buffers at addresses, root shader resources t0..t15 of the address space
-// Made once from the device the image created; the cache keeps the reference.
-ID3D12RootSignature* weave_layout_root_signature(ID3D12Device* device, HRESULT& hr) {
-    namespace layout = whiwhi::weave::weave_layout;
-    static std::once_flag once;
-    static ID3D12RootSignature* made = nullptr;
-    static HRESULT made_hr = 0x80004005L;
-    std::call_once(once, [device] {
-        const D3D12_DESCRIPTOR_RANGE_FLAGS volatile_range =
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
-        D3D12_DESCRIPTOR_RANGE1 samplers = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, UINT_MAX, 0, layout::kSamplerSpace,
-                                            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE, 0};
-        std::vector<D3D12_DESCRIPTOR_RANGE1> resources;
-        resources.push_back({D3D12_DESCRIPTOR_RANGE_TYPE_CBV, UINT_MAX, 0, layout::kConstantBufferSpace,
-                             volatile_range, 0});
-        resources.push_back({D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, layout::kRawBufferSpace, volatile_range, 0});
-        for (std::uint32_t dimension = static_cast<std::uint32_t>(whiwhi::weave::dxbc::ResourceDimension::kBuffer);
-             dimension <= static_cast<std::uint32_t>(whiwhi::weave::dxbc::ResourceDimension::kTextureCubeArray);
-             ++dimension) {
-            resources.push_back({D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, layout::kTextureSpace + dimension,
-                                 volatile_range, 0});
-        }
-        std::vector<D3D12_ROOT_PARAMETER1> parameters(3 + layout::kAddressRegisters);
-        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        parameters[0].DescriptorTable = {1, &samplers};
-        parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-        parameters[1].Descriptor = {0, layout::kArgumentsSpace, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
-        parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        parameters[2].DescriptorTable = {static_cast<UINT>(resources.size()), resources.data()};
-        parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        for (std::uint32_t n = 0; n < layout::kAddressRegisters; ++n) {
-            D3D12_ROOT_PARAMETER1& p = parameters[3 + n];
-            p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-            p.Descriptor = {n, layout::kAddressSpace, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
-            p.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        }
-        D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc = {};
-        desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-        desc.Desc_1_1.NumParameters = static_cast<UINT>(parameters.size());
-        desc.Desc_1_1.pParameters = parameters.data();
-        desc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-        const auto serialize = reinterpret_cast<long(__stdcall*)(const void*, ID3DBlob**, ID3DBlob**)>(
-            GetProcAddress(LoadLibraryA("d3d12.dll"), "D3D12SerializeVersionedRootSignature"));
-        ID3DBlob* blob = nullptr;
-        ID3DBlob* error = nullptr;
-        made_hr = serialize ? serialize(&desc, &blob, &error) : 0x80004005L;
-        if (made_hr == 0 && blob) {
-            made_hr = device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
-                                                  __uuidof(ID3D12RootSignature), reinterpret_cast<void**>(&made));
-        }
-        logf("the weave's root signature (%zu parameters, %zu resource ranges): 0x%08lx%s%s\n", parameters.size(),
-             resources.size(), static_cast<unsigned long>(made_hr), error ? " - " : "",
-             error ? static_cast<const char*>(error->GetBufferPointer()) : "");
-        if (blob) blob->Release();
-        if (error) error->Release();
-    });
-    hr = made_hr;
-    return made;
-}
 
 // Why requests were not answered with a pipeline, counted per reason; each new reason is logged once.
 SRWLOCK g_pipeline_refusals_lock = SRWLOCK_INIT;
@@ -2282,10 +2204,174 @@ std::string describe_root_signature(const void* blob, std::size_t size) {
 bool shader_check_on();
 void check_keep_signature(const void* object, const void* blob, std::size_t size);
 
-// Device slot 16, CreateRootSignature(node mask, blob, size, identifier, out): made as before; recorded.
+HMODULE pc_d3d12();
+
+// The PC root signature for one the program's own code creates (program_layout in shader_pc.hpp): the same
+// parameters in the same order, with the same kinds, visibility and flags; what each parameter's shaders read is
+// named by the parameter's number as register space. A descriptor table of N places gives its space one range
+// of each kind (constant buffers, read-only and writable resources; or samplers) over places 0 to N - 1, from
+// register 0, so that register k of space p is place k of the table whatever the shader holds there. N is the
+// table's own size (the end of its last range; no end if a range has none). Root constants, root buffers: register
+// 0 of space p. The fixed samplers: register i of the space after the last parameter (how a console program
+// receives one is not read yet; the pass refuses them). Returns an empty blob, with the reason, when the
+// description cannot be read or written.
+// shape gets one letter for each parameter (c root constants, b t u a root buffer, T a table of resources, S a
+// table of samplers) and places each table's N.
+std::vector<std::uint8_t> program_layout_signature(const void* blob, std::size_t size, std::string& reason,
+                                                   std::string& shape, std::vector<UINT>& places) {
+    using Read = HRESULT(WINAPI*)(const void*, SIZE_T, REFIID, void**);
+    using Write = HRESULT(WINAPI*)(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC*, ID3DBlob**, ID3DBlob**);
+    static const auto read =
+        reinterpret_cast<Read>(GetProcAddress(pc_d3d12(), "D3D12CreateVersionedRootSignatureDeserializer"));
+    static const auto write =
+        reinterpret_cast<Write>(GetProcAddress(pc_d3d12(), "D3D12SerializeVersionedRootSignature"));
+    std::vector<std::uint8_t> out;
+    ID3D12VersionedRootSignatureDeserializer* reader = nullptr;
+    if (!read || !write) {
+        reason = "the PC library has no root signature reader or writer";
+        return out;
+    }
+    if (!blob || !can_read(blob, size) ||
+        read(blob, size, __uuidof(ID3D12VersionedRootSignatureDeserializer), reinterpret_cast<void**>(&reader)) != 0 ||
+        !reader) {
+        reason = "the PC library does not read the program's root signature";
+        return out;
+    }
+    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* given = nullptr;
+    if (reader->GetRootSignatureDescAtVersion(D3D_ROOT_SIGNATURE_VERSION_1_1, &given) != 0 || !given) {
+        reader->Release();
+        reason = "the PC library gives no version 1.1 description of it";
+        return out;
+    }
+    const D3D12_ROOT_SIGNATURE_DESC1& r = given->Desc_1_1;
+    std::vector<D3D12_ROOT_PARAMETER1> parameters(r.pParameters, r.pParameters + r.NumParameters);
+    std::vector<std::vector<D3D12_DESCRIPTOR_RANGE1>> ranges(r.NumParameters);
+    shape.assign(r.NumParameters, '?');
+    places.assign(r.NumParameters, 0);
+    for (UINT p = 0; p < r.NumParameters; ++p) {
+        D3D12_ROOT_PARAMETER1& q = parameters[p];
+        switch (q.ParameterType) {
+        case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE: {
+            UINT end = 0, next = 0;
+            bool samplers = false, endless = false;
+            for (UINT i = 0; i < q.DescriptorTable.NumDescriptorRanges; ++i) {
+                const D3D12_DESCRIPTOR_RANGE1& g = q.DescriptorTable.pDescriptorRanges[i];
+                samplers = samplers || g.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+                const UINT start =
+                    g.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND ? next
+                                                                                              : g.OffsetInDescriptorsFromTableStart;
+                if (g.NumDescriptors == UINT_MAX) {
+                    endless = true;
+                } else {
+                    next = start + g.NumDescriptors;
+                    end = (std::max)(end, next);
+                }
+            }
+            const UINT count = endless ? UINT_MAX : end;
+            shape[p] = samplers ? 'S' : 'T';
+            places[p] = count;
+            if (samplers) {
+                ranges[p].push_back({D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, count, 0, p,
+                                     D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE, 0});
+            } else {
+                const auto flags = static_cast<D3D12_DESCRIPTOR_RANGE_FLAGS>(
+                    D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE);
+                ranges[p].push_back({D3D12_DESCRIPTOR_RANGE_TYPE_CBV, count, 0, p, flags, 0});
+                ranges[p].push_back({D3D12_DESCRIPTOR_RANGE_TYPE_SRV, count, 0, p, flags, 0});
+                ranges[p].push_back({D3D12_DESCRIPTOR_RANGE_TYPE_UAV, count, 0, p, flags, 0});
+            }
+            q.DescriptorTable.NumDescriptorRanges = static_cast<UINT>(ranges[p].size());
+            q.DescriptorTable.pDescriptorRanges = ranges[p].data();
+            break;
+        }
+        case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
+            shape[p] = 'c';
+            places[p] = q.Constants.Num32BitValues;
+            q.Constants.ShaderRegister = 0;
+            q.Constants.RegisterSpace = p;
+            break;
+        default:
+            shape[p] = q.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV   ? 'b'
+                       : q.ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV ? 't'
+                                                                          : 'u';
+            q.Descriptor.ShaderRegister = 0;
+            q.Descriptor.RegisterSpace = p;
+            break;
+        }
+    }
+    std::vector<D3D12_STATIC_SAMPLER_DESC> fixed(r.pStaticSamplers, r.pStaticSamplers + r.NumStaticSamplers);
+    for (UINT s = 0; s < r.NumStaticSamplers; ++s) {
+        fixed[s].ShaderRegister = s;
+        fixed[s].RegisterSpace = r.NumParameters;
+    }
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC renamed{};
+    renamed.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    renamed.Desc_1_1 = r;
+    renamed.Desc_1_1.pParameters = parameters.data();
+    renamed.Desc_1_1.pStaticSamplers = fixed.data();
+    ID3DBlob* written = nullptr;
+    ID3DBlob* error = nullptr;
+    const HRESULT hr = write(&renamed, &written, &error);
+    if (hr == 0 && written) {
+        const auto* bytes = static_cast<const std::uint8_t*>(written->GetBufferPointer());
+        out.assign(bytes, bytes + written->GetBufferSize());
+    } else {
+        char text[96];
+        std::snprintf(text, sizeof(text), "the PC library does not write the renamed description (0x%08lx)",
+                      static_cast<unsigned long>(hr));
+        reason = text;
+        if (error && error->GetBufferSize()) {
+            reason += ": ";
+            reason.append(static_cast<const char*>(error->GetBufferPointer()), error->GetBufferSize());
+        }
+    }
+    if (written) {
+        written->Release();
+    }
+    if (error) {
+        error->Release();
+    }
+    reader->Release();
+    return out;
+}
+
+// Device slot 16, CreateRootSignature(node mask, blob, size, identifier, out). A root signature the program's own
+// code creates is made in program_layout (the call returns to a place in no loaded library: the image, placed by
+// the weave). One a library creates (the installation's builder, with PC shaders written to the public naming) is
+// made as given. Recorded either way, from the blob as given.
 HRESULT __stdcall w_device_slot16(Wrap* self, void* a1, void* a2, void* a3, void* a4, void* a5, void* a6, void* a7,
                                   void* a8) {
-    const HRESULT hr = create_thunk<16, 4, 5, kRootSignature>(self, a1, a2, a3, a4, a5, a6, a7, a8);
+    HMODULE caller = nullptr;
+    const bool program = !GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        static_cast<const char*>(_ReturnAddress()), &caller);
+    HRESULT hr = 0;
+    if (program) {
+        std::string reason, shape;
+        std::vector<UINT> places;
+        std::vector<std::uint8_t> renamed =
+            program_layout_signature(a2, reinterpret_cast<std::size_t>(a3), reason, shape, places);
+        static std::atomic<int> said{0};
+        if (renamed.empty()) {
+            logf("device slot 16: the program's root signature (%zu bytes) is not made: %s\n",
+                 reinterpret_cast<std::size_t>(a3), reason.c_str());
+            return 0x80070057L;  // E_INVALIDARG
+        }
+        hr = create_thunk<16, 4, 5, kRootSignature>(self, a1, renamed.data(), reinterpret_cast<void*>(renamed.size()),
+                                                    a4, a5, a6, a7, a8);
+        void** const made = static_cast<void**>(a5);
+        if (hr == 0 && made && is_wrap(*made)) {
+            static_cast<Wrap*>(*made)->layout_shape = shape;
+            static_cast<Wrap*>(*made)->layout_places = places;
+        }
+        if (few(said)) {
+            logf("device slot 16: the program's root signature (%zu bytes) made with its parameters as register "
+                 "spaces (%zu bytes), 0x%08lx\n",
+                 reinterpret_cast<std::size_t>(a3), renamed.size(), static_cast<unsigned long>(hr));
+        }
+    } else {
+        hr = create_thunk<16, 4, 5, kRootSignature>(self, a1, a2, a3, a4, a5, a6, a7, a8);
+    }
     void** const out = static_cast<void**>(a5);
     if (hr == 0 && out && *out && shader_check_on()) {
         check_keep_signature(*out, a2, reinterpret_cast<std::size_t>(a3));
@@ -2692,6 +2778,50 @@ void write_shader_check() {
     ReleaseSRWLockExclusive(&g_check_lock);
 }
 
+// Whether everything a written shader reads is in the program's root signature where program_layout puts it:
+// its parameter has the kind the shader's own tables give it, and a table place is one of the table's places.
+// Empty when it is; else what is not.
+std::string bindings_against_signature(const void* signature, const whiwhi::weave::PcShader& shader) {
+    using whiwhi::weave::PcBindingKind;
+    if (kind_of(const_cast<void*>(signature)) != kRootSignature) {
+        return "the stream's root signature is not one this library made";
+    }
+    const Wrap* w = static_cast<const Wrap*>(signature);
+    if (w->layout_shape.empty()) {
+        return "the stream's root signature was not created by the program's own code";
+    }
+    char text[200];
+    for (const whiwhi::weave::PcBinding& b : shader.bindings) {
+        const std::uint32_t p = b.space;
+        if (p >= w->layout_shape.size()) {
+            std::snprintf(text, sizeof(text), "a %s named as root parameter %u, which the root signature does not have",
+                          whiwhi::weave::pc_binding_kind_name(b.kind), p);
+            return text;
+        }
+        const char s = w->layout_shape[p];
+        bool ok = false;
+        switch (b.kind) {
+        case PcBindingKind::kConstantBuffer:
+            ok = b.root_constants ? s == 'c' && b.values <= w->layout_places[p] : s == 'b' || s == 'T';
+            break;
+        case PcBindingKind::kRawBuffer: ok = s == 't' || s == 'T'; break;
+        case PcBindingKind::kTexture: ok = s == 'T'; break;
+        case PcBindingKind::kSampler: ok = s == 'S'; break;
+        }
+        if (!ok) {
+            std::snprintf(text, sizeof(text), "a %s named as root parameter %u, which is '%c' in the root signature",
+                          whiwhi::weave::pc_binding_kind_name(b.kind), p, s);
+            return text;
+        }
+        if ((s == 'T' || s == 'S') && b.shader_register >= w->layout_places[p]) {
+            std::snprintf(text, sizeof(text), "a %s at place %u of table %u, which has %u places",
+                          whiwhi::weave::pc_binding_kind_name(b.kind), b.shader_register, p, w->layout_places[p]);
+            return text;
+        }
+    }
+    return std::string();
+}
+
 HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const GUID* riid, void** out, void*, void*,
                                            void*, void*, void*) {
     using whiwhi::weave::PcStage;
@@ -2712,6 +2842,8 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
     std::vector<std::uint8_t> copy;
     std::vector<std::size_t> signature_at;
     void* game_signature = nullptr;
+    unsigned topology_type = 0xFFFFFFFFu;  // none named
+    void* const returns_to = _ReturnAddress();
     std::vector<std::shared_ptr<const whiwhi::weave::PcShader>> shaders;
     if (!out || !stream || size < 8 || size > 0x10000 || !can_read(stream, static_cast<std::size_t>(size))) {
         reason = "the stream or the result place cannot be read";
@@ -2774,6 +2906,9 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
                 }
                 break;
             }
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY:
+                std::memcpy(&topology_type, payload, 4);
+                break;
             case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO: {
                 D3D12_CACHED_PIPELINE_STATE cached;
                 std::memcpy(&cached, payload, sizeof(cached));
@@ -2793,13 +2928,37 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
         if (reason.empty() && signature_at.empty()) {
             reason = "the stream names no root signature";
         }
+        // A primitive topology type the public list (0 to 4) does not have: measured, not answered differently.
+        if (topology_type != 0xFFFFFFFFu && topology_type > 4) {
+            static SRWLOCK lock = SRWLOCK_INIT;
+            static std::set<std::string> seen;
+            static std::map<unsigned, unsigned long long> counts;
+            char key[160];
+            std::snprintf(key, sizeof(key), "type %u, subobject types %s, returns to %p", topology_type,
+                          types.c_str(), returns_to);
+            AcquireSRWLockExclusive(&lock);
+            const unsigned long long nth = ++counts[topology_type];
+            const bool first = seen.size() < 32 && seen.insert(key).second;
+            ReleaseSRWLockExclusive(&lock);
+            if (first || (nth & (nth - 1)) == 0) {
+                logf("device slot 86: a pipeline description names primitive topology %s (%llu so far with type "
+                     "%u)\n",
+                     key, nth, topology_type);
+            }
+        }
+        for (const auto& shader : shaders) {
+            if (reason.empty()) {
+                reason = bindings_against_signature(game_signature, *shader);
+            }
+        }
     }
     if (reason.empty()) {
         ID3D12Device2* device = nullptr;
         hr = static_cast<IUnknown*>(self->pc)->QueryInterface(__uuidof(ID3D12Device2),
                                                              reinterpret_cast<void**>(&device));
-        ID3D12RootSignature* signature = hr == 0 && device ? weave_layout_root_signature(device, hr) : nullptr;
-        if (signature) {
+        // The program's own root signature, made in program_layout at device slot 16, as the stream names it.
+        void* const signature = kind_of(game_signature) == kRootSignature ? to_pc(game_signature) : nullptr;
+        if (hr == 0 && device && signature) {
             for (const std::size_t at : signature_at) {
                 void* pointer = signature;
                 std::memcpy(copy.data() + at, &pointer, 8);
@@ -2818,9 +2977,8 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
             }
         } else {
             char text[64];
-            std::snprintf(text, sizeof(text), "the weave's root signature was not made (0x%08lx)",
-                          static_cast<unsigned long>(hr));
-            reason = text;
+            std::snprintf(text, sizeof(text), "no PC device (0x%08lx)", static_cast<unsigned long>(hr));
+            reason = signature ? text : "the stream's root signature is not one this library made";
         }
         if (device) {
             device->Release();
