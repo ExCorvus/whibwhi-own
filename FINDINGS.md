@@ -1650,4 +1650,14 @@ back, before any answer. Read in fn 0x43aec40 (the setup) and the places that us
   at 48 kHz - not measured yet. So both formats may be in use (her view: music and voice lines may differ).
 - Downloaded for that, outside the repository (rule 8), source only, nothing built yet: libopus (xiph.org,
   BSD, E:\third_party\opus at fed7c79) and FFmpeg, whose libavcodec has the public XMA1/XMA2 decoder (LGPL,
-  E:\third_party\ffmpeg at 420f158).
+  E:\third_party\ffmpeg at 420f158).- Follow-up: the stream channel's buffer submit (fn 0x4f20ad0, opcode 3, called from a queue of pending submits
+  in fn 0x4f20990). Per stream index the program has an input slot of 640 bytes at 0x9ae98a8 + index x 640 and an
+  output area of 0x1e00 bytes at 0x9ae98a8 + 0x14000 + index x 0x1e00. It copies the packet without its first
+  two bytes into the input slot and hands over: +0x24 = 0x3c0 (960), +0x28 = packet bytes, +0x2c = the input
+  slot, +0x34 = channels (byte [obj+0x24]) x 0xf00, +0x38 = the output area, +0x1c = a float from [obj+0x18],
+  +0x20 = [obj+0x20]. 0xf00 = 960 x 4 bytes, so the output asked for is 960 samples of 4 bytes per channel,
+  up to two channels (0x1e00) - decoded sound written back into the program's own memory. So this channel is a
+  decoding service whose result comes back to the program (measured layout; that the 4-byte samples are floats
+  and that [obj+0x18] is the sample rate is inferred). 960 samples per packet is Opus's 20 ms at 48 kHz;
+  that the packets are Opus is still not shown from the data itself. The channel is not reached in today's runs:
+  XApuConnect comes after the AcpHal setup, which stops first.
