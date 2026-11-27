@@ -67,7 +67,8 @@ Copy-Item (Join-Path $build '*.exe'), (Join-Path $build '*.dll') $work -Force
 # file of the same name would win (host_libraries.cpp loads from beside boot_image.exe first).
 Get-ChildItem -LiteralPath $work -File | Where-Object { Test-Path -LiteralPath (Join-Path $Game $_.Name) } |
     ForEach-Object { Write-Host "the installation ships $($_.Name) itself - the weave's file is left out"; Remove-Item -LiteralPath $_.FullName -Force }
-$buildHash = Get-BuildHash $work
+# The build is recorded as built (the commit gate checks the build folder), not as the work folder holds it.
+$buildHash = Get-BuildHash $build
 $commit = (git -C $repo rev-parse --short HEAD).Trim()
 $dirty = @(git -C $repo status --porcelain -- weave scripts).Count
 
