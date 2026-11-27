@@ -1726,4 +1726,8 @@ so nobody else could repeat them.
 - Correction found by it: the payload area 0x9ae98a8 is used by four functions, not three. The fourth, fn
   0x5a87480, is the start-up initialisation of that data and only writes it (zero); the earlier reading had
   dismissed the hit as a false one because the tool used then decoded it wrongly. The statement "fn 0x4e64b10 is
-  the only other reader" still holds.
+  the only other reader" still holds.- Follow-up: measure/topology.py repeats the executable's part of the three topology entries (12 of 12 the same).
+  Correction found by it: the entry above says "211 instructions in the executable read or write" the field
+  +0x1237d. Counted again: 430 instructions address it; 211 of them store a byte into it, 189 of those a fixed
+  number. The numbers of places writing 0x11 (39) and 0x13 (2), and of functions setting them (37, 33 of them
+  setting nothing else), stay as they were.
