@@ -90,7 +90,10 @@ void logf(const char* format, ...) {
 
 // The first call of a method that is not provided yet says where it was called from (the address the call
 // returns to) and what it was given, so the call can be read in the image.
+void want(const void* from, const char* format, ...);
+
 void log_slot(const char* kind, int kind_id, int slot, const void* caller, void* const* arguments) {
+    want(caller, "not provided | %s method slot %d | answered not implemented", kind, slot);
     std::lock_guard<std::mutex> lock(g_log);
     const unsigned long long key = (static_cast<unsigned long long>(kind_id) << 32) |
                                     static_cast<unsigned>(slot);
@@ -102,6 +105,82 @@ void log_slot(const char* kind, int kind_id, int slot, const void* caller, void*
                      arguments[4], arguments[5]);
         std::fflush(stderr);
     }
+}
+
+// The wants ledger: a measurement only, on when WHIWHI_WANTS_LEDGER names a file. At each place where the program
+// meets the weave it counts one line per (step of the program's flow, what the program asked for, what the weave
+// gave), with the time of the first one (milliseconds after the ledger's first line) and the place in the program
+// the first one returns to. No answer changes. The file is rewritten whenever a new line appears and at every
+// 4096th call, so a run that ends early still leaves it. Numbers and words only, never the program's data.
+struct Want {
+    unsigned long long count = 0;
+    unsigned long long first_ms = 0;
+    const void* first_from = nullptr;
+};
+SRWLOCK g_wants_lock = SRWLOCK_INIT;
+std::map<std::string, Want> g_wants;
+constexpr std::size_t kWantLines = 4000;
+
+const std::string& wants_path() {
+    static const std::string path = [] {
+        char value[MAX_PATH] = {};
+        const DWORD n = GetEnvironmentVariableA("WHIWHI_WANTS_LEDGER", value, MAX_PATH);
+        return n > 0 && n < MAX_PATH ? std::string(value) : std::string();
+    }();
+    return path;
+}
+
+void write_wants_locked() {
+    FILE* file = nullptr;
+    if (fopen_s(&file, wants_path().c_str(), "wb") != 0 || !file) {
+        return;
+    }
+    std::fprintf(file, "# count\tfirst at (ms)\tfirst returns to\tstep | what the program asked for | what the weave "
+                       "gave\n");
+    for (const auto& w : g_wants) {
+        std::fprintf(file, "%llu\t%llu\t%p\t%s\n", w.second.count, w.second.first_ms, w.second.first_from,
+                     w.first.c_str());
+    }
+    std::fclose(file);
+}
+
+void want(const void* from, const char* format, ...) {
+    if (wants_path().empty()) {
+        return;
+    }
+    static const unsigned long long start = GetTickCount64();
+    static std::atomic<unsigned long long> calls{0};
+    char key[320];
+    va_list ap;
+    va_start(ap, format);
+    std::vsnprintf(key, sizeof(key), format, ap);
+    va_end(ap);
+    const unsigned long long nth = ++calls;
+    AcquireSRWLockExclusive(&g_wants_lock);
+    std::string line = key;
+    if (g_wants.size() >= kWantLines && g_wants.find(line) == g_wants.end()) {
+        line = "ledger | more kinds of line than it keeps | counted here";
+    }
+    Want& w = g_wants[line];
+    const bool fresh = w.count == 0;
+    if (fresh) {
+        w.first_ms = GetTickCount64() - start;
+        w.first_from = from;
+    }
+    ++w.count;
+    if (fresh || nth % 4096 == 0) {
+        write_wants_locked();
+    }
+    ReleaseSRWLockExclusive(&g_wants_lock);
+}
+
+void write_wants() {
+    if (wants_path().empty()) {
+        return;
+    }
+    AcquireSRWLockExclusive(&g_wants_lock);
+    write_wants_locked();
+    ReleaseSRWLockExclusive(&g_wants_lock);
 }
 
 // The kinds of object the image is handed. Each is a wrapper around the PC object of the same kind.
@@ -563,6 +642,31 @@ unsigned long long handle_to_pc(unsigned long long handle, bool gpu) {
     return result;
 }
 
+// For the wants ledger: where a handle the program hands over lies, in words - inside a heap this library made,
+// as the program sees that heap or as the PC sees it, or in none.
+std::string handle_place(unsigned long long handle) {
+    char text[96];
+    std::snprintf(text, sizeof(text), "in no heap made here");
+    AcquireSRWLockShared(&g_heaps_lock);
+    for (const HeapRange& r : g_heaps) {
+        const char* seen = nullptr;
+        if (r.title && handle >= r.title && handle < r.title + r.bytes) {
+            seen = "as the program sees it";
+        } else if (r.pc_cpu && handle >= r.pc_cpu && handle < r.pc_cpu + r.bytes) {
+            seen = "as the PC sees it";
+        } else if (r.pc_gpu && handle >= r.pc_gpu && handle < r.pc_gpu + r.bytes) {
+            seen = "as the PC's shaders see it";
+        }
+        if (seen) {
+            std::snprintf(text, sizeof(text), "in a heap of type %u%s, %s", r.type,
+                          r.pc_gpu ? " (shader-visible)" : "", seen);
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_heaps_lock);
+    return text;
+}
+
 bool heap_range_of(const Wrap* heap, HeapRange& out) {
     bool found = false;
     AcquireSRWLockShared(&g_heaps_lock);
@@ -724,6 +828,22 @@ void measure_view_in_image_heap(unsigned long long address) {
 template <int Slot, int First, int Second>
 void __stdcall cpu_handle_thunk(Wrap* self, void* a1, void* a2, void* a3, void* a4, void* a5, void* a6) {
     void* a[7] = {nullptr, to_pc(a1), to_pc(a2), to_pc(a3), to_pc(a4), to_pc(a5), to_pc(a6)};
+    if (!wants_path().empty()) {
+        static const char* const names[] = {"a constant-buffer view", "a shader-resource view",
+                                            "an unordered-access view", "a render-target view", "a depth view",
+                                            "a sampler", "descriptors copied", "descriptors copied"};
+        const char* name = Slot >= 17 && Slot <= 24 ? names[Slot - 17] : "a handle";
+        const std::string first = handle_place(reinterpret_cast<unsigned long long>(a[First]));
+        if (Second) {
+            const std::string second = handle_place(reinterpret_cast<unsigned long long>(a[Second]));
+            want(_ReturnAddress(), "4 device | slot %d, %s, heap type %u | first handle %s; second handle %s", Slot,
+                 name, Slot == 24 ? static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(a[4])) : 0u,
+                 first.c_str(), second.c_str());
+        } else {
+            want(_ReturnAddress(), "4 device | slot %d, %s%s | handle %s", Slot, name,
+                 (Slot >= 18 && Slot <= 21 && !a[1]) ? " of no resource" : "", first.c_str());
+        }
+    }
     a[First] = reinterpret_cast<void*>(handle_to_pc(reinterpret_cast<unsigned long long>(a[First]), false));
     if (Second) {
         a[Second] = reinterpret_cast<void*>(handle_to_pc(reinterpret_cast<unsigned long long>(a[Second]), false));
@@ -757,6 +877,12 @@ void __stdcall w_device_copy_descriptors(Wrap* self, unsigned int dest_count, co
                                          const unsigned int* dest_sizes, unsigned int source_count,
                                          const unsigned long long* source_starts, const unsigned int* source_sizes,
                                          unsigned int type) {
+    if (!wants_path().empty()) {
+        const std::string to = dest_starts && dest_count ? handle_place(dest_starts[0]) : "none";
+        const std::string from = source_starts && source_count ? handle_place(source_starts[0]) : "none";
+        want(_ReturnAddress(), "4 device | slot 23, descriptors copied in ranges, heap type %u | first target %s; "
+                               "first source %s", type, to.c_str(), from.c_str());
+    }
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> dest(dest_starts ? dest_count : 0), source(source_starts ? source_count : 0);
     for (std::size_t i = 0; i < dest.size(); ++i) {
         dest[i].ptr = static_cast<SIZE_T>(handle_to_pc(dest_starts[i], false));
@@ -860,6 +986,9 @@ void __stdcall w_list_set_heaps(Wrap* self, unsigned int count, void* const* hea
 template <int Graphics>
 void __stdcall w_list_root_signature(Wrap* self, void* signature) {
     static std::atomic<int> shown{0}, refused{0};
+    want(_ReturnAddress(), "8 recording | list slot %d, %s root signature | %s", 33 + Graphics,
+         Graphics ? "graphics" : "compute",
+         kind_of(signature) == kRootSignature ? "set on the PC list" : "not one of this library - not passed on");
     if (kind_of(signature) != kRootSignature) {
         if (few(refused)) {
             logf("command list slot %d: %p is not a root signature of this library - not passed on\n", 33 + Graphics,
@@ -882,6 +1011,10 @@ void __stdcall w_list_root_signature(Wrap* self, void* signature) {
     }
 }
 
+bool graphics_or_compute_root(Wrap* self, int graphics) {
+    return graphics ? self->graphics_root.load() : self->compute_root.load();
+}
+
 // Whether the list has the root signature a root argument belongs to; says so (a few times) when it has not.
 bool root_ready(Wrap* self, int graphics, int slot, std::atomic<int>& refused) {
     if (graphics ? self->graphics_root.load() : self->compute_root.load()) {
@@ -898,11 +1031,20 @@ bool root_ready(Wrap* self, int graphics, int slot, std::atomic<int>& refused) {
 template <int Graphics>
 void __stdcall w_list_root_table(Wrap* self, unsigned int index, unsigned long long handle) {
     static std::atomic<int> shown{0}, refused{0};
+    const bool ready = graphics_or_compute_root(self, Graphics);
+    unsigned long long pc = 0;
+    const bool in_heap = index < 64 && gpu_handle_in_heap(handle, pc);
+    if (!wants_path().empty()) {
+        const std::string place = handle_place(handle);
+        want(_ReturnAddress(), "8 recording | list slot %d, %s table at parameter %u | handle %s; %s", 35 + Graphics,
+             Graphics ? "graphics" : "compute", index, place.c_str(),
+             !ready ? "no root signature set yet - not passed on"
+                    : in_heap ? "passed on" : "not a position shaders can see - not passed on");
+    }
     if (!root_ready(self, Graphics, 35 + Graphics, refused)) {
         return;
     }
-    unsigned long long pc = 0;
-    if (index >= 64 || !gpu_handle_in_heap(handle, pc)) {
+    if (!in_heap) {
         if (few(refused)) {
             logf("command list slot %d: (parameter %u, handle 0x%llx) does not name a position in a descriptor heap "
                  "shaders can see - not passed on\n",
@@ -1084,6 +1226,8 @@ void __stdcall w_list_clear_target(Wrap* self, unsigned long long handle, const 
 // track of because the PC library draws with whatever is set without checking that anything is.
 void __stdcall w_list_set_pipeline(Wrap* self, void* state) {
     static std::atomic<int> shown{0}, refused{0};
+    want(_ReturnAddress(), "8 recording | list slot 25, pipeline state | %s",
+         kind_of(state) == kPipeline ? "set on the PC list" : "not one this library made - not passed on");
     if (kind_of(state) != kPipeline) {
         self->pipeline_set.store(false);
         if (few(refused)) {
@@ -1115,6 +1259,8 @@ std::atomic<unsigned long long> g_draws_with_unknown_topology{0};
 void __stdcall w_list_topology(Wrap* self, unsigned int number) {
     static SRWLOCK lock = SRWLOCK_INIT;
     static std::set<unsigned int> seen;
+    want(_ReturnAddress(), "8 recording | list slot 20, primitive topology 0x%x | %s", number,
+         public_topology(number) ? "passed on" : "not one the PC list has - draws held while it is set");
     if (public_topology(number)) {
         static_cast<ID3D12GraphicsCommandList*>(self->pc)->IASetPrimitiveTopology(
             static_cast<D3D12_PRIMITIVE_TOPOLOGY>(number));
@@ -1136,7 +1282,11 @@ void __stdcall w_list_topology(Wrap* self, unsigned int number) {
 // of two, never passed on.
 std::atomic<unsigned long long> g_draws_without_pipeline{0};
 
-bool pipeline_ready(Wrap* self, const char* what) {
+bool pipeline_ready(Wrap* self, const char* what, const void* from = nullptr) {
+    want(from, "8 drawing | %s | %s", what,
+         !self->pipeline_set.load()      ? "held: no pipeline state set"
+         : !self->topology_known.load() ? "held: a primitive topology the PC list does not have"
+                                        : "passed on");
     if (self->pipeline_set.load() && !self->topology_known.load()) {
         const unsigned long long nth = g_draws_with_unknown_topology.fetch_add(1) + 1;
         if ((nth & (nth - 1)) == 0) {
@@ -1159,7 +1309,8 @@ bool pipeline_ready(Wrap* self, const char* what) {
 // List slots 12, 13 and 14 (DrawInstanced, DrawIndexedInstanced, Dispatch; all arguments are plain numbers).
 template <int Slot>
 void __stdcall w_list_draw(Wrap* self, void* a1, void* a2, void* a3, void* a4, void* a5) {
-    if (!pipeline_ready(self, Slot == 14 ? "a dispatch" : "a draw")) {
+    if (!pipeline_ready(self, Slot == 14 ? "a dispatch" : Slot == 13 ? "an indexed draw" : "a draw",
+                        _ReturnAddress())) {
         return;
     }
     using Fn = void(__stdcall*)(void*, void*, void*, void*, void*, void*);
@@ -1300,7 +1451,7 @@ void __stdcall w_list_execute_indirect(Wrap* self, void* signature, unsigned int
         }
         return;
     }
-    if (!pipeline_ready(self, "an indirect execution")) {
+    if (!pipeline_ready(self, "an indirect execution", _ReturnAddress())) {
         return;
     }
     static_cast<ID3D12GraphicsCommandList*>(self->pc)->ExecuteIndirect(
@@ -1871,6 +2022,8 @@ HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, vo
     D3D12_COMPUTE_PIPELINE_STATE_DESC pc{};
     std::memcpy(&pc, description, sizeof(pc));
     if (!is_plain_pc_shader(pc.CS.pShaderBytecode, pc.CS.BytecodeLength)) {
+        want(_ReturnAddress(), "7 pipelines | slot 62, a compute pipeline of a console shader | not made: not "
+                               "covered yet");
         log_console_shader_parts(pc.CS.pShaderBytecode, pc.CS.BytecodeLength);
         static std::once_flag once;
         void* const returns_to = _ReturnAddress();
@@ -1909,6 +2062,8 @@ HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, vo
     if (hr == 0 && *out) {
         *out = wrap_kind(*out, kPipeline);
     }
+    want(_ReturnAddress(), "7 pipelines | slot 62, a compute pipeline of a PC shader | %s",
+         hr == 0 ? "made" : "not made: the PC device refused it");
     logf("device slot 62 (returns to %p): a compute pipeline of a PC shader (%llu bytes, arguments 3 and 4: %p %p) "
          "made by the PC device, 0x%lx\n",
          _ReturnAddress(), static_cast<unsigned long long>(pc.CS.BytecodeLength), zero1, zero2,
@@ -2990,6 +3145,8 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
             hr = 0x80004001L;  // E_NOTIMPL
         }
     }
+    want(returns_to, "7 pipelines | slot 86, a pipeline from a stream | %s%s", hr == 0 ? "made" : "not made: ",
+         reason.c_str());
     const unsigned long long count = hr == 0 ? ++made : ++refused;
     if (n <= 8 || (count & (count - 1)) == 0) {
         logf("device slot 86 #%llu: %llu bytes, subobject types %s, %zu shader(s) written -> 0x%08lx%s%s; %llu "
@@ -3079,6 +3236,9 @@ HRESULT __stdcall w_device_slot14(Wrap* self, const D3D12_DESCRIPTOR_HEAP_DESC* 
     AcquireSRWLockExclusive(&g_heaps_lock);
     g_heaps.push_back(range);
     ReleaseSRWLockExclusive(&g_heaps_lock);
+    want(_ReturnAddress(), "4 device | slot 14, descriptor heap type %u, %u descriptors, flags 0x%x | made: the PC "
+                           "heap and the program's memory for it, %u bytes a descriptor",
+         static_cast<unsigned>(desc->Type), desc->NumDescriptors, static_cast<unsigned>(desc->Flags), step);
     static std::atomic<int> shown{0};
     if (shown.fetch_add(1) < 8) {
         logf("device slot 14: descriptor heap type %u, %u descriptors of %u bytes, flags 0x%x - the image sees it at "
@@ -4939,6 +5099,7 @@ unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
     log_memory_kinds();
     log_pipeline_refusals();
     write_shader_check();
+    write_wants();
     // Per kind of object: which offsets of the image's area are not zero in at least one live object.
     std::map<std::string, std::pair<std::size_t, std::vector<bool>>> by_kind;
     AcquireSRWLockShared(&g_wraps_lock);
