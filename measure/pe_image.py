@@ -213,7 +213,7 @@ class Checks:
             if isinstance(v, bool):
                 return repr(v)
             if isinstance(v, int):
-                return hex(v)
+                return f"{v} ({v:#x})" if 9 < v < 0x10000 else (str(v) if v <= 9 else hex(v))
             if isinstance(v, (list, tuple)):
                 return "[" + ", ".join(shown(x) for x in v) + "]"
             return repr(v)
