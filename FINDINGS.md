@@ -1521,3 +1521,26 @@ So the table ranges of the named root signatures are mostly not where the shader
 by place. What does hold for every shader is the part about parameters (their number, kind, the constants'
 registers and counts, the root descriptors), measured on 2026-11-26. On the console, the program's shaders find
 their table resources by their own tables (parameter and place), not by the ranges of the root signature.
+## 2026-11-27 - the program's own root signatures in the weave's pipelines, first run (game test 02:23, measured)
+
+Built (not committed: the test failed): the weave no longer uses a layout of its own for the program's graphics
+pipelines. Each root signature the program's own code creates is made on the PC with the same parameters in the same
+order, with each parameter's number as the register space of what its shaders read (a table's place k = register k);
+the translated shaders name their resources that way, from their own tables; a pipeline uses the program's root
+signature and is set on the PC list as the program names it. Root signatures a library creates (the installation's
+builder) are made as given. 27 of 27 sample tests pass.
+
+- **The graphics driver failed** (rule 7: written first): about 60 s in, boot_image.exe ended inside the AMD Vulkan
+  driver (amdvlk64.dll +0xf22645, status c0000409, Windows' fail-fast stop; Windows Error Reporting, 02:24:00). The
+  machine and the desktop stayed up. The last line before it is vkd3d-proton's "Invalid primitive topology type #13":
+  a pipeline description names primitive topology type 13, which the public list (0 to 4) does not have. That
+  message did not appear in the run before (02:04). The copy's folder is unchanged.
+- The four root signatures the program created were made on the PC renamed (92, 116, 1304 and 1280 bytes).
+- What the pipelines refused, each reason once: a vertex shader reads a register holding a table's or buffer's
+  address as a number (s9); a sampler taken from a sampler table at a place computed at run time; a constant buffer
+  at place 3 of a table whose root signature range has 2 places (also 2 of 2, 1 of 1); a resource taken from the
+  descriptor heap by number; a fixed sampler. 2,052 pipelines were made (16,384 in the run before, made against the
+  weave's own layout and never drawn).
+- So, measured: the program's shaders read places past the ranges its named root signatures give their tables
+  (as the 02:04 entry found from the other side); some shaders compute a sampler's place at run time; a vertex
+  shader uses an address as a number. Nothing was changed after this run.
