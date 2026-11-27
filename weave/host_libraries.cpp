@@ -63,6 +63,13 @@ void* HostLibraries::resolve(const std::string& library, const ImportedFunction&
                 module = LoadLibraryExA((dir + library).c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
             }
         }
+        // GameInput (ExCorvus, 2026-11-27): the image imports GameInput.dll (GameInputCreate, ordinal 1). On a PC,
+        // Windows' file of that name is the old in-box version (0.2309); the current one, Microsoft GameInput 4.0
+        // (GameInputRedist.dll, its service running), is the one that serves the controllers today and also exports
+        // GameInputCreate as ordinal 1. So the import is answered by that one when it is installed.
+        if (!module && key == "gameinput.dll") {
+            module = LoadLibraryExA("GameInputRedist.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        }
         if (!module) {
             module = LoadLibraryExA(library.c_str(), nullptr, has_directories_ ? LOAD_LIBRARY_SEARCH_DEFAULT_DIRS : 0);
         }
