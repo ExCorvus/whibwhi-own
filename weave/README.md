@@ -59,8 +59,10 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
   `AcpHalCreate` hands out the sound chip of `acp_chip.hpp` / `acp_chip.cpp`, which decodes the program's XMA2
   voices into their rings through FFmpeg's XMA2 decoder (built by `scripts/setup_ffmpeg.ps1`, loaded at run time).
   The program mixes and plays the samples itself. Without FFmpeg the chip answers "not implemented".
-- `xapu.h` / `xapu.cpp` → `xapu.dll`, `chad.h` / `chad.cpp` → `chad.dll`. Console audio command libraries:
-  skeletons that log and answer failure.
+- `xapu.h` / `xapu.cpp` → `xapu.dll`. The stream channel: connects, answers open, close and reset with the
+  results the program expects, and decodes submitted packets with libopus (loaded from beside it) when libopus
+  reads them as exactly the samples asked for.
+- `chad.h` / `chad.cpp` → `chad.dll`. A console audio library: a skeleton that logs and answers failure.
 - `xg_xs.h` / `xg_xs.cpp` → `xg_xs.dll`. The texture layout library: answers with the weave's own untiled layout
   for formats in the public format list, copies rows in and out, refuses everything else.
 - `xbox_bvh_builder.h` / `xbox_bvh_builder.cpp` → `XboxBvhBuilder.dll`. Ray-tracing builder: a skeleton that
