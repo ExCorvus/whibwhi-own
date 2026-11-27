@@ -35,18 +35,23 @@ Called once, from fn 0x19f4df0's chain. Before the call the game has already, on
   config, dword at +0x28 = 1, dword at +0x3c = 0x20. The block is passed through unread by our library today
   (logged); the meaning of each field is not established.
 
-The call is `(adapter = null, block, riid at 0x61e0638, &device at 0x75df048)`. On success the image copies the
-device pointer to global 0x8759d00 and keeps both. Immediately after, through that device:
+The call is `(adapter = null, block, riid at 0x61e0638, &device at 0x75df048)`; it goes through a jump at
+0x5f3fd80, and the result goes to the program's result check fn 0x4e9b660. On success the image copies the
+device pointer to global 0x8759d00 and keeps both (it also copies it into ten more globals, 0x75deff8 to
+0x75df040 — read 2026-11-27). Then, through that device:
 
 | what the image does | device slot | shape read from the image |
 |---|---|---|
+| when a setting byte (0xa9438f4) is 1 and a version (from fn 0x55dea0c) is 10.0.26100.9628 or newer, calls slot 49 — the first of these calls | 49 | two integer arguments, 0x11f and 1; unknown meaning |
 | reads custom heap properties for heap types 1, 2, 3 | 26 | returns a properties block through a hidden pointer |
-| creates its pool queue | 8 | 16-byte queue desc (constant), riid, out |
-| creates five further objects | 48 | 16-byte desc (constant), riid, out — one per call |
+| creates its pool queue | 8 | 16-byte queue desc (constant), riid, out (global 0x8759ff8) |
+| creates four further objects | 48 | 16-byte desc (constant), riid, out — one per call (globals 0x75e7038 to 0x75e7050) |
 | constructs the BVH builder | (import) | `XboxBvhBuilder(device, false)`, object 0x18 bytes, global 0x75df0a8 |
-| creates one command signature | 41 | signature desc (byte stride 0x10, 1 argument, type 0), root signature null |
+| creates five command signatures | 41 | root signature null each; the first has byte stride 0x10, 1 argument, type 0; the other four are not read here |
 | creates command allocators | 9 | list type 0, riid, out (then one more per frame) |
-| checks a version string, then calls slot 49 | 49 | two integer arguments; unknown meaning |
+
+Corrected 2026-11-27 (measure/graphics_calls.py): slot 48 is called four times, not five, and slot 41 five
+times, not once; slot 49 comes first, not last.
 
 Slot 26 and slot 41 are the public D3D12 methods for their numbers, so the console device's vtable starts with
 the public method order. That also fixes slots 8, 9 and 14 by shape (see §2).
