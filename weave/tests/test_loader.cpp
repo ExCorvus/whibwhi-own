@@ -236,6 +236,40 @@ int main() {
     }
     unload_image(counted);
 
+    // With the call history: the thread's last import number (index + 1) is in the first slot, the one before it
+    // moved to the second, and the call still counts and arrives.
+    unsigned long slots[4] = {};
+    for (unsigned long& slot : slots) {
+        slot = TlsAlloc();
+    }
+    CHECK(set_call_history_slots(slots));
+    set_count_import_calls(true);
+    LoadedImage history;
+    CHECK(load_image(image, resolve, history, reason));
+    set_count_import_calls(false);
+    if (history.base) {
+        std::size_t present = 2;
+        for (std::size_t i = 0; i < history.counted.size(); ++i) {
+            if (history.counted[i].function == "GetTickCount") {
+                present = i;
+            }
+        }
+        TlsSetValue(slots[0], reinterpret_cast<void*>(static_cast<std::uintptr_t>(77)));
+        const auto tick = reinterpret_cast<DWORD(WINAPI*)()>(read64(history.base + kSlotPresent));
+        const DWORD before = GetTickCount();
+        const DWORD through = tick();
+        CHECK(through >= before && through - before < 10000);
+        CHECK(present < 2 && history.call_counts[2 * present] == 1);
+        CHECK(reinterpret_cast<std::uintptr_t>(TlsGetValue(slots[0])) == present + 1);
+        CHECK(reinterpret_cast<std::uintptr_t>(TlsGetValue(slots[1])) == 77);
+    }
+    unload_image(history);
+    const unsigned long too_high[4] = {64, 0, 0, 0};
+    CHECK(!set_call_history_slots(too_high));  // and the history is off again
+    for (unsigned long slot : slots) {
+        TlsFree(slot);
+    }
+
     if (failures == 0) {
         std::printf("loader: all checks passed\n");
         return 0;
