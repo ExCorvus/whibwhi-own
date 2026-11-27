@@ -9,8 +9,10 @@ repository contains no game data, keys or executable, and nothing here decrypts 
 ## What the weave is
 
 whibwhi started as a shell: something wrapped around an unmodified program, answering what the program expects
-from the console it was made for. By its code it still is one. But measuring the program showed that it is not
-wrapped around the executable. It is woven all through it.
+from the console it was made for. Then came the find (ExCorvus, 2026-11-26):
+
+> By its code it still is one. But measuring the program showed that it is not wrapped around the executable. It is
+> woven all through it.
 
 **A weave, not a web.** The program itself is the web: everything in it hangs together. The weave is the active
 process, what happens while the executable runs: call by call, the program and the weave work through each other.
