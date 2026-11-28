@@ -2755,3 +2755,19 @@ the audio part of the weave.
   measured.
 - Unchanged: the steady rhythm (90 presents a second from 59.6 s to 67.6 s), the rhythm stopping at about 69 s and
   the fault at image+0x161b994. The user was not what the user interface element waits for.
+## 2026-11-28 - the second part of the sampler: Windows' sampler heap, indexed directly (game tests 15:21, 15:23, measured)
+
+- weave/d3d12_xs.cpp, a measurement only: for every sampler the shader's own tables name in a root parameter that
+  is a table of resources (the 29,195 refusals "a sampler named as root parameter 0, which is 'T'"), the weave logs
+  the root signature's parameter letters, its flags and its fixed samplers, and what else the shader reads from the
+  same table; for every call of device slot 61 (the program's only sampler maker, answered "not implemented") where
+  its target lies among the descriptor heaps made here.
+- Run 15:21: every refused sampler is in the same kind of root signature, 'Tc' (a table and root constants), with
+  0 fixed samplers. The sampler is the one picked by a number computed at run time; the table holds textures 8 words
+  (32 bytes) apart and a constant buffer after them. All 49 calls of slot 61 write into a descriptor heap of type 1,
+  the sampler heap, as the program sees it (arguments 3 and 4: 1 and 1, 2 or 3).
+- Run 15:23: those root signatures carry the flags 0x801: 0x1 (input layout) and 0x800, Windows' "the sampler heap
+  is indexed directly by the shader". So the program's shaders pick their samplers straight from Windows' sampler
+  heap by number, the same way Windows' own D3D12 allows it; the program writes them there through slot 61.
+- What is missing, from this: the samplers are never written (slot 61 not answered), and the translator gives the
+  sampler as part of root parameter 0 instead of the sampler heap the flag names.
