@@ -4,15 +4,25 @@
 # fullscreen and reacts to no key; on the console its window is the screen by default. This script does it from
 # outside, through Windows, for a visible game test: the weave and the program are not changed.
 #
-#   scripts\fullscreen_window.ps1 -ProcessId <id> -Log <file> [-Monitor \\.\DISPLAY1] [-WaitSeconds 120]
+#   scripts\fullscreen_window.ps1 -ProcessId <id> -Log <file> [-ProgramLog <run.err>] [-Monitor \\.\DISPLAYn]
+#                                 [-Away <window title>] [-WaitSeconds 120]
 #
 # It waits until the process shows its window of class sgaWindowClass, writes to -Log which monitor Windows had put
-# the window on and where, then sets the window's style to a frameless popup and its place to the whole of -Monitor
-# (the output the weave names to the program, IDXGIAdapter::EnumOutputs(0)), and writes the result.
+# the window on and where, then sets the window's style to a frameless popup and its place to the whole of the
+# program's screen, and writes the result. The program's screen is the output the weave names to it
+# (IDXGIAdapter::EnumOutputs(0), the first screen of the graphics card it draws on), read from -ProgramLog; without
+# one, -Monitor; without that, the monitor Windows put the window on. (Measured 2026-11-28: after the screens were
+# plugged anew, the card's screen was \\.\DISPLAY6, no longer \\.\DISPLAY1, which had been fixed here.)
+# On the console nothing else is on the program's screen, and nothing else has the focus when the program starts
+# (ExCorvus, 2026-11-28): a window titled -Away (the live log of the run, started minimised so that it never takes
+# the focus) is shown on another screen without being made active, and then the program's window is brought to
+# the front.
 param(
     [Parameter(Mandatory)][int]$ProcessId,
     [Parameter(Mandatory)][string]$Log,
-    [string]$Monitor = '\\.\DISPLAY1',
+    [string]$ProgramLog,
+    [string]$Monitor,
+    [string]$Away,
     [int]$WaitSeconds = 120
 )
 $ErrorActionPreference = 'Stop'
@@ -43,6 +53,27 @@ public static class FullscreenWindow {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+
+    public static IntPtr Titled(string title) {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((h, p) => {
+            var text = new StringBuilder(256); GetWindowText(h, text, 256);
+            if (IsWindowVisible(h) && text.ToString().Contains(title)) { found = h; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+    public static string Other(string device) {
+        string other = null;
+        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr m, IntPtr dc, ref RECT r, IntPtr p) => {
+            string d = Info(m).Device;
+            if (!string.Equals(d, device, StringComparison.OrdinalIgnoreCase)) { other = d; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return other;
+    }
 
     public static IntPtr Find(uint pid) {
         IntPtr found = IntPtr.Zero;
@@ -88,6 +119,25 @@ $on = [FullscreenWindow]::Info([FullscreenWindow]::MonitorFromWindow($window, 2)
 $style = [FullscreenWindow]::GetWindowLongPtr($window, -16).ToInt64()
 Note ("the program's window as Windows placed it: {0}, style 0x{1:x}, on {2} ({3})" -f (Place $r), $style, $on.Device, (Place $on.Monitor))
 
+$named = $null
+$asked = Get-Date
+while (-not $Monitor -and $ProgramLog -and -not $named -and ((Get-Date) - $asked).TotalSeconds -lt 5) {
+    if (Test-Path -LiteralPath $ProgramLog) {
+        $named = Select-String -LiteralPath $ProgramLog -Pattern 'EnumOutputs\(0\) - Windows answered 0x00000000, (\\\\\.\\DISPLAY\d+)' |
+            Select-Object -First 1
+    }
+    if (-not $named) { Start-Sleep -Milliseconds 250 }
+}
+if (-not $Monitor -and $named) {
+    if ($named) {
+        $Monitor = $named.Matches[0].Groups[1].Value
+        Note "the program's screen, as the weave named it to the program: $Monitor"
+    }
+}
+if (-not $Monitor) {
+    $Monitor = $on.Device
+    Note "the program's screen: not named in its log - the monitor Windows put the window on, $Monitor"
+}
 $target = [FullscreenWindow]::Named($Monitor)
 if ($target -eq [IntPtr]::Zero) { Note "no monitor named $Monitor - nothing done"; exit 0 }
 $m = ([FullscreenWindow]::Info($target)).Monitor
@@ -102,6 +152,17 @@ Note ("set frameless over {0}: {1}; now {2}, style 0x{3:x}, on {4}" -f $Monitor,
     (Place $r), [FullscreenWindow]::GetWindowLongPtr($window, -16).ToInt64(), $on.Device)
 # On the console the program's window is the screen, in front. Windows lets a process bring a window to the front
 # only in some cases; the answer is written down as it comes.
+if ($Away) {
+    $other = [FullscreenWindow]::Other($Monitor)
+    $awayWindow = [FullscreenWindow]::Titled($Away)
+    if ($awayWindow -ne [IntPtr]::Zero -and $other) {
+        $o = ([FullscreenWindow]::Info([FullscreenWindow]::Named($other))).Work
+        [FullscreenWindow]::ShowWindow($awayWindow, 4) | Out-Null  # SW_SHOWNOACTIVATE: shown, not made active
+        # SWP_NOZORDER 0x4 | SWP_NOACTIVATE 0x10
+        $moved = [FullscreenWindow]::SetWindowPos($awayWindow, [IntPtr]::Zero, $o.L, $o.T, [Math]::Min(1600, $o.R - $o.L), [Math]::Min(900, $o.B - $o.T), 0x14)
+        Note ("the window '{0}' shown on {1}: {2}" -f $Away, $other, $(if ($moved) { 'done' } else { 'Windows refused' }))
+    }
+}
 $front = [FullscreenWindow]::SetForegroundWindow($window)
 Note ("brought to the front: {0}" -f $(if ($front) { 'yes' } else { 'Windows refused' }))
 
