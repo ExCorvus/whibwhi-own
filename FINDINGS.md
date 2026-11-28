@@ -2829,3 +2829,16 @@ the audio part of the weave.
 - Correction to the entry of 15:51: there I wrote that the fault had probably followed from the refused pipelines.
   It did not: with the loading over, the program reaches its user interface and the fault comes as before. It is
   its own cause, after the loading.
+## 2026-11-28 - the ray test is in the program's own compute shaders, not in its graphics pipelines (game test 15:59, measured)
+
+- weave/d3d12_xs.cpp: the ray census (MIMG 0xe6/0xe7, the GPU's ray test against an acceleration structure) also
+  reads every different compute shader of the program's own that device slot 62 is handed (all still answered "not
+  implemented"), logged at every power of two with the process time; the graphics census is also logged every 8,192
+  requests. Counting only.
+- Run 15:59 (PASS, ended at the fault image+0x161b994 as before): slot 62 was handed 2,048 requests by 54.9 s, 2,041
+  different shaders. 14 of them hold the ray test. 1,171 could not be read by the census (the container or its
+  program was not found by the reader used for the graphics shaders; not looked into). Graphics, slot 86: after
+  49,152 requests, 0 of 714 shaders hold the ray test.
+- So the ray test the program uses sits in its compute work, which is the part still unanswered (slot 62, "a
+  compute pipeline of a console shader"); its graphics pipelines have none. How many of the 1,171 unread ones hold
+  it too is not known.
