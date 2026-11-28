@@ -71,14 +71,30 @@ const Pair kWindowsAnswers[] = {
      {0x2549f142, 0x6419, 0x4a06, {0x97, 0xb5, 0x93, 0x1a, 0xab, 0x7c, 0x2f, 0x34}}},
 };
 
-// Held by ExCorvus's decision (AGENTS.md rule 3): Windows hands these out too, but their methods are about the
-// network and signing in. They stay refused until decided.
+// Held by ExCorvus's decision (AGENTS.md rule 3): Windows hands this out too, but its methods are about the
+// network. It stays refused until decided.
 const Pair kHeld[] = {
     {"XNetworking", {0x37e56907, 0x2f10, 0x41e8, {0xb7, 0x2f, 0x36, 0xed, 0xb1, 0x85, 0x33, 0x1a}},
      {0xbf2346b2, 0x39af, 0x4658, {0xb5, 0xea, 0x44, 0x71, 0x3c, 0x7e, 0x83, 0xb3}}},
-    {"XUser", {0x01acd177, 0x91f9, 0x4763, {0xa3, 0x8e, 0xcc, 0xbb, 0x55, 0xce, 0x32, 0xe0}},
-     {0x01acd177, 0x91f9, 0x4763, {0xa3, 0x8e, 0xcc, 0xbb, 0x55, 0xce, 0x32, 0xe0}}},
 };
+
+// ---- The user, as Windows answers on an account with no Xbox user ----------------------------------------------
+//
+// Windows hands out both user interfaces on every account (measured: QueryApiImpl answers 0 with an object, no
+// network endpoint opened). They are not passed through, because on the account that runs the weave the answer to
+// "add the default user" would be that account's Xbox user (ExCorvus, 2026-11-28: no signing in while testing).
+// Measured with Windows' runtime on a second local account that has no Xbox user, with the program's own
+// configuration file present: "add the default user silently" is accepted (0), its completion comes, and its
+// result is 0x89245106 with no user. The weave gives that same answer the same way: it begins the call on the
+// program's own block with Windows' base object, completes it with 0x89245106, and Windows' queue delivers it when
+// the program pumps it; the result is read back through Windows. The method offsets are Windows' own (named by its
+// texts inside them and the public order). Every other method is logged once and answered "not implemented".
+const Pair kUserPair = {"XUser", {0x01acd177, 0x91f9, 0x4763, {0xa3, 0x8e, 0xcc, 0xbb, 0x55, 0xce, 0x32, 0xe0}},
+                        {0x01acd177, 0x91f9, 0x4763, {0xa3, 0x8e, 0xcc, 0xbb, 0x55, 0xce, 0x32, 0xe0}}};
+const Pair kUserSecondPair = {"XUser, its second interface",
+                              {0x01acd177, 0x91f9, 0x4763, {0xa3, 0x8e, 0xcc, 0xbb, 0x55, 0xce, 0x32, 0xe0}},
+                              {0xcef4fac0, 0x7676, 0x4a94, {0xa1, 0x19, 0x4c, 0x43, 0xf9, 0xeb, 0x5b, 0x74}}};
+constexpr long kNoUserSignedIn = static_cast<long>(0x89245106L);
 
 template <size_t N>
 const Pair* find_pair(const Pair (&pairs)[N], const GUID* provider, const GUID* iid) {
@@ -133,6 +149,178 @@ void log_once_per_pair(const GUID* provider, const GUID* iid, const char* how) {
     }
 }
 
+namespace user {
+
+// The runtime's asynchronous block and provider data, as the probe measured them with Windows' base object.
+struct AsyncBlock {
+    void* queue;
+    void* context;
+    void(__stdcall* callback)(AsyncBlock*);
+    unsigned char internal[sizeof(void*) * 4];
+};
+struct ProviderData {
+    AsyncBlock* async;
+    unsigned long long size;
+    void* buffer;
+    void* context;
+};
+
+// Windows' base object methods used here (measured with the probe): +0x38 begin, +0x50 complete, +0x58 read result.
+using Begin = long(__stdcall*)(void*, AsyncBlock*, void*, const void*, const char*, void*);
+using Complete = void(__stdcall*)(void*, AsyncBlock*, long, unsigned long long);
+using Result = long(__stdcall*)(void*, AsyncBlock*, const void*, unsigned long long, void*, unsigned long long*);
+
+const char kIdentity = 0;
+
+void* windows_base() {
+    static void* base = [] {
+        using F = long(__stdcall*)(const GUID*, const GUID*, void**);
+        const auto f = windows_function<F>("QueryApiImpl");
+        void* b = nullptr;
+        const long hr = f ? f(&kBaseObject, &kBaseObject, &b) : kNoInterface;
+        if (hr < 0) {
+            b = nullptr;
+        }
+        return b;
+    }();
+    return base;
+}
+void* base_method(std::size_t offset) {
+    void* b = windows_base();
+    return b ? (*static_cast<void***>(b))[offset / 8] : nullptr;
+}
+
+void log_method(const char* which, int offset, const char* how) {
+    static std::set<std::pair<std::string, int>> seen;
+    std::lock_guard<std::mutex> lock(g_log);
+    if (seen.insert(std::make_pair(std::string(which), offset)).second) {
+        std::fprintf(stderr, "[xgameruntime] %s, method +0x%x: %s\n", which, offset, how);
+        std::fflush(stderr);
+    }
+}
+
+long __stdcall provider(int op, const ProviderData* data) {
+    if (op == 0) {
+        if (const auto complete = reinterpret_cast<Complete>(base_method(0x50))) {
+            complete(windows_base(), data->async, kNoUserSignedIn, 0);
+        }
+    }
+    return 0;
+}
+
+long __stdcall query_interface(void*, const GUID*, void** out) {
+    if (out) {
+        *out = nullptr;
+    }
+    return kNoInterface;
+}
+unsigned long __stdcall add_ref(void*) { return 1; }
+unsigned long __stdcall release(void*) { return 1; }
+
+// +0x38: add a user (options, block).
+long __stdcall add_async(void*, unsigned int options, AsyncBlock* async) {
+    const auto begin = reinterpret_cast<Begin>(base_method(0x38));
+    const long hr = begin ? begin(windows_base(), async, nullptr, &kIdentity, "XUserAddAsync",
+                                  reinterpret_cast<void*>(&provider))
+                          : kNotImplemented;
+    char how[160];
+    std::snprintf(how, sizeof(how),
+                  "add a user (options 0x%x) - begun on the program's block with Windows' base object: 0x%08lx, "
+                  "completing with 0x%08lx (no user signed in)",
+                  options, static_cast<unsigned long>(hr), static_cast<unsigned long>(kNoUserSignedIn));
+    log_method("XUser", 0x38, how);
+    return hr;
+}
+// +0x40: the result of adding a user (block, user out).
+long __stdcall add_result(void*, AsyncBlock* async, void** user) {
+    if (user) {
+        *user = nullptr;
+    }
+    const auto result = reinterpret_cast<Result>(base_method(0x58));
+    unsigned long long used = 0;
+    const long hr = result ? result(windows_base(), async, &kIdentity, 0, nullptr, &used) : kNotImplemented;
+    char how[128];
+    std::snprintf(how, sizeof(how), "the result of adding a user - Windows' base object read 0x%08lx, no user",
+                  static_cast<unsigned long>(hr));
+    log_method("XUser", 0x40, how);
+    return hr;
+}
+
+template <int Offset>
+long __stdcall not_measured_first() {
+    log_method("XUser", Offset, "not measured with Windows yet, answered 'not implemented'");
+    return kNotImplemented;
+}
+template <int Offset>
+long __stdcall not_measured_second() {
+    log_method("XUser, its second interface", Offset, "not measured with Windows yet, answered 'not implemented'");
+    return kNotImplemented;
+}
+
+// Windows' user interface reaches +0x150; the table is given to +0x1f8 so that no method the program might call
+// beyond it lands outside the table.
+constexpr int kMethods = 64;
+
+template <int I>
+struct First {
+    static void* get() { return reinterpret_cast<void*>(&not_measured_first<I * 8>); }
+};
+template <int I>
+struct Second {
+    static void* get() { return reinterpret_cast<void*>(&not_measured_second<I * 8>); }
+};
+
+template <template <int> class Maker, std::size_t... I>
+void fill(void** table, std::index_sequence<I...>) {
+    ((table[I] = Maker<static_cast<int>(I)>::get()), ...);
+}
+
+struct Object {
+    void** table;
+};
+
+void** first_table() {
+    static void* table[kMethods] = {};
+    static const bool made = [] {
+        fill<First>(table, std::make_index_sequence<kMethods>{});
+        table[0] = reinterpret_cast<void*>(&query_interface);
+        table[1] = reinterpret_cast<void*>(&add_ref);
+        table[2] = reinterpret_cast<void*>(&release);
+        table[0x38 / 8] = reinterpret_cast<void*>(&add_async);
+        table[0x40 / 8] = reinterpret_cast<void*>(&add_result);
+        return true;
+    }();
+    (void)made;
+    return table;
+}
+void** second_table() {
+    static void* table[kMethods] = {};
+    static const bool made = [] {
+        fill<Second>(table, std::make_index_sequence<kMethods>{});
+        table[0] = reinterpret_cast<void*>(&query_interface);
+        table[1] = reinterpret_cast<void*>(&add_ref);
+        table[2] = reinterpret_cast<void*>(&release);
+        return true;
+    }();
+    (void)made;
+    return table;
+}
+
+Object g_first{nullptr};
+Object g_second{nullptr};
+
+void* object(bool second) {
+    Object& o = second ? g_second : g_first;
+    static std::mutex m;
+    std::lock_guard<std::mutex> lock(m);
+    if (!o.table) {
+        o.table = second ? second_table() : first_table();
+    }
+    return &o;
+}
+
+} // namespace user
+
 } // namespace
 
 extern "C" {
@@ -179,6 +367,18 @@ long __stdcall QueryApiImpl(const GUID* provider, const GUID* iid, void** out) {
     }
     if (out) {
         *out = nullptr;
+    }
+    const Pair users[] = {kUserPair, kUserSecondPair};
+    if (const Pair* p = find_pair(users, provider, iid)) {
+        if (!out) {
+            return kNoInterface;
+        }
+        *out = user::object(p == &users[1]);
+        log_once_per_pair(provider, iid,
+                          (std::string(p->name) +
+                           ": the weave's own object, answering as Windows does on an account with no Xbox user")
+                              .c_str());
+        return 0;
     }
     if (const Pair* p = find_pair(kHeld, provider, iid)) {
         std::string how = std::string(p->name) + ": held (rule 3, ExCorvus decides), answered E_NOINTERFACE";
