@@ -2701,3 +2701,19 @@ the audio part of the weave.
   for: 2560 x 1440 (the screen's size), format 115, flags 0xc00001. The window reports "not responding" from that
   moment (fullscreen.txt: 18.5 s after it appeared) until the process ends. The program's loading (its watch scope
   open) lasts from 3.2 s to 50.9 s of the process.
+## 2026-11-28 - the screens plugged anew: the program's screen is taken from what the weave names to it (game test 14:08)
+
+- ExCorvus plugged the screens anew: the 4K screen (U28E570, 3840 x 2160) now hangs on the RX 9070 XT and is the
+  main screen, \\.\DISPLAY6; the ultrawide (CU34G4) is on the processor's graphics, \\.\DISPLAY1. Measured with
+  Windows' DXGI: the card's only output is DISPLAY6 and lists 3840 x 2160. scripts\fullscreen_window.ps1 had
+  DISPLAY1 written in: it would have put the program's window on the other card's screen.
+- scripts\fullscreen_window.ps1 now takes the program's screen from the run's log (the output the weave names to the
+  program, EnumOutputs(0)), else -Monitor, else the monitor Windows put the window on. ExCorvus: nothing else may be
+  on the program's screen or in focus when it starts - the live log window (scripts\run_program.ps1) starts
+  minimised and is shown on another screen without being made active, then the program's window is brought to the
+  front. scripts\install_port.ps1 passes the port's log the same way.
+- Run 14:08: "the program's screen, as the weave named it to the program: \\.\DISPLAY6"; Windows had placed the
+  window at 5760 x 2190 (the program's own 3840 x 2160, scaled by Windows for a program that does not declare its
+  own scaling, the screen being at 150 %); set frameless at 3840 x 2160 on DISPLAY6; the log window shown on
+  DISPLAY1. "Brought to the front: Windows refused" (started from a console in the background, as at 12:43). The
+  rectangle pipeline made, rectangles drawn; the end as before.
