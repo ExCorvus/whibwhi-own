@@ -31,8 +31,9 @@ What works today, and where a run currently stops, is in the **Current state** b
 5. **What is committed and what is done on the PC are two different things** (ExCorvus, 2026-11-28: "we are
    allowed to use shaders on the disc. it just needs to be a distinction between the things we commit and do").
    Committed: nothing of the game, in any form (rule 2). Done on the user's PC: the weave keeps the PC shaders it
-   writes, and its refusals, in a shader store (`%LOCALAPPDATA%\whiwhi\shader-store`, one file per build of the
-   graphics library) and loads it before the game's entry thread starts, because the time shaders take to be
+   writes, and its refusals, in a shader store (`%LOCALAPPDATA%\whiwhi\shader-store`, one file per version of the
+   translator's own code, so that a change elsewhere in the weave does not translate everything again on the
+   game's clock; a second translator gets a store of its own) and loads it before the game's entry thread starts, because the time shaders take to be
    written falls on time the game's own clock already counts. The store holds the written PC shaders and, of each
    game shader, only a fingerprint (hash, length, stage), never its bytes. vkd3d's own pipeline cache is kept on
    the PC the same way (`%LOCALAPPDATA%\whiwhi\vkd3d-cache`). The game's memory is not copied to disk.
