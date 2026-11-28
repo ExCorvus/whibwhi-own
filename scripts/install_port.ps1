@@ -104,6 +104,9 @@ $start = @"
 `$env:DISABLE_RTSS_LAYER = '1'
 `$env:DISABLE_VULKAN_OBS_CAPTURE = '1'
 `$log = Join-Path `$here "logs\`$stamp.err"
+# Nothing else open when the program starts: every window is minimised first, through Windows' shell (as Win+D).
+(New-Object -ComObject Shell.Application).MinimizeAll()
+Start-Sleep -Milliseconds 500
 `$p = Start-Process -FilePath (Join-Path `$here 'boot_image.exe') -WorkingDirectory `$here -PassThru ``
     -ArgumentList '"$exe"', '"$Game"', '--seconds', '86400' ``
     -RedirectStandardError `$log -RedirectStandardOutput (Join-Path `$here "logs\`$stamp.out")
