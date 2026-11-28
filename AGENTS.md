@@ -28,8 +28,13 @@ What works today, and where a run currently stops, is in the **Current state** b
    The one place the weave changes game code is `weave/loader.cpp` (`nop_loader_stubs`): in its in-memory copy
    only, it replaces breakpoint bytes in stubs that the game's tables point at, and a breakpoint that directly
    follows an indirect call. Do not add other changes to game code without ExCorvus's decision.
-5. **Keep it in memory.** Do not copy the game's memory or its whole shader set to disk. Shaders are translated
-   when the game asks for them, and kept in memory.
+5. **What is committed and what is done on the PC are two different things** (ExCorvus, 2026-11-28: "we are
+   allowed to use shaders on the disc. it just needs to be a distinction between the things we commit and do").
+   Committed: nothing of the game, in any form (rule 2). Done on the user's PC: the weave keeps the PC shaders it
+   writes, and its refusals, in a shader store (`%LOCALAPPDATA%\whiwhi\shader-store`, one file per build of the
+   graphics library) and loads it before the game's entry thread starts, because the time shaders take to be
+   written falls on time the game's own clock already counts. The store holds the written PC shaders and, of each
+   game shader, only a fingerprint (hash, length, stage), never its bytes. The game's memory is not copied to disk.
 6. **Leave the game's hang watchdog alone.** The game runs its own watchdog thread (described in
    [docs/exe-map/MAP.md](docs/exe-map/MAP.md) section 4). Do not disable it and do not report progress to it that
    did not happen.
@@ -52,7 +57,9 @@ What works today, and where a run currently stops, is in the **Current state** b
     shell needs to run on the game's own new code, otherwise we are gonna be looping forever"). A test that says
     something about the weave takes its input from the user's game copy at the time it runs: the game's real
     shaders, files and calls, read-only and in memory. Hand-made sample programs and earlier results are not proof
-    that something works. Rules 1, 2 and 5 still hold: nothing of the game is written to the repository or to disk.
+    that something works. Rules 1, 2 and 5 still hold: nothing of the game is written to the repository, and on
+    the PC only the shader store of rule 5. A shader taken from the store was written in an earlier run, so a run
+    that takes it does not test the translator on that shader.
 
 ## How work is done
 
