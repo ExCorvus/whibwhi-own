@@ -34,7 +34,8 @@ What works today, and where a run currently stops, is in the **Current state** b
    writes, and its refusals, in a shader store (`%LOCALAPPDATA%\whiwhi\shader-store`, one file per build of the
    graphics library) and loads it before the game's entry thread starts, because the time shaders take to be
    written falls on time the game's own clock already counts. The store holds the written PC shaders and, of each
-   game shader, only a fingerprint (hash, length, stage), never its bytes. The game's memory is not copied to disk.
+   game shader, only a fingerprint (hash, length, stage), never its bytes. vkd3d's own pipeline cache is kept on
+   the PC the same way (`%LOCALAPPDATA%\whiwhi\vkd3d-cache`). The game's memory is not copied to disk.
 6. **Leave the game's hang watchdog alone.** The game runs its own watchdog thread (described in
    [docs/exe-map/MAP.md](docs/exe-map/MAP.md) section 4). Do not disable it and do not report progress to it that
    did not happen.
