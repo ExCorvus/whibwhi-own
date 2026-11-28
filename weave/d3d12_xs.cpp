@@ -1317,6 +1317,64 @@ void measure_view_in_image_heap(unsigned long long address) {
     }
 }
 
+// Device slot 61 (docs/exe-map/DESCRIPTORS.md section A): the program's only way to make a sampler, (description,
+// destination). The program builds the 0x54-byte description from its own sampler record, whose flags word is
+// Windows' own filter number (the default 0x15 is MIN_MAG_MIP_LINEAR; bit 0x40 anisotropic, bits 7 and 8 the
+// reduction), and writes it to a place in its sampler heap (type 1); right after, it copies that place into its
+// shader-visible sampler heap itself with the public copy (slot 24, one descriptor, type 1). The answer is Windows'
+// own sampler at that place: each field is taken back the way fn 0x12b96b0 put it there - +0x04 is 1 when the mag
+// filter is linear and 3 when anisotropic, +0x08 1 when the min filter is linear, +0x0c 2 when the mip filter is
+// linear, +0x14 the reduction (table 0x6172fa0: 0 standard or comparison, 1 minimum, 2 maximum), +0x18..+0x20 the
+// address modes in Windows' numbering, +0x24/+0x28 MinLOD/MaxLOD, +0x30 the LOD bias, +0x34 the maximum anisotropy,
+// +0x40 the comparison function (1, Windows' NEVER, unless the record's comparison bit is set), +0x44 the border
+// colour. Stated choices: a comparison sampler is told by its function not being 1 (the description carries the
+// comparison bit only through it); an address mode of 0 (the program leaves W at 0 for a 2D texture) is given as 1,
+// the record's own default.
+void __stdcall w_device_slot61(Wrap* self, const void* description, void* destination) {
+    if (!description || !can_read(description, 0x54)) {
+        static std::atomic<int> said{0};
+        if (said.fetch_add(1) < 4) {
+            logf("device slot 61: the sampler description cannot be read (%p)\n", description);
+        }
+        return;
+    }
+    std::uint32_t w[21];
+    float f[21];
+    std::memcpy(w, description, 0x54);
+    std::memcpy(f, description, 0x54);
+    const bool anisotropic = w[1] == 3;
+    const unsigned mip = w[3] == 2 ? 1u : 0u;
+    const unsigned mag = w[1] == 1 || w[4] == 2 ? 1u : 0u;
+    const unsigned min = w[2] == 1 ? 1u : 0u;
+    const unsigned reduction = w[5] == 1 ? 2u : w[5] == 2 ? 3u : (w[16] != 1 ? 1u : 0u);
+    D3D12_SAMPLER_DESC d{};
+    d.Filter = static_cast<D3D12_FILTER>((anisotropic ? 0x54u | mip : (min << 4) | (mag << 2) | mip) |
+                                         (reduction << 7));
+    const auto mode = [](std::uint32_t m) { return static_cast<D3D12_TEXTURE_ADDRESS_MODE>(m ? m : 1u); };
+    d.AddressU = mode(w[6]);
+    d.AddressV = mode(w[7]);
+    d.AddressW = mode(w[8]);
+    d.MinLOD = f[9];
+    d.MaxLOD = f[10];
+    d.MipLODBias = f[12];
+    d.MaxAnisotropy = w[13];
+    d.ComparisonFunc = static_cast<D3D12_COMPARISON_FUNC>(w[16]);
+    for (int i = 0; i < 4; ++i) {
+        d.BorderColor[i] = f[17 + i];
+    }
+    const unsigned long long pc = handle_to_pc(reinterpret_cast<unsigned long long>(destination), false);
+    using Fn = void(__stdcall*)(void*, const D3D12_SAMPLER_DESC*, unsigned long long);
+    reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][22])(self->pc, &d, pc);
+    static std::atomic<int> said{0};
+    if (said.fetch_add(1) < 64) {
+        logf("device slot 61: Windows' sampler written at %s: filter 0x%x, address %u %u %u, LOD %g..%g bias %g, "
+             "anisotropy %u, comparison %u\n",
+             handle_place(reinterpret_cast<unsigned long long>(destination)).c_str(), static_cast<unsigned>(d.Filter),
+             static_cast<unsigned>(d.AddressU), static_cast<unsigned>(d.AddressV), static_cast<unsigned>(d.AddressW),
+             d.MinLOD, d.MaxLOD, d.MipLODBias, d.MaxAnisotropy, static_cast<unsigned>(d.ComparisonFunc));
+    }
+}
+
 // Device methods that take descriptor handles by value (one 8-byte value each). First and Second are the
 // positions of the handle arguments after the object (Second 0 = none).
 template <int Slot, int First, int Second>
@@ -6763,6 +6821,7 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
          {23, reinterpret_cast<void*>(&w_device_copy_descriptors)},
          {24, reinterpret_cast<void*>(&cpu_handle_thunk<24, 2, 3>)},  // copy (count, to, from, type)
          {25, reinterpret_cast<void*>(&w_device_allocation_info)},
+         {61, reinterpret_cast<void*>(&w_device_slot61)},  // the console's sampler (description, destination)
          {62, reinterpret_cast<void*>(&w_device_slot62)},  // compute pipeline (description, 0, 0, identifier, out)
          {70, reinterpret_cast<void*>(&w_device_slot70)},  // a shader view of the image's own memory
          {108, reinterpret_cast<void*>(&w_device_allocation_info2)},
