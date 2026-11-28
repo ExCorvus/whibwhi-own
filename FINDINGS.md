@@ -2795,3 +2795,23 @@ the audio part of the weave.
   makes its samplers (docs/exe-map/DESCRIPTORS.md, device slot 61 and the sampler records) is from 26 November 2026;
   the finding of today that the records carry Windows' own filter number builds on that description and on the game
   tests of today, all in the history.
+## 2026-11-28 - the sampler heap reached: 37,138 of 37,833 pipelines made; the program builds on and lives past 120 s (game test 15:51, measured)
+
+- weave/d3d12_xs.cpp: a program root signature that carries SAMPLER_HEAP_DIRECTLY_INDEXED (0x800) gets, in its PC
+  form, one more parameter after the program's: a table of samplers over the whole sampler heap from its start
+  (sampler registers of space 0, where the written shader names a sampler taken from the heap by number). The
+  weave sets it to the start of the shader-visible sampler heap the list has, whenever the program sets its heaps or
+  a root signature on the list. This is the same work as Windows' direct indexing in the older shader language the
+  translator writes; the program never sees the parameter. If Windows' writer refuses the description with it, the
+  description is written as before (logged; not seen in this run).
+- Run 15:51 (PASS): of 37,833 pipeline requests 37,138 made (was 2,987 of 32,768), from 698 of 714 shaders. The
+  29,195 refusals "a sampler named as root parameter 0" are gone. Left: 216 "a resource taken from the descriptor
+  heap by number" (6 shaders), 312 "a texel read whose values go to an instruction the pass cannot type" (6), 156
+  "MIMG 32, a sampler the pass cannot tell" (3), 11 vertex "s9 holds an address" (2).
+- The ending changed. The program presents once at about 52 s, opens a watch scope at 50.3 s (300 s budget) and
+  then keeps building pipelines, all made, about 170 a second on 5 threads, up to the end of the test at 121 s.
+  No fault: the program is alive at the end ("still running after 120s"); no frame after the first; the progress
+  stamp is unchanged from 51.6 s (inside the watch scope, the watchdog's budget is 300 s). The fault at
+  image+0x161b994 did not come within 120 s. Before this, the refused pipelines cost almost no time, so the
+  loading ended at once and the user interface came; now each is made by the PC driver. vkd3d's pipeline cache is
+  filled in this run; whether the next run is faster is not measured yet.
