@@ -2642,3 +2642,19 @@ the audio part of the weave.
   image+0x161b994, the same as in every run since 2026-11-27. Set against run 2026-11-27 23:13 (253 lists, 241
   draws), the program now records about 5 to 7 times as many frames before it: the same ending hides that
   (docs/MAPPING-PITFALLS.md, "The same ending hides progress").
+## 2026-11-28 - the window in front and on the whole screen; the graphics driver takes it for a game (game test 12:58, seen by ExCorvus)
+
+- Where the program's picture size comes from (read with Windows' own DXGI on this PC, outside the weave): Windows
+  lists for the main screen (\\.\DISPLAY1, desktop 2560 x 1440) 369 modes up to 3440 x 1440, none of 3840 x 2160.
+  The program still makes its window and its surface 3840 x 2160: that size is the program's own, the console's
+  output size (on the console the display hardware scales it to the TV), not a mode Windows offered. The program
+  pumps its own window messages (PeekMessageA, TranslateMessage, DispatchMessageA in fn 0x24846d0, called from fn
+  0xc9e5e0) and leaves every message to Windows (DefWindowProcA).
+- Run 12:43: scripts\fullscreen_window.ps1 made the window frameless over DISPLAY1 within 0.5 s, but Windows
+  refused to bring it to the front (the run was started from a console in the background, not by the user).
+- Run 12:58, with ExCorvus at the PC: the same, and Windows brought it to the front ("in front: True", responding
+  until the fault). ExCorvus saw it come to the front and fill the screen, and then the graphics driver's own
+  Radeon overlay appeared - the sign AMD's driver shows when it takes a program in front on the whole screen for a
+  game. The fault at image+0x161b994 came as in every run.
+- What follows (ExCorvus): the program is started apart from the test's measurements, the way it is started by the
+  user - the measuring, the start and the judging become three separate scripts.
