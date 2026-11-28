@@ -59,6 +59,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <string>
 #include <cstdarg>
 #include <cstdio>
@@ -67,6 +69,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -2486,6 +2489,285 @@ void note_pipeline_let_go() {
     ++flow::let_go;
 }
 
+bool stream_subobject(unsigned type, std::size_t& payload_at, std::size_t& whole);  // defined below, at slot 86
+
+// ---- does Windows accept what the weave hands on (a measurement, the "Windows accepts" game test) -------------
+//
+// WHIWHI_WINDOWS_CHECK=<file>: every root signature and pipeline the weave hands to the PC device (vkd3d) is also
+// handed, as a copy, to Windows' own Direct3D 12 on the same machine, in a separate process (tools/windows_check,
+// which loads d3d12.dll from System32 only), through a pipe in memory. The helper writes per request what vkd3d
+// answered and what Windows answered. The program's answers do not change and do not wait: the copies are queued
+// and sent by a thread of their own.
+namespace windows_check {
+
+const std::string& path() {
+    static const std::string value = [] {
+        char text[MAX_PATH] = {};
+        const DWORD n = GetEnvironmentVariableA("WHIWHI_WINDOWS_CHECK", text, MAX_PATH);
+        return n > 0 && n < MAX_PATH ? std::string(text) : std::string();
+    }();
+    return value;
+}
+
+bool on() {
+    return !path().empty();
+}
+
+std::mutex lock;
+std::condition_variable wake;
+std::deque<std::string> queue;
+std::size_t queued_bytes = 0;
+unsigned long long dropped = 0;
+HANDLE pipe = nullptr;
+bool started = false, failed = false;
+
+void sender() {
+    for (;;) {
+        std::string message;
+        {
+            std::unique_lock<std::mutex> hold(lock);
+            wake.wait(hold, [] { return !queue.empty(); });
+            message = std::move(queue.front());
+            queue.pop_front();
+            queued_bytes -= message.size();
+        }
+        DWORD written = 0;
+        if (!WriteFile(pipe, message.data(), static_cast<DWORD>(message.size()), &written, nullptr)) {
+            logf("windows check: the pipe to the helper closed (error %lu); no more copies are sent\n", GetLastError());
+            return;
+        }
+    }
+}
+
+// Under `lock`.
+bool start() {
+    if (started) {
+        return !failed;
+    }
+    started = true;
+    failed = true;
+    HMODULE self = nullptr;
+    wchar_t helper[MAX_PATH] = {};
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&start), &self) ||
+        !GetModuleFileNameW(self, helper, MAX_PATH)) {
+        return false;
+    }
+    std::wstring file = helper;
+    file = file.substr(0, file.find_last_of(L"\\/") + 1) + L"windows_check.exe";
+    const std::wstring target(path().begin(), path().end());
+    std::wstring command = L"\"" + file + L"\" \"" + target + L"\"";
+    SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
+    HANDLE read_end = nullptr;
+    if (!CreatePipe(&read_end, &pipe, &inherit, 1 << 20)) {
+        return false;
+    }
+    SetHandleInformation(pipe, HANDLE_FLAG_INHERIT, 0);
+    SIZE_T size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+    std::vector<std::uint8_t> list(size);
+    auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(list.data());
+    InitializeProcThreadAttributeList(attributes, 1, 0, &size);
+    UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &read_end, sizeof(read_end), nullptr,
+                              nullptr);
+    STARTUPINFOEXW info{};
+    info.StartupInfo.cb = sizeof(info);
+    info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    info.StartupInfo.hStdInput = read_end;
+    info.lpAttributeList = attributes;
+    PROCESS_INFORMATION process{};
+    const BOOL made = CreateProcessW(file.c_str(), &command[0], nullptr, nullptr, TRUE,
+                                     CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+                                     &info.StartupInfo, &process);
+    DeleteProcThreadAttributeList(attributes);
+    CloseHandle(read_end);
+    if (!made) {
+        logf("windows check: the helper %ls could not be started (error %lu)\n", file.c_str(), GetLastError());
+        return false;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    std::thread(sender).detach();
+    logf("windows check: helper started (process %lu), results in %s\n", process.dwProcessId, path().c_str());
+    failed = false;
+    return true;
+}
+
+void put32(std::string& m, std::uint32_t v) {
+    m.append(reinterpret_cast<const char*>(&v), 4);
+}
+void put64(std::string& m, std::uint64_t v) {
+    m.append(reinterpret_cast<const char*>(&v), 8);
+}
+
+// One message: 'WCK1', kind, vkd3d's answer, payload size, payload.
+void send(std::uint32_t kind, HRESULT vkd3d, const std::string& payload) {
+    std::string m;
+    put32(m, 0x314b4357u);
+    put32(m, kind);
+    put32(m, static_cast<std::uint32_t>(vkd3d));
+    put32(m, static_cast<std::uint32_t>(payload.size()));
+    m += payload;
+    std::lock_guard<std::mutex> hold(lock);
+    if (!start()) {
+        return;
+    }
+    if (queued_bytes + m.size() > (512u << 20)) {
+        if (++dropped == 1) {
+            logf("windows check: the queue to the helper is full; copies are dropped (counted at the end)\n");
+        }
+        return;
+    }
+    queued_bytes += m.size();
+    queue.push_back(std::move(m));
+    wake.notify_one();
+}
+
+// Kind 1: a root signature as handed to the PC device, named by the PC object it became.
+void root_signature(const void* pc_signature, const void* blob, std::size_t bytes, HRESULT vkd3d) {
+    if (!on() || !blob || !bytes) {
+        return;
+    }
+    std::string p;
+    put64(p, reinterpret_cast<std::uint64_t>(pc_signature));
+    p.append(static_cast<const char*>(blob), bytes);
+    send(1, vkd3d, p);
+}
+
+// Kind 2: a compute pipeline as handed to the PC device.
+void compute(const void* pc_signature, const void* code, std::size_t bytes, HRESULT vkd3d) {
+    if (!on()) {
+        return;
+    }
+    std::string p;
+    put64(p, reinterpret_cast<std::uint64_t>(pc_signature));
+    if (code && bytes) {
+        p.append(static_cast<const char*>(code), bytes);
+    }
+    send(2, vkd3d, p);
+}
+
+// Kind 3: a pipeline stream as handed to the PC device: the stream's bytes and, for each pointer in it, a record
+// (target 0 = the stream, k = record k-1; offset of the pointer there; type 0 = bytes, 1 = a root signature by its
+// PC object; the bytes). Kind 4: a stream that was not sent, and why.
+void stream(const std::vector<std::uint8_t>& copy, HRESULT vkd3d) {
+    if (!on()) {
+        return;
+    }
+    struct Record {
+        std::uint32_t target, offset, type;
+        std::string bytes;
+    };
+    std::vector<Record> records;
+    std::string not_sent;
+    std::size_t at = 0;
+    while (at + 4 <= copy.size() && not_sent.empty()) {
+        std::uint32_t type = 0;
+        std::memcpy(&type, copy.data() + at, 4);
+        std::size_t payload_at = 0, whole = 0;
+        if (!stream_subobject(type, payload_at, whole) || at + whole > copy.size()) {
+            not_sent = "a subobject the public list does not have";
+            break;
+        }
+        const std::uint8_t* payload = copy.data() + at + payload_at;
+        const auto offset = static_cast<std::uint32_t>(at + payload_at);
+        switch (type) {
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE: {
+            std::uint64_t id = 0;
+            std::memcpy(&id, payload, 8);
+            records.push_back({0, offset, 1, std::string(reinterpret_cast<const char*>(&id), 8)});
+            break;
+        }
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO: {
+            D3D12_SHADER_BYTECODE code;  // the cached pipeline has the same {pointer, size} shape
+            std::memcpy(&code, payload, sizeof(code));
+            if (code.pShaderBytecode && code.BytecodeLength) {
+                if (!can_read(code.pShaderBytecode, static_cast<std::size_t>(code.BytecodeLength))) {
+                    not_sent = "a shader whose bytes cannot be read";
+                    break;
+                }
+                records.push_back({0, offset, 0,
+                                   std::string(static_cast<const char*>(code.pShaderBytecode),
+                                               static_cast<std::size_t>(code.BytecodeLength))});
+            }
+            break;
+        }
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT: {
+            D3D12_INPUT_LAYOUT_DESC layout;
+            std::memcpy(&layout, payload, sizeof(layout));
+            if (!layout.NumElements) {
+                break;
+            }
+            const std::size_t bytes = layout.NumElements * sizeof(D3D12_INPUT_ELEMENT_DESC);
+            if (!layout.pInputElementDescs || !can_read(layout.pInputElementDescs, bytes)) {
+                not_sent = "an input layout that cannot be read";
+                break;
+            }
+            records.push_back({0, offset, 0, std::string(reinterpret_cast<const char*>(layout.pInputElementDescs), bytes)});
+            const auto parent = static_cast<std::uint32_t>(records.size());
+            for (UINT i = 0; i < layout.NumElements; ++i) {
+                const char* name = layout.pInputElementDescs[i].SemanticName;
+                if (!name || !can_read(name, 1)) {
+                    continue;
+                }
+                std::string text;
+                for (std::size_t n = 0; n < 256 && can_read(name + n, 1) && name[n]; ++n) {
+                    text += name[n];
+                }
+                text += '\0';
+                records.push_back({parent, static_cast<std::uint32_t>(i * sizeof(D3D12_INPUT_ELEMENT_DESC)), 0, text});
+            }
+            break;
+        }
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT: {
+            D3D12_STREAM_OUTPUT_DESC so;
+            std::memcpy(&so, payload, sizeof(so));
+            if (so.NumEntries || so.NumStrides) {
+                not_sent = "a stream output (not copied by this check)";
+            }
+            break;
+        }
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING: {
+            D3D12_VIEW_INSTANCING_DESC views;
+            std::memcpy(&views, payload, sizeof(views));
+            if (views.ViewInstanceCount) {
+                not_sent = "view instancing (not copied by this check)";
+            }
+            break;
+        }
+        default:
+            break;
+        }
+        at += whole;
+    }
+    std::string p;
+    if (!not_sent.empty()) {
+        send(4, vkd3d, not_sent);
+        return;
+    }
+    put32(p, static_cast<std::uint32_t>(copy.size()));
+    p.append(reinterpret_cast<const char*>(copy.data()), copy.size());
+    put32(p, static_cast<std::uint32_t>(records.size()));
+    for (const Record& r : records) {
+        put32(p, r.target);
+        put32(p, r.offset);
+        put32(p, r.type);
+        put32(p, static_cast<std::uint32_t>(r.bytes.size()));
+        p += r.bytes;
+    }
+    send(3, vkd3d, p);
+}
+
+}  // namespace windows_check
+
 HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, void* zero2, void* identifier,
                                   void** out) {
     if (out) {
@@ -2547,6 +2829,7 @@ HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, vo
         hr = device->CreateComputePipelineState(&pc, *pc_identifier(kPipeline), out);
     }
     flow::device_us += static_cast<unsigned long long>(flow::microseconds_since(inside));
+    windows_check::compute(pc.pRootSignature, pc.CS.pShaderBytecode, static_cast<std::size_t>(pc.CS.BytecodeLength), hr);
     if (hr == 0 && *out) {
         *out = wrap_kind(*out, kPipeline);
     }
@@ -3342,6 +3625,8 @@ HRESULT __stdcall w_device_slot16(Wrap* self, void* a1, void* a2, void* a3, void
         hr = create_thunk<16, 4, 5, kRootSignature>(self, a1, renamed.data(), reinterpret_cast<void*>(renamed.size()),
                                                     a4, a5, a6, a7, a8);
         void** const made = static_cast<void**>(a5);
+        windows_check::root_signature(hr == 0 && made && *made ? to_pc(*made) : nullptr, renamed.data(), renamed.size(),
+                                      hr);
         if (hr == 0 && made && is_wrap(*made)) {
             static_cast<Wrap*>(*made)->layout_shape = shape;
             static_cast<Wrap*>(*made)->layout_places = places;
@@ -3353,6 +3638,9 @@ HRESULT __stdcall w_device_slot16(Wrap* self, void* a1, void* a2, void* a3, void
         }
     } else {
         hr = create_thunk<16, 4, 5, kRootSignature>(self, a1, a2, a3, a4, a5, a6, a7, a8);
+        void** const made = static_cast<void**>(a5);
+        windows_check::root_signature(hr == 0 && made && *made ? to_pc(*made) : nullptr, a2,
+                                      reinterpret_cast<std::size_t>(a3), hr);
     }
     void** const out = static_cast<void**>(a5);
     if (hr == 0 && out && *out && shader_check_on()) {
@@ -3958,6 +4246,7 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
             hr = device->CreatePipelineState(&pc_desc, __uuidof(ID3D12PipelineState),
                                              reinterpret_cast<void**>(&state));
             flow::device_us += static_cast<unsigned long long>(flow::microseconds_since(inside));
+            windows_check::stream(copy, hr);
             if (hr == 0 && state) {
                 *out = wrap_kind(state, kPipeline);
             } else {
