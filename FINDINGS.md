@@ -3127,3 +3127,24 @@ ExCorvus decided not to follow this further now; it is written down as a hint.
 - So the code handed to slots 57 and 67 is already lying in the program's own memory, in one region of its own,
   and the program only names where it is. No piece lies in a loaded file or in memory the library does not hold.
   Not measured: when the program writes the code there, and where the containers handed to slots 62 and 86 lie.
+## 2026-11-28 - where the parcels lie: in fresh blocks the program takes when the first way is refused, apart from its code region (game test 19:41, measured)
+
+- weave/d3d12_xs.cpp (code_place::count): the place of every container handed to device slots 62 and 86 is
+  counted by slot and stage, and written at every power of two from 8.
+- Run 19:41, set against the pieces of slots 57 and 67 in the same run:
+  - The 53 PC containers of slot 62 lie inside the loaded file XboxBvhBuilder.dll (from 2.9 s).
+  - 10 vertex containers of slot 86 lie inside the program's own image (from 4.7 s). The exe holds 10 DXBC
+    containers in .data (survey 2026-11-28).
+  - All the program's other containers, compute at slot 62 (1,108 counted) and graphics at slot 86 (65,536
+    counted), lie in ordinary Windows memory that the memory library does not hold: private memory in 1 MiB
+    blocks next to one another (8 blocks for compute, 5 for graphics, each used about evenly).
+  - The pieces of slots 57 and 67 lie in the two regions of the memory library, as in run 19:35.
+- Timing: the first slot 67 piece at 53.275 s; the first compute containers of slot 62 at 53.280 to 53.300 s,
+  in the blocks named one after another in that order; the first graphics containers of slot 86 at 54.99 s.
+- So the two solutions use separate memory. The code the program has prepared lies in its own region from the
+  memory library. The parcels lie in a few blocks of ordinary memory, named for the first time milliseconds after
+  the first refusal on the first way, and each block is used again and again.
+  Not measured: who takes those blocks (the program's allocator, the C runtime or Windows directly), and how what
+  is in a parcel relates to the code in the region. The programs inside the parcels are not the same as the
+  pieces handed to slots 57 and 67 (2026-11-28 "the code handed to device slots 57 and 67 is not the code inside
+  the containers").
