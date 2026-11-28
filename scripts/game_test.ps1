@@ -1,25 +1,30 @@
-# The game test (AGENTS.md rule 11): runs the real game from your own copy inside the weave, once, and records
-# what the game did - every call it made through its import table and how the weave answered it, which calls the
-# weave said "not provided" to, where the run ended, frames and pipelines - then compares that with the last run
-# you accepted, and with the map the project already has of the executable (docs/exe-map, docs/console-libs):
-# every call of the run is looked up there, and one the map does not name is listed as "not in the map", to be
-# read from the executable before anything is built for it (against-the-map.txt). Nothing of the game is written anywhere: the record holds names, counts and addresses only, and it
-# stays on your PC (under -Out), never in the repository.
+# The game test (AGENTS.md rule 11), part 3: judges one run of the real program from your own copy inside the
+# weave - every call it made through its import table and how the weave answered it, which calls the weave said
+# "not provided" to, where the run ended, frames and pipelines - against the last run you accepted, and against the
+# map the project already has of the executable (docs/exe-map, docs/console-libs): every call of the run is looked
+# up there, and one the map does not name is listed as "not in the map", to be read from the executable before
+# anything is built for it (against-the-map.txt). Nothing of the game is written anywhere: the record holds names,
+# counts and addresses only, and it stays on your PC (under -Out), never in the repository.
 #
-#   scripts\game_test.ps1 -Game <your game folder> [-Seconds 60] [-NoBuild] [-Accept] [-Show] [-Out <folder>]
+# The three parts are separate (ExCorvus, 2026-11-28): scripts\measure_test.ps1 measures the copy,
+# scripts\run_program.ps1 starts the program and nothing else, and this script judges. It starts nothing itself
+# when it is given a run:
 #
-#   -Game     the folder of your game copy (read-only; checked unchanged after the run). Or set WHIWHI_GAME.
-#   -Seconds  how long the game runs (default 60).
+#   scripts\game_test.ps1 -Game <your game folder> -Run <run folder> [-Accept]       judge a run you started
+#   scripts\game_test.ps1 -Game <your game folder> [-Seconds 60] [-NoBuild] [-Show] [-Accept]
+#                         build, measure, start the program as a process of its own (run_program.ps1), judge it
+#
+#   -Run      a run folder written by scripts\run_program.ps1 (or 'last' for the newest one).
+#   -Seconds  how long the program runs (default 60).
 #   -NoBuild  use the build in weave\build as it is (default: build and run the sample tests first).
 #   -Accept   if the verdict is PASS, this run becomes the baseline later runs are compared with.
-#   -Show     start the game where you can see it, and open a second window that shows its log as it is written
-#             (default: the game starts hidden).
+#   -Show     start the program where you can see it, with a second window that shows its log (default: hidden).
 #   -Out      where the records go (default %LOCALAPPDATA%\whiwhi\game-tests).
 #
-# The game test is the real scenario: the whole installation runs as it is started, and the verdict judges the
-# whole, not one error. Two rules are hard: FAIL when the game folder changed, or when a script in measure/ (run on
-# the copy before the game starts) says a result of FINDINGS.md no longer holds. Beyond them the run is judged
-# against the baseline's whole: every meeting point between the program and the weave (the wants ledger, whole.txt:
+# The verdict judges the whole, not one error. Two rules are hard: FAIL when the game folder changed, or when a
+# script in measure/ says a result of FINDINGS.md no longer holds on the copy as it was when the program ran (the
+# measurements are taken again here when what they read has changed since). Beyond them the run is judged against
+# the baseline's whole: every meeting point between the program and the weave (the wants ledger, whole.txt:
 # attached, partly or missing) must be the same or better, every import provided in the baseline still provided.
 # FAIL when anything got worse. Where the run ended, frames and pipelines are listed as notes: a single stop is not
 # the verdict (measured 2026-11-27: whether a run outlives 60 s after the program's breakpoint is Windows' timing).
@@ -27,166 +32,72 @@
 # build being committed is the one that passed.
 param(
     [string]$Game = $env:WHIWHI_GAME,
+    [string]$Run,
     [int]$Seconds = 60,
     [switch]$NoBuild,
     [switch]$Accept,
     [switch]$Show,
-    [string]$Out = (Join-Path $env:LOCALAPPDATA 'whiwhi\game-tests')
+    [string]$Out
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'test_common.ps1')
 $repo = Split-Path -Parent $PSScriptRoot
-$build = Join-Path $repo 'weave\build'
-if (-not $Game -or -not (Test-Path -LiteralPath $Game)) { throw 'give -Game <your game folder> (or set WHIWHI_GAME)' }
-$Game = (Resolve-Path -LiteralPath $Game).Path
-$exe = Get-ChildItem -LiteralPath $Game -Filter '*.exe' | Where-Object { $_.Name -like 'game_*' } | Select-Object -First 1
-if (-not $exe) { throw "no game_*.exe in $Game" }
-$outFull = [IO.Path]::GetFullPath($Out)
+$g = Resolve-GameFolder $Game
+$Game = $g.folder
+$outFull = Get-TestOut $Out
 if ($outFull.StartsWith($Game, [StringComparison]::OrdinalIgnoreCase)) { throw 'the records must not go inside the game folder' }
-if (Get-Process boot_image -ErrorAction SilentlyContinue) { throw 'a run is already going (one at a time)' }
+if (Get-Process boot_image -ErrorAction SilentlyContinue) { throw 'a run is going: it is judged when it has ended' }
 
-if (-not $NoBuild) {
-    $buildLog = & (Join-Path $repo 'weave\build.cmd') 2>&1
-    if (-not ($buildLog -match '100% tests passed')) { $buildLog | Select-Object -Last 15; throw 'the build or its sample tests failed: the game was not started' }
-}
-
-function Get-BuildHash($folder) {
-    $sha = [Security.Cryptography.SHA256]::Create()
-    $rows = Get-ChildItem -LiteralPath $folder -File | Where-Object { $_.Extension -in '.exe', '.dll' } | Sort-Object Name |
-        ForEach-Object { $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
-    [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($rows -join "`n")))).Replace('-', '')
-}
-function Get-Listing($root) {
-    $rows = Get-ChildItem -LiteralPath $root -Recurse -Force | Sort-Object FullName |
-        ForEach-Object { '{0}|{1}|{2}' -f $_.FullName, $(if ($_.PSIsContainer) { 'dir' } else { $_.Length }), $_.LastWriteTimeUtc.Ticks }
-    $sha = [Security.Cryptography.SHA256]::Create()
-    [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($rows -join "`n")))).Replace('-', '')
-}
-
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$run = Join-Path $outFull "run-$stamp"
-$work = Join-Path $outFull 'work'
-New-Item -ItemType Directory -Force -Path $run, $work | Out-Null
-Get-ChildItem -LiteralPath $work -File | Remove-Item -Force -ErrorAction Stop
-Copy-Item (Join-Path $build '*.exe'), (Join-Path $build '*.dll') $work -Force -ErrorAction Stop
-# The run must use exactly the build it is recorded for: every file in the work folder is compared with the build's
-# (measured 2026-11-27 19:37: one library in the work folder stayed an older copy and the run used it).
-$stale = @(Get-ChildItem -LiteralPath $work -File | Where-Object {
-        (Get-FileHash -LiteralPath $_.FullName).Hash -ne (Get-FileHash -LiteralPath (Join-Path $build $_.Name)).Hash })
-if ($stale.Count) {
-    throw "the work folder does not hold the build as built: $(($stale | ForEach-Object Name) -join ', ') - nothing was run"
-}
-# A library the installation ships itself is loaded from the installation, not from the weave's build: the weave's
-# file of the same name would win (host_libraries.cpp loads from beside boot_image.exe first).
-Get-ChildItem -LiteralPath $work -File | Where-Object { Test-Path -LiteralPath (Join-Path $Game $_.Name) } |
-    ForEach-Object { Write-Host "the installation ships $($_.Name) itself - the weave's file is left out"; Remove-Item -LiteralPath $_.FullName -Force }
-# The build is recorded as built (the commit gate checks the build folder), not as the work folder holds it.
-$buildHash = Get-BuildHash $build
-$commit = (git -C $repo rev-parse --short HEAD).Trim()
-$dirty = @(git -C $repo status --porcelain -- weave scripts).Count
-
-$before = Get-Listing $Game
-$exeHashBefore = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash
-
-# The measurements (measure/README.md) run on the copy first, one after another, before the game starts: each
-# script checks results of FINDINGS.md on the file its usage line names, read-only. One that says DIFFERS makes
-# the verdict FAIL; the game still runs, so the run's record is complete. Their output goes to measure.txt.
-$measureLog = Join-Path $run 'measure.txt'
-$measureFail = New-Object System.Collections.Generic.List[string]
-$measureDir = Join-Path $repo 'measure'
-$measureTools = Join-Path $outFull 'measure-tools'
-# Measured only when something they read has changed (ExCorvus, 2026-11-28: "only measure when it has changed"):
-# the scripts take 9 minutes and their input is the read-only game folder. Their key is the game folder's listing
-# (names, sizes, times), the exe's hash, every script in measure/ and the build's PC graphics library (the C++
-# measurement runs beside it). With the same key, the results of the run that measured them are taken over, and
-# measure.txt says so and from which run.
-$measureCache = Join-Path $outFull 'measure-cache'
-$keyRows = @("game $before", "exe $exeHashBefore") +
-    @(Get-ChildItem -LiteralPath $measureDir -File | Sort-Object Name | ForEach-Object { "$($_.Name) $((Get-FileHash -LiteralPath $_.FullName).Hash)" }) +
-    @('d3d12_vk.dll', 'd3d12core.dll' | ForEach-Object { "$_ $((Get-FileHash -LiteralPath (Join-Path $build $_)).Hash)" })
-$measureKey = $keyRows -join "`n"
-$cachedKey = Join-Path $measureCache 'key.txt'
-$reuse = (Test-Path -LiteralPath $cachedKey) -and ((Get-Content -LiteralPath $cachedKey -Raw).TrimEnd() -eq $measureKey.TrimEnd())
-if ($reuse) {
-    $from = (Get-Content -LiteralPath (Join-Path $measureCache 'from.txt') -Raw).Trim()
-    Add-Content -LiteralPath $measureLog -Value "---- not measured again: the game folder, the exe, measure/ and the PC graphics library are the same as in $from; its results:" -Encoding utf8
-    Add-Content -LiteralPath $measureLog -Value (Get-Content -LiteralPath (Join-Path $measureCache 'measure.txt')) -Encoding utf8
-    Get-Content -LiteralPath (Join-Path $measureCache 'fail.txt') -ErrorAction SilentlyContinue | Where-Object { $_ } | ForEach-Object { $measureFail.Add($_) }
-    Write-Host "measurements: unchanged since $from - its results are taken over ($($measureFail.Count) failing)"
-}
-$ErrorActionPreference = 'Continue'  # a line a tool writes to its error output is part of its record, not a stop
-foreach ($script in Get-ChildItem -LiteralPath $measureDir -File | Where-Object { -not $reuse -and $_.Extension -in '.py', '.cpp' } | Sort-Object Name) {
-    $text = Get-Content -LiteralPath $script.FullName -Raw
-    $usage = [regex]::Match($text, 'game folder>\\+([A-Za-z0-9_.]+)')
-    if (-not $usage.Success) {
-        # The shared readers name no file: they are not measurements. A script that checks results and names no
-        # file would be skipped without a word, so that is a failure, not a skip.
-        if ($text -match '(?m)(\.same\(|^\s*same\(")') { $measureFail.Add("measure/$($script.Name) names no file of the game folder in its usage line") }
-        continue
+if (-not $Run) {
+    if (-not $NoBuild) {
+        $buildLog = & (Join-Path $repo 'weave\build.cmd') 2>&1
+        if (-not ($buildLog -match '100% tests passed')) { $buildLog | Select-Object -Last 15; throw 'the build or its sample tests failed: the program was not started' }
     }
-    $measureInput = Join-Path $Game $usage.Groups[1].Value
-    Add-Content -LiteralPath $measureLog -Value "---- $($script.Name) on $($usage.Groups[1].Value)" -Encoding utf8
-    if ($script.Extension -eq '.py') {
-        $output = & python $script.FullName $measureInput 2>&1 | ForEach-Object { "$_" }
-        $code = $LASTEXITCODE
-    } else {
-        # A C++ measurement is compiled with the same compiler as the weave and run beside the PC graphics
-        # library of the weave's build.
-        New-Item -ItemType Directory -Force -Path $measureTools | Out-Null
-        Copy-Item (Join-Path $build 'd3d12_vk.dll'), (Join-Path $build 'd3d12core.dll') $measureTools -Force
-        $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
-        $compiled = & cmd /c "`"$vcvars`" >nul && cd /d `"$measureTools`" && cl /nologo /std:c++17 /EHsc /O2 `"$($script.FullName)`"" 2>&1 | ForEach-Object { "$_" }
-        $tool = Join-Path $measureTools ($script.BaseName + '.exe')
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tool)) {
-            $output = @('not compiled:') + $compiled
-            $code = 1
-        } else {
-            $output = & $tool $measureInput 2>&1 | ForEach-Object { "$_" }
-            $code = $LASTEXITCODE
-        }
-    }
-    Add-Content -LiteralPath $measureLog -Value $output -Encoding utf8
-    $last = @($output | Where-Object { $_ -match 'the same as FINDINGS' }) | Select-Object -Last 1
-    Write-Host "measure/$($script.Name): $(if ($last) { $last } else { "exit $code" })"
-    if ($code -ne 0) { $measureFail.Add("measure/$($script.Name): $(if ($last) { $last } else { "exit $code" }) (measure.txt)") }
+    & (Join-Path $PSScriptRoot 'measure_test.ps1') -Game $Game -Out $outFull | ForEach-Object { Write-Host $_ }
+    # The program is started by a process of its own, with nothing of this script around it.
+    $known = @(Get-ChildItem -LiteralPath $outFull -Directory -Filter 'run-*' -ErrorAction SilentlyContinue | ForEach-Object Name)
+    $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$(Join-Path $PSScriptRoot 'run_program.ps1')`"",
+        '-Game', "`"$Game`"", '-Seconds', "$Seconds", '-Out', "`"$outFull`"", '-StartedBy', "`"the game test`"")
+    if (-not $Show) { $arguments += '-Hidden' }
+    # Waited for as one process: Start-Process -Wait would also wait for every process it starts (measured
+    # 2026-11-28: the log window kept the game test waiting after the program had ended).
+    $starter = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WindowStyle $(if ($Show) { 'Minimized' } else { 'Hidden' }) -PassThru
+    $starter.WaitForExit()
+    $new = @(Get-ChildItem -LiteralPath $outFull -Directory -Filter 'run-*' | Where-Object { $known -notcontains $_.Name } | Sort-Object Name)
+    if (-not $new.Count) { throw 'scripts\run_program.ps1 wrote no run folder: the program was not started' }
+    $Run = $new[-1].FullName
+} elseif ($Run -eq 'last') {
+    $Run = (Get-ChildItem -LiteralPath $outFull -Directory -Filter 'run-*' | Sort-Object Name | Select-Object -Last 1).FullName
 }
-$ErrorActionPreference = 'Stop'
-if (-not $reuse) {
-    New-Item -ItemType Directory -Force -Path $measureCache | Out-Null
-    Copy-Item -LiteralPath $measureLog (Join-Path $measureCache 'measure.txt') -Force
-    Set-Content -LiteralPath (Join-Path $measureCache 'fail.txt') -Value @($measureFail) -Encoding utf8
-    Set-Content -LiteralPath (Join-Path $measureCache 'from.txt') -Value "run-$stamp" -Encoding utf8
-    Set-Content -LiteralPath $cachedKey -Value $measureKey -Encoding utf8
-}
+$run = (Resolve-Path -LiteralPath $Run).Path
+$info = Read-Pairs (Join-Path $run 'run.txt')
+if (-not $info['build']) { throw "$run has no run.txt: it was not written by scripts\run_program.ps1, or that run did not end" }
+if ($info['game'] -and $info['game'] -ne $Game) { throw "the run was of $($info['game']), not of $Game" }
+$stamp = $info['time']; $commit = $info['commit']; $dirty = $info['uncommitted_weave_files']; $buildHash = $info['build']
+$Seconds = [int]$info['seconds']; $elapsed = [int]$info['elapsed']; $unchanged = $info['game_folder_unchanged'] -eq 'True'
 $log = Join-Path $run 'run.err'
-$env:WHIWHI_CALL_LEDGER = Join-Path $run 'calls.tsv'
-$env:WHIWHI_WANTS_LEDGER = Join-Path $run 'wants.txt'
-$env:DISABLE_RTSS_LAYER = '1'
-$env:DISABLE_VULKAN_OBS_CAPTURE = '1'
-$sw = [Diagnostics.Stopwatch]::StartNew()
-$p = Start-Process -FilePath (Join-Path $work 'boot_image.exe') -WorkingDirectory $work -PassThru `
-    -WindowStyle $(if ($Show) { 'Normal' } else { 'Hidden' }) `
-    -ArgumentList "`"$($exe.FullName)`"", "`"$Game`"", '--seconds', "$Seconds" `
-    -RedirectStandardError $log -RedirectStandardOutput (Join-Path $run 'run.out')
-if ($Show) {
-    Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile', '-Command',
-        "`$host.UI.RawUI.WindowTitle = 'game test log'; Get-Content -LiteralPath '$log' -Wait -Tail 50"
-    # The console shows the program's window as the whole screen; Windows is asked for that from outside
-    # (scripts\fullscreen_window.ps1). What it did is written to fullscreen.txt in the run's folder.
-    Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass',
-        '-File', "`"$(Join-Path $PSScriptRoot 'fullscreen_window.ps1')`"", '-ProcessId', "$($p.Id)",
-        '-Log', "`"$(Join-Path $run 'fullscreen.txt')`""
-}
-try { $p.PriorityClass = 'Normal' } catch {}
-if (-not $p.WaitForExit(($Seconds + 60) * 1000)) { try { $p.Kill() } catch {}; $p.WaitForExit(15000) | Out-Null }
-$elapsed = [int]$sw.Elapsed.TotalSeconds
-Remove-Item Env:\WHIWHI_CALL_LEDGER
-Remove-Item Env:\WHIWHI_WANTS_LEDGER
-$unchanged = ($before -eq (Get-Listing $Game)) -and ($exeHashBefore -eq (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash)
 
+# The measurements belong to the copy as it was when the program ran: if what they read changed since they were
+# last taken, they are taken again now; if the copy is no longer as it was during the run, they cannot speak for it.
+$cache = Join-Path $outFull 'measure-cache'
+$sha = [Security.Cryptography.SHA256]::Create()
+function Get-CachedKey { $k = Join-Path $cache 'key.txt'; if (Test-Path -LiteralPath $k) { [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes((Get-Content -LiteralPath $k -Raw).TrimEnd()))).Replace('-', '') } }
+$measureFail = New-Object System.Collections.Generic.List[string]
+if ((Get-CachedKey) -ne $info['measure_key']) {
+    & (Join-Path $PSScriptRoot 'measure_test.ps1') -Game $Game -Out $outFull | ForEach-Object { Write-Host $_ }
+}
+if ((Get-CachedKey) -ne $info['measure_key']) {
+    $measureFail.Add('the game folder, the exe, measure/ or the PC graphics library are not as they were when the program ran: the measurements cannot speak for that run')
+} else {
+    $from = (Get-Content -LiteralPath (Join-Path $cache 'from.txt') -Raw).Trim()
+    @("---- the measurements of the copy as it was in this run ($from):") + (Get-Content -LiteralPath (Join-Path $cache 'measure.txt')) |
+        Set-Content -LiteralPath (Join-Path $run 'measure.txt') -Encoding utf8
+    Get-Content -LiteralPath (Join-Path $cache 'fail.txt') -ErrorAction SilentlyContinue | Where-Object { $_ } | ForEach-Object { $measureFail.Add($_) }
+}
 # What the run did, from its own log and the call ledger.
 $text = if (Test-Path $log) { Get-Content -LiteralPath $log } else { @() }
 $alive = [bool]($text -match 'still running after \d+s')
-$endLine = ($text | Where-Object { $_ -notmatch "the watchdog's progress stamp" } |
+$endLine = ($text | Where-Object { $_ -notmatch "the watchdog's progress stamp|^\[boot\] watchdog state" } |
     Select-String -Pattern 'still running after|exception 0x|entry thread finished|watchdog|process exiting' |
     Select-Object -First 1).Line
 # How long the image's own progress report went unchanged (read only by the boot tool; the watchdog stops the
