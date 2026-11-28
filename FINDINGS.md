@@ -2912,3 +2912,21 @@ the audio part of the weave.
 - So the GPU of this PC does not take the program's GPU code word for word: the end word alone already differs.
   What the GPU runs is written by its driver, from a shader the driver is handed (SPIR-V through vkd3d). Not
   measured: a full table of which of the program's instructions keep their words on this GPU.
+## 2026-11-28 - every heap the shaders see is held twice, and the same slot holds two different things (game test 17:02, measured)
+
+- weave/d3d12_xs.cpp `compare_heaps`: every 10 s, for each descriptor heap of type 0 and 1, slot by slot, what is in
+  the memory the program sees (from the memory library) and what is in the driver's heap (the PC heap vkd3d made,
+  on VK_EXT_descriptor_heap with 32-byte resource and 16-byte sampler descriptors, run 16:31), and the first slot of
+  each kind of difference as words. Read only.
+- At 64 s (one round before the UI fault): the large heap shaders see (1,245,184 slots of 32 bytes): 334,315 slots
+  filled only in the program's memory, 0 only in the driver's, 0 the same, 61 different. The program's slots hold
+  one small number in the first word and zeros after it (slot 0: 1; slot 17: 0x12) - not descriptors; read as the
+  program's own list of the next free slot (inference, not read in the exe). In the 61 slots the driver has a real
+  descriptor (eight words), the program's memory still holds such a number.
+- The sampler heap shaders see (128 of 16 bytes): 43 samplers only in the driver's heap. The sampler heap shaders do
+  not see: 85 slots with the program's numbers, 43 with a sampler in the driver's heap and a number in the
+  program's. The small heaps of type 0 shaders do not see: 2 slots only in the driver's.
+- So each of these heaps exists twice, and in every slot where a descriptor was made the two hold different things:
+  the descriptor in the driver's heap, the program's own number in its memory. On the console there is one memory:
+  the library's write of a descriptor lands in the slot the program sees. A raw copy the program makes of such a
+  slot (DESCRIPTORS.md C.2) copies its number, not the descriptor.
