@@ -14,7 +14,7 @@ The weave can answer the game's D3D12 calls through **vkd3d-proton** (D3D12 impl
 weave import the game's own memory into the GPU zero-copy. vkd3d-proton is copyright its authors (Valve /
 Hans-Kristian Arntzen / contributors) and licensed under the **GNU Lesser General Public License v2.1**; its source
 and license are at <https://github.com/HansKristian-Work/vkd3d-proton> (see its `LICENSE` and `COPYING.LESSER`).
-This project uses a fork of it, <https://github.com/ExCorvus/vkd3d-proton> (branch `whibwhi-own`), under the same
+This project uses a fork of it, <https://github.com/ExCorvus/vkd3d-xbox> (branch `whibwhi-own`), under the same
 licence, whose shader translator dxil-spirv (MIT, copyright its authors) comes from the fork
 <https://github.com/ExCorvus/dxil-spirv-xbox> (branch `whibwhi-own`). It is not vendored into this repository: build it separately (see `docs/BUILD-AND-RUN.md`) and place the built
 `d3d12.dll` (as `d3d12_vk.dll`) and `d3d12core.dll` beside the weave executable. ExCorvus approved reusing it with
