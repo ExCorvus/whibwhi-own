@@ -528,6 +528,14 @@ int main() {
         set32(m, kCodeAt + 20, kNop);  // something other than filler after the end
         CHECK(refused(m));
         m = module;
+        // A program with a second end: after the first end, more code walks on to another end and then filler.
+        set32(m, kCodeAt + 16, kNop);
+        set32(m, kCodeAt + 20, 0xBF810000u);  // end of program
+        {
+            const ModuleProgram two_ends = find_module_program(m.data(), m.size());
+            CHECK(two_ends.found && two_ends.program_bytes == 24);
+        }
+        m = module;
         set32(m, kRecordAt + 8, 16);  // the code is exactly the program, no filler: fine
         const ModuleProgram found = find_module_program(m.data(), m.size());
         CHECK(found.found && found.code_bytes == 16 && found.program_bytes == 16);
