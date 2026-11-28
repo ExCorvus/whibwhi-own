@@ -108,6 +108,7 @@ double run_seconds();
 // program presented, how many frame events it waited for and how long those waits took, how many command lists it
 // handed to its queues, and the longest stretch without a present - on the clock of the process, like the boot
 // tool's watchdog reports. A second in which nothing came is written too. Counts only; nothing answered differently.
+void compare_heaps(double seconds);  // defined below, after can_read
 namespace rhythm {
 std::atomic<unsigned long long> presents{0}, waits{0}, waited_us{0}, submits{0}, lists{0};
 std::atomic<long long> last_present_us{-1}, longest_gap_us{0};
@@ -120,9 +121,12 @@ void start() {
     static std::once_flag once;
     std::call_once(once, [] {
         std::thread([] {
-            for (;;) {
+            for (unsigned tick = 1;; ++tick) {
                 Sleep(1000);
                 const long long now = now_us();
+                if (tick % 10 == 0) {
+                    compare_heaps(now / 1e6);
+                }
                 const long long last = last_present_us.load();
                 long long gap = longest_gap_us.exchange(0);
                 if (last >= 0 && now - last > gap) {
@@ -1508,6 +1512,72 @@ bool can_read(const void* address, std::size_t bytes) {
         at = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
     }
     return true;
+}
+
+// The heaps shaders see (types 0 and 1) exist twice: the memory the program sees (from the memory library) and
+// the PC heap the driver reads (ExCorvus, 2026-11-28: "i think the driver does take it just right away"). Every
+// 10 s, for each such heap, slot by slot: what is in the program's memory, what is in the driver's, and whether
+// they are the same. Counts, and the first slot of each kind of difference as words. Read only.
+void compare_heaps(double seconds) {
+    std::vector<HeapRange> heaps;
+    AcquireSRWLockShared(&g_heaps_lock);
+    heaps = g_heaps;
+    ReleaseSRWLockShared(&g_heaps_lock);
+    for (const HeapRange& r : heaps) {
+        if (r.type > 1 || !r.title || !r.bytes) {
+            continue;
+        }
+        const unsigned step = r.type == 1 ? 16u : 32u;
+        const auto* mine = reinterpret_cast<const unsigned char*>(r.title);
+        const auto* driver = reinterpret_cast<const unsigned char*>(r.pc_cpu);
+        if (!can_read(mine, r.bytes) || !can_read(driver, r.bytes)) {
+            logf("[heaps] %.0f s: heap type %u at 0x%llx (%llu bytes, %s): the %s memory cannot be read (driver's "
+                 "start 0x%llx)\n",
+                 seconds, r.type, r.title, r.bytes, r.pc_gpu ? "shaders see it" : "shaders do not see it",
+                 can_read(mine, r.bytes) ? "driver's" : "program's", r.pc_cpu);
+            continue;
+        }
+        unsigned long long slots = r.bytes / step, only_mine = 0, only_driver = 0, same = 0, differ = 0;
+        long long first_only_mine = -1, first_only_driver = -1, first_differ = -1;
+        static const unsigned char zero[32] = {};
+        for (unsigned long long i = 0; i < slots; ++i) {
+            const unsigned char* a = mine + i * step;
+            const unsigned char* b = driver + i * step;
+            const bool az = std::memcmp(a, zero, step) == 0, bz = std::memcmp(b, zero, step) == 0;
+            if (az && bz) {
+                continue;
+            }
+            if (!az && bz) {
+                if (only_mine++ == 0) first_only_mine = static_cast<long long>(i);
+            } else if (az && !bz) {
+                if (only_driver++ == 0) first_only_driver = static_cast<long long>(i);
+            } else if (std::memcmp(a, b, step) == 0) {
+                ++same;
+            } else if (differ++ == 0) {
+                first_differ = static_cast<long long>(i);
+            }
+        }
+        logf("[heaps] %.0f s: heap type %u (%s), %llu slots of %u bytes: filled only in the program's memory %llu, "
+             "only in the driver's %llu, the same in both %llu, different in both %llu\n",
+             seconds, r.type, r.pc_gpu ? "shaders see it" : "shaders do not see it", slots, step, only_mine, only_driver,
+             same, differ);
+        const auto words = [&](const char* what, long long slot) {
+            if (slot < 0) {
+                return;
+            }
+            char text[400];
+            int at = std::snprintf(text, sizeof(text), "[heaps]   first %s: slot %lld, program", what, slot);
+            const auto* a = reinterpret_cast<const unsigned*>(mine + slot * step);
+            const auto* b = reinterpret_cast<const unsigned*>(driver + slot * step);
+            for (unsigned k = 0; k < step / 4; ++k) at += std::snprintf(text + at, sizeof(text) - at, " %08x", a[k]);
+            at += std::snprintf(text + at, sizeof(text) - at, " | driver");
+            for (unsigned k = 0; k < step / 4; ++k) at += std::snprintf(text + at, sizeof(text) - at, " %08x", b[k]);
+            logf("%s\n", text);
+        };
+        words("filled only in the program's memory", first_only_mine);
+        words("filled only in the driver's", first_only_driver);
+        words("different in both", first_differ);
+    }
 }
 
 // True for the first few calls: used to show a method's first calls, and to keep refusals from filling the log.
