@@ -288,7 +288,11 @@ void note_first(const std::string& place, int slot) {
 // For the containers of slots 62 and 86: the place of each one counted by slot and stage; the counts are written
 // at every power of two (from 8) of the slot's containers.
 void count(int slot, const char* what, const void* address) {
-    const std::string place = of(reinterpret_cast<unsigned long long>(address));
+    ULONG_PTR low = 0, high = 0;
+    GetCurrentThreadStackLimits(&low, &high);
+    const auto at = reinterpret_cast<ULONG_PTR>(address);
+    const std::string place = (at >= low && at < high) ? std::string("the stack of the thread that asks")
+                                                       : of(reinterpret_cast<unsigned long long>(address));
     note_first(place, slot);
     static std::map<std::string, unsigned long long> counts;
     static std::map<int, unsigned long long> per_slot;
