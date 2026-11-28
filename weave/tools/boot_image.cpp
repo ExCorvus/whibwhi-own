@@ -719,11 +719,62 @@ int main(int argc, char** argv) {
                                                  static_cast<long long>(counter)) /
                                  static_cast<double>(frequency.QuadPart);
         };
+        // The rest of the watchdog's state (docs/exe-map/MAP.md section 4: pause 0x71b6330, the kick 0x71b6331, open
+        // watch scopes 0x71b6334, stop 0x71b6340, crash callback 0x71b6348), and two bytes of the one version gate
+        // (fn 0x2478440 reads 0xa9438f4 and sets 0x765a6d9 when it calls device slot 49), read only, logged when
+        // they change.
+        struct WatchState {
+            unsigned pause, kick, scopes, stop, gate, gate_taken;
+            unsigned long long callback;
+            bool operator==(const WatchState& o) const {
+                return pause == o.pause && kick == o.kick && scopes == o.scopes && stop == o.stop && gate == o.gate &&
+                       gate_taken == o.gate_taken && callback == o.callback;
+            }
+        };
+        const auto read_state = [&]() {
+            WatchState s{};
+            s.pause = *reinterpret_cast<const volatile unsigned char*>(loaded.base + 0x71b6330);
+            s.kick = *reinterpret_cast<const volatile unsigned char*>(loaded.base + 0x71b6331);
+            s.scopes = *reinterpret_cast<const volatile unsigned*>(loaded.base + 0x71b6334);
+            s.stop = *reinterpret_cast<const volatile unsigned char*>(loaded.base + 0x71b6340);
+            s.callback = *reinterpret_cast<const volatile unsigned long long*>(loaded.base + 0x71b6348);
+            s.gate = *reinterpret_cast<const volatile unsigned char*>(loaded.base + 0xa9438f4);
+            s.gate_taken = *reinterpret_cast<const volatile unsigned char*>(loaded.base + 0x765a6d9);
+            return s;
+        };
+        const auto log_state = [&](const WatchState& s, const char* when, ULONGLONG now) {
+            char callback[64] = "none";
+            if (s.callback >= reinterpret_cast<unsigned long long>(loaded.base) &&
+                s.callback < reinterpret_cast<unsigned long long>(loaded.base) + loaded.size) {
+                std::snprintf(callback, sizeof(callback), "image+0x%llx",
+                              s.callback - reinterpret_cast<unsigned long long>(loaded.base));
+            } else if (s.callback != 0) {
+                std::snprintf(callback, sizeof(callback), "0x%llx (outside the image)", s.callback);
+            }
+            std::fprintf(stderr, "[boot] watchdog state %s at %.1f s (read only): pause %u, kick %u, open watch scopes %u, "
+                                 "stop %u, crash callback %s; gate byte 0xa9438f4 = %u, slot-49 taken 0x765a6d9 = %u\n",
+                         when, static_cast<double>(now - started) / 1000.0, s.pause, s.kick, s.scopes, s.stop, callback,
+                         s.gate, s.gate_taken);
+            std::fflush(stderr);
+        };
+        WatchState watch = read_state();
+        log_state(watch, "at the start", started);
+        unsigned state_lines = 0;
+        unsigned most_scopes = watch.scopes;
         double last_report = -1;
         DWORD wait = WAIT_TIMEOUT;
         while (wait == WAIT_TIMEOUT && GetTickCount64() - started < static_cast<ULONGLONG>(seconds) * 1000) {
             wait = WaitForSingleObject(thread, 50);
             const ULONGLONG now = GetTickCount64();
+            const WatchState state = read_state();
+            if (state.scopes > most_scopes) {
+                most_scopes = state.scopes;
+            }
+            if (!(state == watch) && state_lines < 100) {
+                ++state_lines;
+                log_state(state, "changed", now);
+            }
+            watch = state;
             const unsigned long long value = *progress;
             if (value != last) {
                 last = value;
@@ -756,6 +807,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[boot] the watchdog's progress stamp (read only): %llu new reports, longest unchanged "
                              "%.1f s (the image stops itself after about 30 s, or 300 s inside a watch scope)\n",
                      changes, static_cast<double>(longest) / 1000.0);
+        log_state(read_state(), "at the end", GetTickCount64());
+        std::fprintf(stderr, "[boot] watchdog state: most open watch scopes seen %u, %u change line(s) logged\n",
+                     most_scopes, state_lines);
         std::fflush(stderr);
         if (wait == WAIT_TIMEOUT) {
             std::lock_guard<std::mutex> lock(g_log);
