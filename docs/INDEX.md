@@ -35,8 +35,9 @@ Not all shaders come the same way. Do not treat them all the same.
   slots 57 and 67 is not the code inside the containers", "slot 57 makes base pipelines".
 - **Where the 57/67 pieces lie:** the code is in one region of the program's own memory, and the pieces around it
   are in another. The program names the place; it hands over no container. FINDINGS 2026-11-28 "where the pieces
-  handed to slots 57 and 67 lie". The parcels of 62 and 86 lie elsewhere: on the stack of the thread that asks,
-  put together right after the first refusal. The builder library's lie in its own file. FINDINGS 2026-11-28
+  handed to slots 57 and 67 lie". The parcels of 62 and 86 lie elsewhere: on the stack of the thread that asks. For
+  compute, the parcel is made in a scratch area on that stack before the first way is asked, and it is handed
+  over only when the first way gives nothing ("correction: the compute parcel"). The builder library's lie in its own file. FINDINGS 2026-11-28
   "where the parcels lie", "the parcels are put together on the stack".
 - **Slot 55:** a pipeline derived from a base that slot 57 made. Never reached, because slot 57 is never answered.
   [exe-map/GRAPHICS-CALLS.md](exe-map/GRAPHICS-CALLS.md).
