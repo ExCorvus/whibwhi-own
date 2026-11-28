@@ -105,7 +105,8 @@ Not all shaders come the same way. Do not treat them all the same.
   account with no Xbox user. Networking is held. FINDINGS 2026-11-27 "every runtime interface the program asks
   for"; 2026-11-28 "the user".
 - **FidelityFX** goes to Windows' own AMD library (amd_fidelityfx_dx12.dll from the driver). FINDINGS
-  2026-11-28 "the FidelityFX import answered by Windows' own AMD library".
+  2026-11-28 "the FidelityFX import answered by Windows' own AMD library". The program does not call it before the fault
+  (FINDINGS 2026-11-28 "the program does not call FidelityFX before the fault").
 - **GameInput** goes to Windows' current GameInput (4.0). FINDINGS 2026-11-27 "the import GameInput.dll".
 - **IDXGIDevice** is answered from Windows' adapter and monitor. FINDINGS 2026-11-27 "the device's IDXGIDevice".
 - **Window and screens:** the program handles no window messages. A script makes the window fullscreen from
