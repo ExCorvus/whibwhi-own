@@ -93,6 +93,25 @@ void* HostLibraries::resolve(const std::string& library, const ImportedFunction&
         it = loaded_.emplace(key, module).first;
     }
     const auto module = static_cast<HMODULE>(it->second);
+    // FidelityFX (ExCorvus, 2026-11-28: "we need to check how" it upscales): the image's FidelityFX calls go
+    // through the weave's border in d3d12_xs.dll (whiwhi_ffx_*), which writes down which call it is, the sizes it
+    // is given and what Windows' library answers, and hands every call on unchanged.
+    if (key == "amd_fidelityfx_loader_xbox.dll" && !fn.by_ordinal) {
+        HMODULE weave = GetModuleHandleA("d3d12_xs.dll");
+        if (!weave) {
+            char self[MAX_PATH * 4] = {};
+            if (GetModuleFileNameA(nullptr, self, sizeof(self)) > 0) {
+                std::string dir = self;
+                dir.resize(dir.find_last_of("\\/") + 1);
+                weave = LoadLibraryExA((dir + "d3d12_xs.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            }
+        }
+        if (weave) {
+            if (void* border = reinterpret_cast<void*>(GetProcAddress(weave, ("whiwhi_ffx_" + fn.name).c_str()))) {
+                return border;
+            }
+        }
+    }
     const char* name = fn.by_ordinal ? reinterpret_cast<const char*>(static_cast<std::uintptr_t>(fn.ordinal))
                                      : fn.name.c_str();
     return reinterpret_cast<void*>(GetProcAddress(module, name));
