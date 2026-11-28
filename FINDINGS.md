@@ -2980,3 +2980,22 @@ in the same way. One recent Windows-native D3D12 game from the user's own librar
 - Its engine compiles shaders for three targets: PC and the two current consoles.
 - No text names a watchdog, hang detector or frame limiter.
 ExCorvus decided not to follow this further now; it is written down as a hint.
+## 2026-11-28 - one memory per heap, first run: the program stops in its own heap check, 5 s in (game test 18:03, FAIL, measured; not patched)
+
+- Built (not committed: the game test failed): vkd3d-xbox gets the memory library for descriptor heaps
+  (vkd3d_xbox_set_descriptor_heap_memory in d3d12core.dll; heaps of types 0 and 1 made on memory it returns; heaps
+  shaders see are taken over by the driver as its descriptor heap, with no fallback to other memory); the weave
+  hands it XMemAlloc with the heap attributes and sets VKD3D_CONFIG=no_default_heap_robustness.
+- What happened: vkd3d asked the memory library for 39,981,056 bytes for the large heap shaders see (1,245,184
+  slots of 32 bytes = 39,845,888, plus vkd3d's own pieces behind the slots: a null descriptor and 4,096 descriptors
+  for itself, rounded to pages) and got 0x...47b30000; the driver took that memory over as its heap; the PC heap's
+  start and the address the program sees were the same (one memory). Then the program stopped itself with its
+  breakpoint at image+0x1cf336c, in its heap function fn 0x1cf3280: it compares the heap's start (method +0x48)
+  with the address it chose and stops when they differ.
+- Read with the earlier measurement of that function (d3d12_xs.cpp, "descriptor heaps"): for the length of the
+  creating call the program's routine answers one request - the heap's size - with the address it chose. The
+  request here was larger than the heap's size, so (inference) the routine did not answer it, the memory library
+  gave other memory, and the program's check caught the difference.
+- So the Windows console's graphics library asks for exactly the slots' size, and keeps nothing of its own inside
+  that memory. vkd3d's own pieces (null descriptor, the descriptors it lends itself) do not fit into the program's
+  memory as they are.
