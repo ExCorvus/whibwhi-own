@@ -3189,3 +3189,14 @@ ExCorvus decided not to follow this further now; it is written down as a hint.
   amd_fidelityfx_dx12.dll". The run ends at the same fault in the user interface (image+0x161b994), 83 s.
   Whether the program calls the FidelityFX functions in this run is not written down: the calls go straight to
   Windows' library.
+## 2026-11-28 - the program does not call FidelityFX before the fault (game test 20:21, measured)
+
+- weave/d3d12_xs.cpp `ffx_border` and weave/host_libraries.cpp: the image's FidelityFX imports (ffxCreateContext,
+  ffxDestroyContext, ffxDispatch, ffxQuery; ffxConfigure is not imported) now go through the weave's border, which
+  hands each call on unchanged to Windows' own AMD library and writes down which call it is, the types in its
+  description chain, an upscaler's flags and its largest render and output sizes, and the answer. The objects
+  handed over are not looked at.
+- Run 20:21 (PASS, the fault in the user interface as before): the border wrote nothing. The boot tool's own count
+  of every import agrees independently: all four FidelityFX imports were called 0 times. Up to the fault the program
+  makes no upscaler, so FSR plays no part in what happens before it. The border stays in place for runs that get
+  further.
