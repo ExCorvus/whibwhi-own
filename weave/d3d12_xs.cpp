@@ -102,6 +102,58 @@ void note_order(int slot);
 }
 bool can_read(const void* address, std::size_t bytes);  // defined below, with the command-list checks
 
+// Is the compiled code handed to device slots 57 and 67 the same code as inside the containers this library
+// translates (slot 86)? Each program is named by a hash of its words, first word through the end-of-program word;
+// only the hashes are kept, and only counts are logged.
+namespace compiled_match {
+SRWLOCK lock = SRWLOCK_INIT;
+std::unordered_set<unsigned long long> translated;  // programs inside the containers this library translates
+std::unordered_set<unsigned long long> handed[2];   // programs handed to slot 57 [0] and slot 67 [1]
+
+unsigned long long hash(const std::uint8_t* bytes, std::size_t count) {
+    unsigned long long h = 0xcbf29ce484222325ull;
+    for (std::size_t i = 0; i < count; ++i) {
+        h = (h ^ bytes[i]) * 0x100000001b3ull;
+    }
+    return h;
+}
+
+std::string summary() {
+    AcquireSRWLockShared(&lock);
+    std::size_t both[2] = {};
+    for (int s = 0; s < 2; ++s) {
+        for (unsigned long long h : handed[s]) {
+            both[s] += translated.count(h);
+        }
+    }
+    char text[400];
+    std::snprintf(text, sizeof(text),
+                  "compiled code: %zu different programs inside the containers translated (slot 86); slot 57 handed "
+                  "%zu different, %zu of them the same as one of those; slot 67 handed %zu different, %zu the same",
+                  translated.size(), handed[0].size(), both[0], handed[1].size(), both[1]);
+    ReleaseSRWLockShared(&lock);
+    return text;
+}
+
+void note_translated(const std::uint8_t* code, std::size_t bytes) {
+    const unsigned long long h = hash(code, bytes);
+    AcquireSRWLockExclusive(&lock);
+    const bool added = translated.insert(h).second;
+    const std::size_t n = translated.size();
+    ReleaseSRWLockExclusive(&lock);
+    if (added && n >= 256 && (n & (n - 1)) == 0) {
+        logf("%s\n", summary().c_str());
+    }
+}
+
+void note_handed(int slot, const std::uint8_t* code, std::size_t bytes) {
+    const unsigned long long h = hash(code, bytes);
+    AcquireSRWLockExclusive(&lock);
+    handed[slot == 57 ? 0 : 1].insert(h);
+    ReleaseSRWLockExclusive(&lock);
+}
+}  // namespace compiled_match
+
 // Device slots 57 and 67: their first argument is a root signature followed by (pointer, length) pairs
 // (FINDINGS 2026-11-28). Each pair is looked at for its shape only - its length, whether its place is 0x100-aligned,
 // and, for an aligned one, whether a walk of the console's instruction formats (shader_walk) from its first word
@@ -131,14 +183,31 @@ void note_compiled_pairs(int slot, const void* caller, const void* description) 
             detail += std::string(" | ") + text;
             break;
         } else if ((pointer & 0xff) != 0 || (length & 3) != 0 || length == 0) {
+            // What the block begins with, by the two container forms this library reads (their magic words only).
+            std::string form;
+            if (length >= 0x20) {
+                const whiwhi::weave::ShaderContainer parts = whiwhi::weave::read_shader_container(
+                    reinterpret_cast<const std::uint8_t*>(pointer), static_cast<std::size_t>(length));
+                if (parts.kind == whiwhi::weave::ContainerKind::kDxbc && parts.ok()) {
+                    form = " - a DXBC container, parts";
+                    for (const whiwhi::weave::ShaderChunk& c : parts.chunks) {
+                        form += std::string(" ") + c.name;
+                    }
+                } else if (parts.kind != whiwhi::weave::ContainerKind::kNotRecognised) {
+                    form = std::string(" - ") + whiwhi::weave::container_kind_name(parts.kind) +
+                           (parts.ok() ? "" : " (refused: " + parts.reason + ")");
+                } else {
+                    form = " - no container";
+                }
+            }
             std::snprintf(text, sizeof(text), "pair %d: %s, %llu bytes", i,
                           length == 0         ? "a place with length 0"
                           : (pointer & 0xff)  ? "unaligned place"
                                               : "aligned place, length not whole words",
                           static_cast<unsigned long long>(length));
             const std::string shape = text;
-            pair_shapes.push_back(shape.substr(0, shape.rfind(',')));
-            detail += std::string(" | ") + text;
+            pair_shapes.push_back(shape.substr(0, shape.rfind(',')) + form);
+            detail += std::string(" | ") + text + form;
             continue;
         } else {
             const auto* words = reinterpret_cast<const std::uint32_t*>(pointer);
@@ -147,6 +216,10 @@ void note_compiled_pairs(int slot, const void* caller, const void* description) 
             bool filler = walk.reached_end;
             for (std::size_t w = walk.end_word_index + 1; filler && w < count; ++w) {
                 filler = words[w] == 0xBF9F0000u;
+            }
+            if (walk.reached_end) {
+                compiled_match::note_handed(slot, reinterpret_cast<const std::uint8_t*>(pointer),
+                                            (walk.end_word_index + 1) * 4);
             }
             std::snprintf(text, sizeof(text), "pair %d: aligned place, %llu bytes, walk %s%s", i,
                           static_cast<unsigned long long>(length),
@@ -171,7 +244,8 @@ void note_compiled_pairs(int slot, const void* caller, const void* description) 
                      detail.c_str());
     }
     if ((nth & (nth - 1)) == 0 && nth >= 8) {
-        std::fprintf(stderr, "[d3d12_xs] device slot %d after %llu calls, the shapes of its pairs:\n", slot, nth);
+        std::fprintf(stderr, "[d3d12_xs] device slot %d after %llu calls, the shapes of its pairs (%s):\n", slot, nth,
+                     compiled_match::summary().c_str());
         for (const auto& [shape, n] : shapes) {
             if (shape.rfind("slot " + std::to_string(slot) + " ", 0) == 0) {
                 std::fprintf(stderr, "[d3d12_xs]   %s: %llu\n", shape.c_str(), n);
@@ -3017,6 +3091,7 @@ whiwhi::weave::PcShader translate_shader_container(const std::uint8_t* container
         refused.reason = "the decode: " + decoded.bad_reason;
         return refused;
     }
+    compiled_match::note_translated(block.data() + found.code_offset, found.program_bytes);
     const ModuleTables tables = read_module_tables(block.data(), block.size(), found);
     const ShaderContainer parts = read_shader_container(container, bytes);
     const Signature in = signature_of(parts, container, bytes, "ISG1");
