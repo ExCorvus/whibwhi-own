@@ -91,7 +91,7 @@ add_executable(connect_imports tools/connect_imports.cpp)
 target_link_libraries(connect_imports PRIVATE whiwhi_weave)
 add_dependencies(connect_imports xmem d3d12_xs AcpHal xapu chad xcrdapi xg_xs XboxBvhBuilder xgameruntime)
 
-add_executable(boot_image tools/boot_image.cpp)
+add_executable(boot_image tools/boot_image.cpp tools/boot_image.manifest)
 target_link_libraries(boot_image PRIVATE whiwhi_weave)
 add_dependencies(boot_image xmem d3d12_xs AcpHal xapu chad xcrdapi xg_xs XboxBvhBuilder xgameruntime windows_check)
 
