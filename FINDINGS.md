@@ -3024,3 +3024,20 @@ ExCorvus decided not to follow this further now; it is written down as a hint.
   memory the library gave, VKD3D_CONFIG=no_default_heap_robustness unless set, compare_heaps reads the PC handle
   without its low marks and reports one memory. vkd3d-xbox: libs/vkd3d (device.c, memory.c, resource.c,
   vkd3d_private.h) and libs/d3d12core (main.c, d3d12core.def).
+## 2026-11-28 - the shell listens to the heaps at its own beat (game test 18:29, PASS, measured)
+
+- weave/d3d12_xs.cpp `listen`: at a submission to a queue (at most one beat each 33 ms), on its own thread, the
+  shell compares every heap of types 0 and 1 in the memory the program sees with a copy of it kept in memory (not
+  on disk) from the beat before, and once a second writes per heap kind how many slots changed, how many got
+  content, how many were emptied, and the most in one beat. Listening only. (Windows' write watch is for private
+  memory; the large heap's memory is a mapped view.)
+- Run 18:29 (one memory for the heaps shaders see): beats from 56.3 s on, 30 a second.
+  - The resource heap shaders see: 56-59 s about 2,800 slots a second get content (up to 132 in one beat); from
+    60 s a steady pulse of about 90 slots a second, 3 to 4 in each beat, all of them slots that already had content
+    and get other content (none newly filled, none emptied); at 73.5-74.9 s a burst again (1,094 newly filled, 104
+    emptied, up to 184 in one beat), then the fault at image+0x161b994 (the user interface building).
+  - The sampler heap shaders see: 42 samplers get content in the first seconds, then nothing.
+  - The heaps shaders do not see: in the memory the program sees, not one slot changes in the whole run (their
+    descriptors are made in vkd3d's own memory for them, the weave moving the handles there).
+- Not told apart yet: which of the changes the library makes (a view or sampler call) and which the program makes
+  itself (its raw copies).
