@@ -93,7 +93,10 @@ add_dependencies(connect_imports xmem d3d12_xs AcpHal xapu chad xcrdapi xg_xs Xb
 
 add_executable(boot_image tools/boot_image.cpp)
 target_link_libraries(boot_image PRIVATE whiwhi_weave)
-add_dependencies(boot_image xmem d3d12_xs AcpHal xapu chad xcrdapi xg_xs XboxBvhBuilder xgameruntime)
+add_dependencies(boot_image xmem d3d12_xs AcpHal xapu chad xcrdapi xg_xs XboxBvhBuilder xgameruntime windows_check)
+
+# The helper of the "Windows accepts" game test: Windows' own Direct3D 12, loaded from System32 at run time.
+add_executable(windows_check tools/windows_check.cpp)
 
 # Proves the GPU reads a plain host buffer zero-copy (VK_EXT_external_memory_host). Needs the Vulkan SDK.
 if(EXISTS "C:/VulkanSDK")
