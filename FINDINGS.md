@@ -2964,3 +2964,19 @@ the audio part of the weave.
   upper bits and the slot's place; device.c d3d12_device_get_descriptor_heap_gpu_va), not the GPU address of the
   heap memory; the heaps shaders do not see carry marks in their CPU handles' low bits and vkd3d keeps its own
   data for each slot beside them, which a raw copy of 32 bytes does not carry.
+## 2026-11-28 - a Windows-native game read for comparison (one file, read only; not followed further)
+
+ExCorvus's theory: on a PC, Windows is the fabric itself, so a program made for Windows should be woven into it
+in the same way. One recent Windows-native D3D12 game from the user's own library was read as a file only
+(nothing started, nothing written to its folder, no part of it kept). What the file itself shows:
+- It names its own graphics runtime to Windows: it exports D3D12SDKVersion and D3D12SDKPath, so Windows'
+  d3d12.dll loads the D3D12 core the program brings in its own folder. The program chooses its graphics runtime,
+  and Windows weaves it in.
+- It exports the two markers with which a program asks the AMD and NVIDIA drivers for the strong GPU.
+- It does not import d3d12.dll or dxgi.dll: device, factory and root-signature functions come from a layer between
+  the program and D3D12, which hands D3D12 back to it.
+- Input: it loads GameInput.dll at run time (GameInputCreate) and knows gamepad types for both console makers'
+  input libraries; the same middleware (sound, video, physics, an HTML-based user interface) as on consoles.
+- Its engine compiles shaders for three targets: PC and the two current consoles.
+- No text names a watchdog, hang detector or frame limiter.
+ExCorvus decided not to follow this further now; it is written down as a hint.
