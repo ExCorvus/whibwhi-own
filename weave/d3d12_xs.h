@@ -65,6 +65,12 @@ WHIWHI_D3D12_XS_API unsigned long long __stdcall whiwhi_d3d12_view_pages_shown(v
 // per kind of object, which of those bytes the game has written, and returns how many.
 WHIWHI_D3D12_XS_API unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void);
 
+// The shader store (ExCorvus, 2026-11-28: "we need to pretranslate shaders. it is the CURRENT PROBLEM"): every PC
+// shader the library writes is kept on this PC (%LOCALAPPDATA%\whiwhi\shader-store, never in the repository), one
+// file per build of this library. Called before the program's entry thread starts, this loads the store into
+// memory, so that a shader the program asks for later is already written. Returns how many were loaded.
+WHIWHI_D3D12_XS_API unsigned long long __stdcall whiwhi_d3d12_load_shader_store(void);
+
 // The layout the library gives its objects: where the game's area ends, the two command-list fields the game
 // compares before writing a command record itself, and the device byte that decides who copies descriptors.
 WHIWHI_D3D12_XS_API int __stdcall whiwhi_d3d12_object_layout(unsigned long long* image_area_end,
