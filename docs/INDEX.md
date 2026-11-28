@@ -58,8 +58,8 @@ Not all shaders come the same way. Do not treat them all the same.
 - **Ray tests:** none in the graphics pipelines. They are in the program's own compute shaders (14 at first
   count, then 55 once more of them could be read). FINDINGS 2026-11-27 "the refused pipelines hold no ray test";
   2026-11-28 "the ray test is in the program's own compute shaders", "the code reader knows the extension word".
-- **The program's lighting passes:** set up in one function (fn 0xcba630, read 2026-11-28, not yet in FINDINGS),
-  one pass after another by name: bvh_skinning, indirect_light_probes, indirect_diffuse_lighting,
+- **The program's lighting passes:** set up in one function (fn 0xcba630; FINDINGS 2026-11-28 "the program's own
+  compute shaders handed unchanged to vkd3d"), one pass after another by name: bvh_skinning, indirect_light_probes, indirect_diffuse_lighting,
   sr_tracing/sr_denoising and others.
 
 ## Shader translation (the weave's own translator)
