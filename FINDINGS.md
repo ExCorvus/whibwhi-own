@@ -2552,3 +2552,21 @@ the audio part of the weave.
   unaligned; pair 4 is not a readable (pointer, length) in 2,036.
 - Both: after the end-of-program the rest of the block is not all filler. Not read further.
 - Fault unchanged at image+0x161b994.
+## 2026-11-28 - the code handed to device slots 57 and 67 is not the code inside the containers of slot 86 (game test 03:47, measured)
+
+- weave/d3d12_xs.cpp: each program is named by a hash of its words (first word through the end-of-program word):
+  the programs inside the containers this library translates (slot 86), and the aligned pieces of slots 57 and 67
+  whose walk reaches an end-of-program. Only counts are logged. The unaligned pieces are checked for the two
+  container forms the library reads (DXBC, the program's own 0xDCE7 packing).
+- Run 03:47 (new build, so a new and empty shader store: every slot 86 container was translated in this run): 735
+  different programs inside the slot 86 containers; slot 57 handed 6,543 different programs in 16,384 calls, slot 67
+  1,656 in 2,048. **None of them is the same as one inside the slot 86 containers.** So the bulk of the program's
+  compiled code reaches the device only through slots 57 and 67, and it is not code the translator has seen.
+- Slot 57 has three aligned code pieces, not two: pairs 2, 4 and 6 (pair 6: 3,996 of 16,384 calls reach an
+  end-of-program; pair 4 and 5 empty together in 4,016 calls, pair 2 and 3 empty together in 579). Each code piece
+  is followed by an unaligned piece (pairs 3, 5); pairs 0 and 1 are unaligned pieces too. None of the unaligned
+  pieces is a DXBC container or the program's 0xDCE7 packing.
+- Slot 67: pair 2 is code, pair 3 an unaligned piece, pairs 0 and 1 small pieces; pair 4 is not a readable
+  (pointer, length), so slot 67's description has another layout after pair 3.
+- The weave's walk stops on a word it has no format for in 2,061 of slot 57's pair 2 and 836 of slot 67's pair 2.
+- Fault unchanged at image+0x161b994.
