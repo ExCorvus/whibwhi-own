@@ -2606,3 +2606,20 @@ the audio part of the weave.
   signatures made by both). No new shape reached Windows, because the requests stop before vkd3d.
 - Not read yet: why shaders name table places the stream's root signature does not have. The shaders' containers
   carry their own root-signature key (PRIV, docs/console-libs). Fault unchanged at image+0x161b994.
+## 2026-11-28 - the shaders read table places past the root signature's ranges; the PC tables now have no end (shader table check ~04:30, game test 11:57, measured)
+
+- Shader table check (WHIWHI_SHADER_CHECK, no code change, file kept on the PC): 1,088 pairs of a shader and the root
+  signature its request names, 106 root signatures. Every parameter number the shaders' tables give is one of the
+  named signature's parameters (17,886 and 2,886 held, 0 not) and of the right kind (constants, root buffer,
+  table). The containers' PRIV keys: 11, none named with more than one root signature. But of the table resources,
+  2,255 of 3,856 sit at a place (word offset / 8) the named table's ranges do not have, and 1,941 of 2,428 at a
+  register its ranges do not hold. So the shaders and their root signatures belong together, and the shaders read
+  past the end of the ranges: on the console a table is the address the program sets, and nothing bounds a read.
+  Separate, not read: 1,716 fixed-sampler entries name no fixed sampler of the named signature.
+- weave/d3d12_xs.cpp program_layout_signature: the PC table ranges the weave makes from the program's root
+  signatures have no end (NumDescriptors UINT_MAX), so register k of space p is place k of the table for any k.
+- Run 11:57 (new build): slot 86 made 2,986 pipelines (was 2,052); answering took 12.5 s together (was 2.2 s: vkd3d
+  now builds more). Windows check: the 89 program root signatures with open-ended tables are made by Windows too;
+  4,271 pipeline streams made by both (was 2,921), 4 refused by Windows as before.
+- The requests now stop at "a sampler named as root parameter 0, which is 'T' in the root signature": 29,194 of
+  32,768. Fault unchanged at image+0x161b994 (progress reports up to 72.2 s).
