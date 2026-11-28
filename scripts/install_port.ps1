@@ -111,7 +111,7 @@ Write-Host "running; its log: `$log"
 # On the console the program's window is the screen: Windows is asked to show it frameless over the whole monitor.
 Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', ``
     '-File', "``"`$(Join-Path `$here 'fullscreen_window.ps1')``"", '-ProcessId', "`$(`$p.Id)", ``
-    '-Log', "``"`$(Join-Path `$here "logs\`$stamp.fullscreen.txt")``""
+    '-Log', "``"`$(Join-Path `$here "logs\`$stamp.fullscreen.txt")``"", '-ProgramLog', "``"`$log``""
 `$p.WaitForExit()
 Write-Host "ended (exit code `$(`$p.ExitCode))"
 "@
