@@ -3075,3 +3075,20 @@ ExCorvus decided not to follow this further now; it is written down as a hint.
   - Pipelines: the wave of requests at 71.5-71.9 s (about 970 asked, 36 made) as in earlier runs.
 - So up to the fault the watchdog and the frame pacer run as they always do; neither stops or decides anything in
   the last second. The fault comes on another thread while the frames are still running.
+## 2026-11-28 - the program's own compute shaders handed unchanged to vkd3d: refused at the shader; the program's lighting set up in one function (game tests 19:04, 19:07, measured; read in the exe)
+
+- weave/d3d12_xs.cpp, device slot 62: the first three of the program's own compute shaders are also handed
+  unchanged to the PC device (vkd3d-xbox), only to write down its answer. The program's answer stays the one it
+  had ("not implemented"). The request goes as the program wrote it; only the root signature is exchanged for
+  the PC one the weave made from the program's own.
+- Runs 19:04 and 19:07 (the second with VKD3D_DEBUG=warn): 3 of 3 answered 0x80004005. vkd3d accepts the root
+  signature and reaches the shader ("Ignoring DXBC checksum", then "Failed to compile shader, vkd3d result -4",
+  "Invalid shader bytecode"). The place a door for these shaders would go is measured, not only read.
+- This covers one of the ways the program hands over shaders. Slots 57 and 67, which the program asks first, hand
+  bare code pieces and no container (2026-11-28 "what device slots 57, 61 and 67 are handed"). The builder
+  library's shaders already go through as they should. The shaders do not all come the same way, and they are
+  not to be treated the same (ExCorvus).
+- Read in the exe: fn 0xcba630 sets up the program's passes one after another (about 50 calls). Those that load
+  shaders by name include bvh_skinning, indirect_light_probes, indirect_diffuse_lighting, sr_tracing and
+  sr_denoising, the reflection passes, weathering and the cascades. The lighting is one path in the program. Which
+  of the ways each pass's shaders take is not read yet.
