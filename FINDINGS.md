@@ -2842,3 +2842,23 @@ the audio part of the weave.
 - So the ray test the program uses sits in its compute work, which is the part still unanswered (slot 62, "a
   compute pipeline of a console shader"); its graphics pipelines have none. How many of the 1,171 unread ones hold
   it too is not known.
+## 2026-11-28 - where the program's compute shaders cannot be read, and the shader store named by the translator (game tests 16:09, 16:14, measured)
+
+- The program's compute shaders are Xbox DXIL like its graphics shaders (weave/shader_program.hpp): the public DXIL
+  header, "NOBC" where Windows' DXIL has its LLVM code, and between them the directory with the packed module of
+  the GPU's machine code. Packing and directory read fine for all of them.
+- Run 16:09 (PASS), the 1,170 different compute shaders the reader could not read, by where the walk through
+  their machine code stops: about 480 stop on a word of no known format, every one with top bits 0x3f, right after
+  a VOP2 or VOP1 instruction (VOP2 28: 371 of them; VOP1 1: 40; VOP2 37: 36; VOP2 15: 20; others). About 700 reach
+  the first end-of-program word with more code after it: in about 380 the rest walks on to 1 to 5 more
+  end-of-program words and then only filler (programs with several ends); in about 300 the rest stops on a word of
+  no known format.
+- Inference (public instruction set of this GPU generation, not yet checked against the words): a VOP1/VOP2/VOPC
+  whose first source field is 0xF9 (SDWA), 0xFA (DPP16), 0xE9 or 0xEA (DPP8) carries one more word, and a DPP word
+  with row and bank masks 0xF starts with 0xFF, top bits 0x3f. The walk (weave/shader_walk.cpp) does not count that
+  word, and the decoder (shader_isa.cpp) would read 0xF9/0xFA as an inline constant. Neither is changed yet: before
+  the walk knows the word, the translator has to refuse such instructions.
+- The shader store is now named by the translator's own code (weave/CMakeLists.txt: a hash of shader_*.cpp/hpp and
+  inflate.*, plus kStoreCaller in d3d12_xs.cpp for the place that calls it), not by the whole library: a change
+  elsewhere in the weave keeps it. AGENTS.md rule 5 says so. Run 16:14 (PASS) started the new store
+  (translator-1468d784190cabc4-1.bin, 5.9 MB).
