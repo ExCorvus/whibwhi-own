@@ -107,6 +107,38 @@ void log_slot(const char* kind, int kind_id, int slot, const void* caller, void*
                      arguments[4], arguments[5]);
         std::fflush(stderr);
     }
+    // Device slots 57, 61 and 67 (docs/exe-map/SHADER-PATH.md section 7.1, DESCRIPTORS.md section A): what the
+    // program hands them, as words - the first 0x60 bytes behind each of the first two arguments that point at
+    // readable memory, and the thread. Slot 61 is the program's only way to make a sampler; its 0x54-byte
+    // description is logged for every call up to 64, slots 57 and 67 for their first 6. A measurement only: the
+    // answer stays "not implemented".
+    if (std::strcmp(kind, "device") == 0 && (slot == 57 || slot == 61 || slot == 67)) {
+        static unsigned counts[3] = {};
+        unsigned& count = counts[slot == 57 ? 0 : slot == 61 ? 1 : 2];
+        if (count < (slot == 61 ? 64u : 6u)) {
+            ++count;
+            std::fprintf(stderr, "[d3d12_xs] device slot %d call %u (thread %lu, returns to %p):\n", slot, count,
+                         GetCurrentThreadId(), caller);
+            for (int a = 0; a < 2; ++a) {
+                MEMORY_BASIC_INFORMATION info{};
+                const auto* p = static_cast<const unsigned char*>(arguments[a]);
+                if (!p || !VirtualQuery(p, &info, sizeof(info)) || info.State != MEM_COMMIT ||
+                    (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
+                    static_cast<const unsigned char*>(info.BaseAddress) + info.RegionSize < p + 0x60) {
+                    std::fprintf(stderr, "[d3d12_xs]   argument %d %p: not readable memory\n", a + 1, p);
+                    continue;
+                }
+                std::fprintf(stderr, "[d3d12_xs]   argument %d %p:", a + 1, p);
+                for (int w = 0; w < 0x60; w += 4) {
+                    unsigned word = 0;
+                    std::memcpy(&word, p + w, 4);
+                    std::fprintf(stderr, "%s%08x", w % 0x20 == 0 ? (w ? "\n[d3d12_xs]     " : " ") : " ", word);
+                }
+                std::fprintf(stderr, "\n");
+            }
+            std::fflush(stderr);
+        }
+    }
 }
 
 // The wants ledger: a measurement only, on when WHIWHI_WANTS_LEDGER names a file. At each place where the program
