@@ -2584,3 +2584,25 @@ the audio part of the weave.
   02:51 entry: graphics slot 57 does have the program's own other way - slot 86, on another thread and later, which
   the per-thread order count could not see.
 - docs/exe-map/GRAPHICS-CALLS.md rows 55 and 57 say this now.
+## 2026-11-28 - samplers taken by number: written in the PC's own form; the next stop is where the shaders' tables meet the root signatures (game test 04:19, measured)
+
+- weave/shader_pc.cpp: a sampler the program loads from its sampler table at a place computed at run time (the
+  offset register holds bytes into the table, 16 to a sampler) is now written as the PC's own form of it: the table's
+  whole range is declared from place 0 (dcl_sampler S[0:*] in the table's register space) and the sampler is taken
+  from it by number, place = the load's fixed place + offset register / 16, taken where the program reads the
+  register. Fixed samplers of the same table are read from that one range at their place, so no two declarations
+  overlap. weave/tests/test_shader_pc.cpp: the pixel program of the sampler test once more with the place by number
+  (runs on the test machine and is read back by the system disassembler). 27 of 27.
+- Run 04:19 (new build, empty shader store), set against run 03:47: of 32,768 slot 86 requests, 29,608 had stopped
+  on "a sampler taken from a table at a place computed at run time"; now none does. Made pipelines unchanged at
+  2,052. The requests now stop at the library's own check of the written shader against the stream's root signature
+  (bindings_against_signature, before vkd3d is asked):
+  - "a constant buffer at place N of table 0, which has 2 places" (N = 2..6): 24,010 requests, 534 different
+    shaders (was 864);
+  - "a sampler named as root parameter 0, which is 'T' in the root signature": 6,048 requests, 120 shaders (new);
+  - smaller: a sampler the pass cannot tell 126, a resource from the descriptor heap by number 162, a texel read the
+    pass cannot type 288, s9 read as a number 10.
+- Windows check of the same run: unchanged (2,921 streams made by both, 4 refused by Windows; 89 program root
+  signatures made by both). No new shape reached Windows, because the requests stop before vkd3d.
+- Not read yet: why shaders name table places the stream's root signature does not have. The shaders' containers
+  carry their own root-signature key (PRIV, docs/console-libs). Fault unchanged at image+0x161b994.
