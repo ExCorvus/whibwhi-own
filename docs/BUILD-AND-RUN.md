@@ -91,6 +91,18 @@ import the game called in the baseline is not provided any more. Every other dif
 The records stay on your PC (`%LOCALAPPDATA%\whiwhi\game-tests`, or `-Out`); they hold names, counts and
 addresses only, nothing of the game itself.
 
+### Does Windows accept what the weave makes
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\windows_check_test.ps1 -Game <your game folder> [-Seconds 120] [-Show]
+```
+
+The same game test, with one addition: every root signature and pipeline the weave hands to vkd3d is also handed,
+as a copy, to Windows' own Direct3D 12 on your PC (`weave\build\windows_check.exe`, which loads `d3d12.dll` from
+System32 only, in a process of its own). The result (`%LOCALAPPDATA%\whiwhi\windows-check\<time>.txt`) lists, side
+by side, what vkd3d and what Windows answered to each. With Windows' optional "Graphics Tools" feature installed,
+its debug layer would also say why something is refused; without it only the answer numbers are known.
+
 ## Run the weave against the game
 
 Run `boot_image.exe` from the build folder (`weave\build`), where the weave's own libraries sit beside it. Give
