@@ -2414,3 +2414,18 @@ the audio part of the weave.
   program's own compute shaders, not made yet). No request got two different answers.
 - Root signatures (slot 86): every made pipeline uses one and the same root signature; the refused ones use 5,
   that one among them.
+## 2026-11-28 - the progress reports stop while the pipelines are asked (game test 00:36, measured)
+
+- weave/tools/boot_image.cpp now looks at the progress stamp every 50 ms (it was 500 ms) and logs each report at
+  its own moment, read from the stamp itself (the program's QueryPerformanceCounter value), in seconds since the
+  process was created; weave/d3d12_xs.cpp logs the pipeline requests per tenth of a second on the same time base.
+  Read only, as before. Correction: the "every half second" of the earlier entries was the boot tool's own reading
+  rhythm; the program reports much more often (57 reports between 51.3 s and 57.1 s, mostly 0.05-0.13 s apart).
+- Timeline: 53 pipelines at 2.8-2.9 s (all made), 6 at 4.5 s, then none until 51.2 s. Report 1 at 51.26 s. Then
+  the big wave: 51.5-52.9 s, about 62,000 requests (up to 6,783 in one tenth), from 5-6 threads. No report during
+  it: report 2 comes at 53.07 s, 1.81 s after report 1, right after the wave ends (53.0 s: 16 requests). Then
+  reports every tenth or faster while small groups of requests go on. A second wave at 56.3-57.0 s (about 3,600):
+  the gap before report 57 (57.12 s) is 0.71 s. Last requests at 57.4 s, then the fault at image+0x161b994.
+- So the program does not report progress while a wave of pipeline requests is being answered, and reports again
+  right after it. Which thread waits for which is not measured. The watchdog's budget (30 s) is not near in this
+  run; the time the pipelines take is time without an answer to it.
