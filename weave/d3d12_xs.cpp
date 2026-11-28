@@ -109,6 +109,7 @@ double run_seconds();
 // handed to its queues, and the longest stretch without a present - on the clock of the process, like the boot
 // tool's watchdog reports. A second in which nothing came is written too. Counts only; nothing answered differently.
 void compare_heaps(double seconds);  // defined below, after can_read
+void listen_beat();                  // defined below, after compare_heaps
 namespace rhythm {
 std::atomic<unsigned long long> presents{0}, waits{0}, waited_us{0}, submits{0}, lists{0};
 std::atomic<long long> last_present_us{-1}, longest_gap_us{0};
@@ -164,6 +165,7 @@ void note_submit(unsigned count) {
     start();
     ++submits;
     lists += count;
+    listen_beat();
 }
 }  // namespace rhythm
 bool can_read(const void* address, std::size_t bytes);  // defined below, with the command-list checks
@@ -1647,6 +1649,107 @@ void compare_heaps(double seconds) {
         words("filled only in the driver's", first_only_driver);
         words("different in both", first_differ);
     }
+}
+
+// The shell listens to the heaps at its own beat (ExCorvus, 2026-11-28: "the shell isn't only a layer it is an active
+// part too"; "listen to these heaps and speak them out in cpu code"). Listening only, for now: at a submission to a
+// queue (at most one beat each 33 ms), on its own thread, for each heap of types 0 and 1 in the memory the program
+// sees, which slots changed since the last beat - kept as a copy in memory, nothing on disk. Windows' write watch
+// cannot do it: the large heap's memory is a mapped view (run 17:02, memory type 0x40000), and write watch is only
+// for private memory. Once a second: beats, and per heap kind the slots that changed (together, most in one beat),
+// split into slots that got content and slots that were emptied. Counts only; nothing is said yet.
+namespace listen {
+struct Shadow {
+    unsigned long long title = 0, bytes = 0;
+    unsigned type = 0;
+    bool visible = false;
+    std::vector<unsigned char> copy;
+    bool seen = false;
+};
+struct Count {
+    unsigned long long changed = 0, filled = 0, emptied = 0, most = 0, heaps = 0;
+};
+HANDLE g_wake = nullptr;
+std::once_flag g_once;
+
+void run() {
+    std::vector<Shadow> shadows;
+    unsigned long long beats = 0;
+    Count counts[4];  // [type * 2 + visible]
+    double last_log = flow::run_seconds(), last_beat = 0;
+    for (;;) {
+        WaitForSingleObject(g_wake, 1000);
+        const double now = flow::run_seconds();
+        if (now - last_beat >= 0.033) {
+            last_beat = now;
+            ++beats;
+            AcquireSRWLockShared(&g_heaps_lock);
+            for (Shadow& s : shadows) s.seen = false;
+            for (const HeapRange& r : g_heaps) {
+                if (r.type > 1 || !r.title || !r.bytes) continue;
+                const unsigned step = r.type == 1 ? 16u : 32u;
+                const auto* mem = reinterpret_cast<const unsigned char*>(r.title);
+                Shadow* s = nullptr;
+                for (Shadow& x : shadows) {
+                    if (x.title == r.title && x.bytes == r.bytes) { s = &x; break; }
+                }
+                if (!s) {
+                    if (!can_read(mem, r.bytes)) continue;
+                    // First sight of a heap: what is in it now is the start, not a change.
+                    shadows.push_back(Shadow{r.title, r.bytes, r.type, r.pc_gpu != 0,
+                                             std::vector<unsigned char>(mem, mem + r.bytes), true});
+                    continue;
+                }
+                s->seen = true;
+                Count& c = counts[r.type * 2 + (r.pc_gpu ? 1 : 0)];
+                ++c.heaps;
+                unsigned long long here = 0;
+                static const unsigned char none[32] = {};
+                for (unsigned long long i = 0; i < r.bytes / step; ++i) {
+                    unsigned char* old = s->copy.data() + i * step;
+                    const unsigned char* cur = mem + i * step;
+                    if (std::memcmp(old, cur, step) != 0) {
+                        ++here;
+                        const bool was_empty = std::memcmp(old, none, step) == 0;
+                        const bool is_empty = std::memcmp(cur, none, step) == 0;
+                        c.filled += was_empty && !is_empty;
+                        c.emptied += !was_empty && is_empty;
+                        std::memcpy(old, cur, step);
+                    }
+                }
+                c.changed += here;
+                if (here > c.most) c.most = here;
+            }
+            ReleaseSRWLockShared(&g_heaps_lock);
+            shadows.erase(std::remove_if(shadows.begin(), shadows.end(), [](const Shadow& x) { return !x.seen; }),
+                          shadows.end());
+        }
+        if (now - last_log >= 1.0) {
+            last_log = now;
+            static const char* names[4] = {"resource heaps shaders do not see", "resource heaps shaders see",
+                                           "sampler heaps shaders do not see", "sampler heaps shaders see"};
+            char text[900];
+            int at = std::snprintf(text, sizeof(text), "[listen] %.1f s: %llu beats", now, beats);
+            for (int k = 0; k < 4; ++k) {
+                if (!counts[k].heaps) continue;
+                at += std::snprintf(text + at, sizeof(text) - at,
+                                    "; %s: %llu slots changed (%llu got content, %llu emptied), most in one beat %llu",
+                                    names[k], counts[k].changed, counts[k].filled, counts[k].emptied, counts[k].most);
+            }
+            logf("%s\n", text);
+            beats = 0;
+            for (Count& c : counts) c = Count{};
+        }
+    }
+}
+}  // namespace listen
+
+void listen_beat() {
+    std::call_once(listen::g_once, [] {
+        listen::g_wake = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+        std::thread(listen::run).detach();
+    });
+    SetEvent(listen::g_wake);
 }
 
 // True for the first few calls: used to show a method's first calls, and to keep refusals from filling the log.
