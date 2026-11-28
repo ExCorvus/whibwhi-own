@@ -2238,7 +2238,7 @@ void log_console_shader_parts(const void* code, std::size_t size) {
 // whole run, the part spent writing PC shaders and the part inside the PC device), whether the same request came
 // before (the bytes of its description, each shader in it named by its contents), its root signature, and the
 // answer the program got back (the value returned, and whether an object came with it). Also how many pipelines the
-// program lets go. Logged as it goes - one line per second of the run that had requests, and the whole picture at
+// program lets go. Logged as it goes - one line per tenth of a second that had requests, and the whole picture at
 // every power of two of requests - because a run that ends in a fault never reaches the report at the end. Numbers
 // only; nothing of a shader is kept. Nothing is answered differently.
 namespace flow {
@@ -2316,11 +2316,13 @@ struct Timer {
     }
 };
 
-std::string second_line(long s) {
-    const Second& x = seconds[s];
+// One line per tenth of a second that had requests (ExCorvus, 2026-11-28: whether the requests are paced by the
+// progress reports the watchdog reads; the boot tool logs each report's own moment on the same time base).
+std::string second_line(long tenth) {
+    const Second& x = seconds[tenth];
     char text[160];
-    std::snprintf(text, sizeof(text), "[pipeline flow] second %ld: %llu asked, %llu made, %zu thread(s), most at once "
-                  "%ld\n", s, x.asked, x.made, x.threads.size(), x.most_at_once);
+    std::snprintf(text, sizeof(text), "[pipeline flow] %ld.%ld s: %llu asked, %llu made, %zu thread(s), most at once "
+                  "%ld\n", tenth / 10, tenth % 10, x.asked, x.made, x.threads.size(), x.most_at_once);
     return text;
 }
 
@@ -2366,7 +2368,7 @@ void done(int which, const Timer& t, unsigned long long key, void* signature, HR
     const double us = microseconds_since(t.start);
     --at_once;
     const double at = run_seconds();
-    const long second = static_cast<long>(at);
+    const long second = static_cast<long>(at * 10);  // in tenths
     const bool made = hr == 0 && object;
     char answer[48];
     std::snprintf(answer, sizeof(answer), "0x%08lx with %s", static_cast<unsigned long>(hr),
