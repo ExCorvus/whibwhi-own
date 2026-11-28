@@ -2877,3 +2877,19 @@ the audio part of the weave.
   decode does not follow several ends yet), the same shaders that were refused before.
 - With vkd3d's cache the loading ended at 64.2 s; the fault at image+0x161b994 came at about 65 s, then the
   breakpoint at image+0x344196 on another thread, as before.
+## 2026-11-28 - plan (not a finding): the program's own shaders unchanged to vkd3d-xbox; whibwhi-linux as a Proton fork
+
+- Decided with ExCorvus: the weave should not stand between the program and vkd3d with shaders of its own. The
+  program's Xbox shaders (Xbox DXIL: "NOBC" where Windows' DXIL has its LLVM code, the packed module of the GPU's
+  machine code in between) go to vkd3d-xbox unchanged, through the D3D12 call the program makes; the shader
+  translator of the dxil-spirv fork (dxil-spirv-xbox) recognises them and turns the machine code into SPIR-V where
+  it turns every DXIL shader into SPIR-V. One translation instead of two (today: Xbox code -> DXBC in the weave ->
+  SPIR-V in vkd3d). The reader of the machine code (weave/shader_program.*, shader_walk.*, shader_isa.*) moves
+  there; it is this project's own code. Compute shaders first (device slot 62, not answered today, so nothing that
+  works is touched); graphics later. Upstream will not take Xbox DXIL (PR #384, closed); that is fine: the Xbox
+  parts stay in the forks.
+- whibwhi-linux (ExCorvus/whibwhi-linux, not started): a fork of Proton with the weave woven in. Wine and Proton
+  answer what Windows answers here; the weave adds only what is the console's; vkd3d-xbox in place of vkd3d-proton.
+  To measure first: what Wine answers for the game runtime (xgameruntime) and GameInput, which Windows answers here
+  with its own files. The forks are separate repositories (AGENTS.md rule 8); their licences (Wine LGPL, Proton
+  mostly BSD) allow it.
