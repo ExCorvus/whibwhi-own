@@ -3171,3 +3171,23 @@ ExCorvus decided not to follow this further now; it is written down as a hint.
   said for compute. It is made first, every time, and it is only handed over when the first way gives nothing.
   The few milliseconds measured are the time between the two asks.
 - Graphics (slot 86, built by fn 0x86f090 at draw time) is not read in this way yet.
+## 2026-11-28 - the installation's FidelityFX library names the first compute way; which pass asks cannot be seen on the stack (read in the files; game test 20:00, measured)
+
+- Read in the installation's files only: amd_fidelityfx_upscaler_xbox.dll holds FSR 4 alone (providers
+  ffxProvider_FSR4_Common and ffxProvider_FSR4_Int8, the passes of its network model by name). A denoiser is
+  named only in its list of effect names; it has no denoiser of its own. amd_fidelityfx_loader_xbox.dll also
+  names amd_fidelityfx_framegeneration_xbox.dll, which is not in the installation. The program's own
+  sr_denoising is an effect it loads itself through its effect loader.
+- In that library, fn 0x4aa0 calls the device's method at +0x218, which is device slot 67, and on failure writes
+  "DeserializeComputePipelineStateX FAILED ... -- falling back to NewBE". Its other texts: "compute PSO created
+  via ACO ('ACCC')", "no usable 'ACCC' part ... falling back". So the library's own text names slot 67: a compute
+  pipeline made from code already compiled for the GPU, with a fallback when it fails, the same pattern as the
+  program's (2026-11-28 "correction: the compute parcel"). That slot 57 is its graphics twin is an inference.
+- weave/d3d12_xs.cpp (lighting_map): at each request of slots 57, 67, 62 and 86, the thread's stack is walked by
+  the image's unwind data (Windows' own walk stops at the image's first frame, run 19:57), and the frames are
+  checked against the pass functions that fn 0xcba630 calls.
+- Run 20:00: no request has a pass on its stack. All of slots 57 and 67, the program's own slot 62 requests, and
+  almost all of slot 86 come from one job worker (frames image+0x221c29c <- image+0x2215eca, the program's thread
+  start). A few slot 86 requests come through a draw chain (image+0x2479a8d <- 0xb5ac30 <- 0x19f51fc <- ...
+  <- 0x23cf00a). So the passes hand their pipelines to jobs, and which part of the lighting asks has to be found
+  through what the job carries, not through the stack.
