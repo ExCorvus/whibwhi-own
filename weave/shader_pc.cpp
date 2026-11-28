@@ -383,6 +383,9 @@ struct Desc : Fact {
     ModuleResourceEntry resource{};
     std::uint32_t pc_register = 0;  // place k of the table (program_layout)
     std::uint32_t pc_space = 0;     // the table's root parameter p
+    // A sampler whose place the program computes at run time: place pc_register plus the value of place_temp.x.
+    bool by_number = false;
+    std::uint32_t place_temp = 0;
 };
 
 class Writer {
@@ -777,7 +780,8 @@ private:
 
     PcBinding& bind(PcBindingKind kind, std::uint32_t reg, std::uint32_t space, bool unbounded) {
         for (PcBinding& binding : result_.bindings) {
-            if (binding.kind == kind && binding.shader_register == reg && binding.space == space) {
+            if (binding.kind == kind && binding.shader_register == reg && binding.space == space &&
+                binding.unbounded == unbounded) {
                 return binding;
             }
         }
@@ -1805,16 +1809,23 @@ private:
             if (access.words != program_layout::kSamplerWords) {
                 refuse(not_written(ins, "a load from a sampler table that is not one sampler"));
             }
-            if (!access.offset_register_is_null) {
-                refuse(not_written(ins, "a sampler taken from a table at a place computed at run time"));
-            }
             if (access.immediate_offset % (program_layout::kSamplerWords * 4) != 0) {
                 refuse(not_written(ins, "a sampler that does not start one of the table's 16-byte places"));
+            }
+            // A place computed at run time: the offset register holds bytes into the table, 16 to a sampler. The
+            // PC's own form of it is a sampler taken from its declared range by number. The number is taken
+            // here, where the program reads the offset register; the register may change before the sample.
+            std::uint32_t place_temp = 0;
+            if (!access.offset_register_is_null) {
+                place_temp = new_temp();
+                op(Opcode::kUshr, {D(place_temp), rs(access.offset_register), U(4)});
             }
             for (unsigned i = 0; i < access.words; ++i) {
                 wrote_s(access.first_destination + i);
             }
             Desc fact;
+            fact.by_number = !access.offset_register_is_null;
+            fact.place_temp = place_temp;
             fact.writer = cur_ins_;
             fact.kind = DescKind::kSampler;
             fact.words = 4;
@@ -2204,7 +2215,12 @@ private:
         // The sampler: one taken from a sampler table at its place, or one the root signature holds itself.
         DOp sampler_operand;
         const Desc* sampler = desc_at(access.sampler_register);
-        if (sampler != nullptr && sampler->kind == DescKind::kSampler) {
+        if (sampler != nullptr && sampler->kind == DescKind::kSampler && sampler->by_number) {
+            // The table's whole range from place 0, the sampler taken from it by number (finish() moves the
+            // fixed samplers of the same table onto this range).
+            PcBinding& binding = bind(PcBindingKind::kSampler, 0, sampler->pc_space, true);
+            sampler_operand = dxbc::sampler_source_indexed(binding.id, sampler->pc_register, sampler->place_temp, 0);
+        } else if (sampler != nullptr && sampler->kind == DescKind::kSampler) {
             PcBinding& binding = bind(PcBindingKind::kSampler, sampler->pc_register, sampler->pc_space, false);
             binding.offset_words = sampler->pc_register * program_layout::kSamplerWords;
             sampler_operand = dxbc::sampler_source(binding.id, binding.shader_register);
@@ -2617,6 +2633,36 @@ private:
         finish();
     }
 
+    // A table whose samplers are taken by number is declared once, as its whole range from place 0; the samplers
+    // of the same table at fixed places are then read from that range at their place, so that no two declarations
+    // of the table's samplers overlap.
+    void merge_sampler_ranges(std::vector<PcInstruction>& listing) {
+        std::vector<PcBinding> kept;
+        for (const PcBinding& binding : result_.bindings) {
+            const PcBinding* range = nullptr;
+            if (binding.kind == PcBindingKind::kSampler && !binding.unbounded) {
+                for (const PcBinding& other : result_.bindings) {
+                    if (other.kind == PcBindingKind::kSampler && other.unbounded && other.space == binding.space) {
+                        range = &other;
+                    }
+                }
+            }
+            if (range == nullptr) {
+                kept.push_back(binding);
+                continue;
+            }
+            for (PcInstruction& instruction : listing) {
+                for (DOp& operand : instruction.operands) {
+                    if (operand.file == dxbc::OperandFile::kSampler && operand.index0 == binding.id &&
+                        !operand.relative_index) {
+                        operand.index0 = range->id;
+                    }
+                }
+            }
+        }
+        result_.bindings = std::move(kept);
+    }
+
     void finish() {
         std::vector<PcInstruction> listing;
         for (std::uint32_t temp = 0; temp < next_temp_; ++temp) {
@@ -2628,6 +2674,7 @@ private:
         }
         listing.insert(listing.end(), prologue_.begin(), prologue_.end());
         listing.insert(listing.end(), body_.begin(), body_.end());
+        merge_sampler_ranges(listing);
 
         const bool pixel = in_.stage == PcStage::kPixel;
         dxbc::DxbcBuilder builder(pixel ? dxbc::ShaderType::kPixel : dxbc::ShaderType::kVertex);
@@ -2669,7 +2716,8 @@ private:
         }
         for (const PcBinding& binding : result_.bindings) {
             if (binding.kind == PcBindingKind::kSampler) {
-                builder.declare_sampler(binding.id, binding.shader_register, binding.shader_register, binding.space);
+                builder.declare_sampler(binding.id, binding.shader_register,
+                                        binding.unbounded ? 0xFFFFFFFFu : binding.shader_register, binding.space);
             }
         }
         for (const PcBinding& binding : result_.bindings) {
