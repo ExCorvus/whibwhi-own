@@ -144,7 +144,7 @@ Environment variables read by the tools and libraries:
 The weave prefers a vkd3d-built `d3d12.dll` (renamed `d3d12_vk.dll`) placed beside `boot_image.exe`, with its
 `d3d12core.dll`; otherwise it uses the system's native `d3d12.dll`. Build vkd3d-proton yourself (LGPL-2.1, see
 `NOTICE.md`), from the fork this project uses: <https://github.com/ExCorvus/vkd3d-proton>, branch `whibwhi-own`.
-Its shader translator comes from <https://github.com/ExCorvus/dxil-spirv> (branch `whibwhi-own`, a submodule of
+Its shader translator comes from <https://github.com/ExCorvus/dxil-spirv-xbox> (branch `whibwhi-own`, a submodule of
 the fork). The fork adds what the installation's own libraries need: their shaders call the console shader
 compiler's own functions (`xbox.*`) and use instructions the original translator did not read (see FINDINGS.md,
 2026-11-26 and 2026-11-27). With the original vkd3d-proton the installation's XboxBvhBuilder.dll cannot make its
