@@ -101,7 +101,42 @@ void write_call_ledger(bool final_report = true) {
     std::fflush(stderr);
 }
 
+// The watchdog's last seconds (ExCorvus, 2026-11-28: "something with the frampacer and the watchdog"): every
+// progress report and every change of the watchdog's state is also kept in a ring in memory, with the time of the
+// process, and the last 10 s are written at the end of the run - the log lines themselves stop after their caps.
+struct WatchLine {
+    double seconds = -1;
+    std::string text;
+};
+std::mutex g_watch_ring_lock;
+std::vector<WatchLine> g_watch_ring(4096);
+unsigned long long g_watch_ring_next = 0;
+
+void remember_watch(double seconds, const std::string& text) {
+    std::lock_guard<std::mutex> lock(g_watch_ring_lock);
+    WatchLine& l = g_watch_ring[g_watch_ring_next++ % g_watch_ring.size()];
+    l.seconds = seconds;
+    l.text = text;
+}
+
+void report_last_watch() {
+    std::lock_guard<std::mutex> lock(g_watch_ring_lock);
+    const unsigned long long n = g_watch_ring_next, size = g_watch_ring.size();
+    const unsigned long long first = n > size ? n - size : 0;
+    const double last = n ? g_watch_ring[(n - 1) % size].seconds : 0;
+    std::fprintf(stderr, "[boot] the watchdog's last 10 s (read only): %llu lines in all, the newest at %.3f s of the "
+                         "process\n", n, last);
+    for (unsigned long long i = first; i < n; ++i) {
+        const WatchLine& l = g_watch_ring[i % size];
+        if (l.seconds >= last - 10.0) {
+            std::fprintf(stderr, "[boot] watchdog, the last 10 s: %.3f s %s\n", l.seconds, l.text.c_str());
+        }
+    }
+    std::fflush(stderr);
+}
+
 void end_of_run_report() {
+    report_last_watch();
     write_call_ledger();
     offline_report();
     if (const HMODULE graphics = GetModuleHandleA("d3d12_xs.dll")) {
@@ -424,6 +459,21 @@ LONG WINAPI on_exception(EXCEPTION_POINTERS* info) {
         std::fprintf(stderr, "\n");
     }
     std::fflush(stderr);
+    if (code == 0xC0000005) {
+        // The run's end comes through Windows' own error reporting, not through end_of_run_report, once the
+        // program has put its own unhandled-exception handler in: so the last seconds of the watchdog and of the
+        // frame pacer are written here, at the first access fault.
+        static volatile LONG said = 0;
+        if (InterlockedIncrement(&said) == 1) {
+            report_last_watch();
+            if (const HMODULE graphics = GetModuleHandleA("d3d12_xs.dll")) {
+                if (const auto frames = reinterpret_cast<void(__stdcall*)(void)>(
+                        GetProcAddress(graphics, "whiwhi_d3d12_report_last_frames"))) {
+                    frames();
+                }
+            }
+        }
+    }
     if (code == 0x80000003) {
         // A breakpoint may be handled by the image's own SEH (debug probes); let the process decide. Only when
         // it comes back as unhandled (second chance, seen before at the same address) do we end the boot.
@@ -770,6 +820,23 @@ int main(int argc, char** argv) {
             if (state.scopes > most_scopes) {
                 most_scopes = state.scopes;
             }
+            if (!(state == watch)) {
+                FILETIME at_file{};
+                GetSystemTimePreciseAsFileTime(&at_file);
+                const double process_now =
+                    static_cast<double>(((static_cast<unsigned long long>(at_file.dwHighDateTime) << 32) |
+                                         at_file.dwLowDateTime) - created_at) / 1e7;
+                char text[200];
+                char callback[64] = "none";
+                if (state.callback >= reinterpret_cast<unsigned long long>(loaded.base) &&
+                    state.callback < reinterpret_cast<unsigned long long>(loaded.base) + loaded.size) {
+                    std::snprintf(callback, sizeof(callback), "image+0x%llx",
+                                  state.callback - reinterpret_cast<unsigned long long>(loaded.base));
+                }
+                std::snprintf(text, sizeof(text), "state: pause %u, kick %u, open watch scopes %u, stop %u, crash "
+                              "callback %s", state.pause, state.kick, state.scopes, state.stop, callback);
+                remember_watch(process_now, text);
+            }
             if (!(state == watch) && state_lines < 100) {
                 ++state_lines;
                 log_state(state, "changed", now);
@@ -780,6 +847,15 @@ int main(int argc, char** argv) {
                 last = value;
                 changed_at = now;
                 ++changes;
+                {
+                    static double before = -1;
+                    const double report = run_seconds_of(value);
+                    char text[120];
+                    std::snprintf(text, sizeof(text), "progress report %llu (%.3f s after the one before)", changes,
+                                  before >= 0 ? report - before : 0.0);
+                    remember_watch(report, text);
+                    before = report;
+                }
                 if (changes <= 200) {
                     const double report = run_seconds_of(value);
                     char gap[64] = "";
