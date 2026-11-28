@@ -34,6 +34,7 @@
 #include "d3d12_xs.h"
 #include "shader_check.hpp"      // a second, minimal reader of the shader tables, for the check
 #include "shader_container.hpp"  // the chunks of a shader container
+#include "shader_dxbc.hpp"       // the rectangle geometry shader
 #include "shader_isa.hpp"        // the console instruction reader
 #include "shader_pc.hpp"         // the pass that writes a PC shader for a console program, and the weave's layout
 #include "shader_program.hpp"    // the packed program inside a shader container, unpacked in memory
@@ -507,6 +508,10 @@ struct Wrap {
     // Whether the last primitive topology the image set on the list is one the PC library has. Draws are held
     // while it is not: the PC library would draw them as something else.
     std::atomic<bool> topology_known{true};
+    // The PC pipeline state last set on the list, and whether the topology set is the console's rectangle list
+    // (drawn through the rectangle pipelines, see "rectangles" below).
+    std::atomic<void*> pipeline_pc{nullptr};
+    std::atomic<bool> rectangles{false};
     // For a root signature the program's own code created (device slot 16): one letter for each parameter
     // (program_layout_signature) and each table's number of places. Empty for any other.
     std::string layout_shape;
@@ -1708,6 +1713,7 @@ void __stdcall w_list_set_pipeline(Wrap* self, void* state) {
          kind_of(state) == kPipeline ? "set on the PC list" : "not one this library made - not passed on");
     if (kind_of(state) != kPipeline) {
         self->pipeline_set.store(false);
+        self->pipeline_pc.store(nullptr);
         if (few(refused)) {
             logf("command list slot 25: %p is not a pipeline state of this library - not passed on; draws on this "
                  "list are not carried out until one is set\n",
@@ -1719,6 +1725,7 @@ void __stdcall w_list_set_pipeline(Wrap* self, void* state) {
     // it is set on the PC list as it is named; the root arguments the program sets reach the same list.
     static_cast<ID3D12GraphicsCommandList*>(self->pc)->SetPipelineState(static_cast<ID3D12PipelineState*>(to_pc(state)));
     self->pipeline_set.store(true);
+    self->pipeline_pc.store(to_pc(state));
     if (few(shown)) {
         logf("command list slot 25: a pipeline state set on the PC list\n");
     }
@@ -1734,18 +1741,37 @@ bool public_topology(unsigned int number) {
 
 std::atomic<unsigned long long> g_draws_with_unknown_topology{0};
 
+// The console's rectangle list (AMD's DI_PT_RECTLIST, measured 2026-11-27): three corners per rectangle, the fourth
+// made by the graphics chip. The PC list draws it as a triangle list through the rectangle pipeline of the pipeline
+// set (see "rectangles" below), which adds the fourth corner.
+constexpr unsigned int kConsoleRectangleList = 0x11;
+// The primitive topology type the program's rectangle pipelines are described with (measured 2026-11-28: the
+// pipeline set for the rectangle draws names type 19 at device slot 86). The PC's public types are 0 to 4.
+constexpr unsigned int kConsoleRectangleType = 19;
+
 void __stdcall w_list_topology(Wrap* self, unsigned int number) {
     static SRWLOCK lock = SRWLOCK_INIT;
     static std::set<unsigned int> seen;
     want(_ReturnAddress(), "8 recording | list slot 20, primitive topology 0x%x | %s", number,
-         public_topology(number) ? "passed on" : "not one the PC list has - draws held while it is set");
+         public_topology(number)            ? "passed on"
+         : number == kConsoleRectangleList ? "the console's rectangle list: set as a triangle list, each "
+                                              "rectangle completed by the rectangle pipeline at its draw"
+                                            : "not one the PC list has - draws held while it is set");
     if (public_topology(number)) {
         static_cast<ID3D12GraphicsCommandList*>(self->pc)->IASetPrimitiveTopology(
             static_cast<D3D12_PRIMITIVE_TOPOLOGY>(number));
         self->topology_known.store(true);
+        self->rectangles.store(false);
+        return;
+    }
+    if (number == kConsoleRectangleList) {
+        static_cast<ID3D12GraphicsCommandList*>(self->pc)->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        self->topology_known.store(true);
+        self->rectangles.store(true);
         return;
     }
     self->topology_known.store(false);
+    self->rectangles.store(false);
     AcquireSRWLockExclusive(&lock);
     const bool first = seen.insert(number).second;
     ReleaseSRWLockExclusive(&lock);
@@ -1784,6 +1810,175 @@ bool pipeline_ready(Wrap* self, const char* what, const void* from = nullptr) {
     return false;
 }
 
+// ---- rectangles ------------------------------------------------------------------------------------------------
+//
+// The console draws a rectangle list with an ordinary triangle pipeline: only the topology set at the draw says
+// "rectangles", and the graphics chip adds each rectangle's fourth corner (measured: the program sets the triangle
+// list, then the rectangle list, and draws; its pipeline describes triangles). The PC's drawing interface has no
+// rectangle mode, so the weave gives the same answer in its own words (ExCorvus, 2026-11-28): the draw goes through
+// a rectangle pipeline, the same pipeline with a geometry shader that adds the fourth corner
+// (dxbc::rectangle_geometry_shader), and the program's pipeline is set back right after it. The rectangle pipeline
+// is made from a copy of the stream the pipeline was made from (device slot 86), the first time it is needed.
+namespace windows_check {
+void stream(const std::vector<std::uint8_t>& copy, HRESULT vkd3d);
+}
+bool stream_subobject(unsigned type, std::size_t& payload_at, std::size_t& whole);
+
+namespace rectangles {
+
+struct Recipe {
+    std::vector<std::uint8_t> stream;  // the PC stream, with its input layout pointing into this recipe
+    std::vector<D3D12_INPUT_ELEMENT_DESC> layout;
+    std::deque<std::string> names;
+    std::shared_ptr<const void> keep;  // the translated vertex shader the stream points at
+    const std::uint8_t* vertex = nullptr;
+    std::size_t vertex_bytes = 0;
+    std::size_t gs_at = 0;  // where the stream's geometry shader subobject's bytecode is (0: none)
+};
+
+struct Made {
+    ID3D12PipelineState* state = nullptr;
+    std::vector<std::uint8_t> shader;
+    std::string reason;  // why there is none
+};
+
+SRWLOCK g_lock = SRWLOCK_INIT;
+std::map<void*, std::shared_ptr<Recipe>> g_recipes;  // by the PC pipeline state
+std::map<void*, std::shared_ptr<Made>> g_made;
+std::map<void*, std::string> g_not_kept;  // pipelines made at slot 86 whose stream was not kept, and why
+void not_kept(void* pc_state, std::string why) {
+    AcquireSRWLockExclusive(&g_lock);
+    if (g_not_kept.size() < 100000) {
+        g_not_kept[pc_state] = std::move(why);
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+}
+std::atomic<unsigned long long> g_draws{0}, g_held{0}, g_pipelines{0}, g_refused{0};
+
+// At device slot 86, for a pipeline made: keeps the stream so that its rectangle pipeline can be made later.
+// `vertex` is the translated vertex shader the stream points at.
+void remember(void* pc_state, const std::vector<std::uint8_t>& stream, std::shared_ptr<const void> keep,
+              const std::uint8_t* vertex, std::size_t vertex_bytes) {
+    auto recipe = std::make_shared<Recipe>();
+    recipe->stream = stream;
+    recipe->keep = std::move(keep);
+    recipe->vertex = vertex;
+    recipe->vertex_bytes = vertex_bytes;
+    for (std::size_t at = 0; at + 4 <= recipe->stream.size();) {
+        unsigned type = 0;
+        std::memcpy(&type, recipe->stream.data() + at, 4);
+        std::size_t payload_at = 0, whole = 0;
+        if (!stream_subobject(type, payload_at, whole) || at + whole > recipe->stream.size()) {
+            return not_kept(pc_state, "its stream could not be walked");
+        }
+        std::uint8_t* payload = recipe->stream.data() + at + payload_at;
+        if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS) {
+            recipe->gs_at = at + payload_at;
+        } else if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT) {
+            D3D12_INPUT_LAYOUT_DESC desc;
+            std::memcpy(&desc, payload, sizeof(desc));
+            if (desc.NumElements && (!desc.pInputElementDescs || desc.NumElements > 64 ||
+                                     !can_read(desc.pInputElementDescs, desc.NumElements * sizeof(D3D12_INPUT_ELEMENT_DESC)))) {
+                return not_kept(pc_state, "its input layout could not be read");
+            }
+            recipe->layout.assign(desc.pInputElementDescs, desc.pInputElementDescs + desc.NumElements);
+            for (D3D12_INPUT_ELEMENT_DESC& e : recipe->layout) {
+                if (!e.SemanticName || !can_read(e.SemanticName, 1)) {
+                    return not_kept(pc_state, "a name in its input layout could not be read");
+                }
+                recipe->names.emplace_back(e.SemanticName);
+                e.SemanticName = recipe->names.back().c_str();
+            }
+            desc.pInputElementDescs = recipe->layout.empty() ? nullptr : recipe->layout.data();
+            std::memcpy(payload, &desc, sizeof(desc));
+        } else if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT ||
+                   type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING) {
+            // Pointers into the program's description that are not copied: such a pipeline gets no rectangle
+            // pipeline (said at its first rectangle draw).
+            const std::uint8_t zero[16] = {};
+            if (std::memcmp(payload, zero, 16) != 0) {
+                return not_kept(pc_state, "it names a stream output or view instancing");
+            }
+        }
+        at += whole;
+    }
+    AcquireSRWLockExclusive(&g_lock);
+    g_recipes[pc_state] = std::move(recipe);
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
+// The rectangle pipeline of `pc_state`, made on `list`'s device the first time it is asked for.
+std::shared_ptr<Made> pipeline_for(void* pc_state, ID3D12GraphicsCommandList* list) {
+    AcquireSRWLockExclusive(&g_lock);
+    auto made = g_made.find(pc_state);
+    if (made != g_made.end()) {
+        auto found = made->second;
+        ReleaseSRWLockExclusive(&g_lock);
+        return found;
+    }
+    auto recipe_at = g_recipes.find(pc_state);
+    std::shared_ptr<Recipe> recipe = recipe_at == g_recipes.end() ? nullptr : recipe_at->second;
+    auto why = g_not_kept.find(pc_state);
+    const std::string not_kept_reason = why == g_not_kept.end() ? std::string() : why->second;
+    ReleaseSRWLockExclusive(&g_lock);
+
+    auto result = std::make_shared<Made>();
+    if (!recipe) {
+        result->reason = not_kept_reason.empty()
+                             ? "its pipeline was not made from a stream of vertex and pixel shaders here (device slot 86)"
+                             : "its stream was not kept at device slot 86: " + not_kept_reason;
+    } else {
+        result->shader = whiwhi::weave::dxbc::rectangle_geometry_shader(recipe->vertex, recipe->vertex_bytes,
+                                                                         &result->reason);
+    }
+    if (!result->shader.empty()) {
+        std::vector<std::uint8_t> stream = recipe->stream;
+        const D3D12_SHADER_BYTECODE gs{result->shader.data(), result->shader.size()};
+        if (recipe->gs_at) {
+            std::memcpy(stream.data() + recipe->gs_at, &gs, sizeof(gs));
+        } else {
+            const std::size_t at = stream.size();
+            stream.resize(at + 8 + sizeof(gs), 0);
+            const unsigned type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS;
+            std::memcpy(stream.data() + at, &type, 4);
+            std::memcpy(stream.data() + at + 8, &gs, sizeof(gs));
+        }
+        ID3D12Device2* device = nullptr;
+        HRESULT hr = list->GetDevice(__uuidof(ID3D12Device2), reinterpret_cast<void**>(&device));
+        if (hr == 0 && device) {
+            const D3D12_PIPELINE_STATE_STREAM_DESC desc = {stream.size(), stream.data()};
+            hr = device->CreatePipelineState(&desc, __uuidof(ID3D12PipelineState),
+                                             reinterpret_cast<void**>(&result->state));
+            windows_check::stream(stream, hr);
+            device->Release();
+        }
+        if (hr != 0 || !result->state) {
+            char text[96];
+            std::snprintf(text, sizeof(text), "the PC device refused the rectangle pipeline (0x%08lx)",
+                          static_cast<unsigned long>(hr));
+            result->reason = text;
+            result->state = nullptr;
+        }
+    }
+    const unsigned long long n = result->state ? ++g_pipelines : ++g_refused;
+    if (n <= 4 || (n & (n - 1)) == 0) {
+        logf("rectangles: %s for pipeline %p%s%s (%zu-byte geometry shader); %llu made, %llu not so far\n",
+             result->state ? "a rectangle pipeline made" : "no rectangle pipeline", pc_state,
+             result->reason.empty() ? "" : ": ", result->reason.c_str(), result->shader.size(), g_pipelines.load(),
+             g_refused.load());
+    }
+    AcquireSRWLockExclusive(&g_lock);
+    auto [where, inserted] = g_made.emplace(pc_state, result);
+    if (!inserted && result->state) {
+        result->state->Release();  // another thread made it first
+    }
+    auto kept = where->second;
+    ReleaseSRWLockExclusive(&g_lock);
+    return kept;
+}
+
+} // namespace rectangles
+
 // List slots 12, 13 and 14 (DrawInstanced, DrawIndexedInstanced, Dispatch; all arguments are plain numbers).
 template <int Slot>
 void __stdcall w_list_draw(Wrap* self, void* a1, void* a2, void* a3, void* a4, void* a5) {
@@ -1792,6 +1987,28 @@ void __stdcall w_list_draw(Wrap* self, void* a1, void* a2, void* a3, void* a4, v
         return;
     }
     using Fn = void(__stdcall*)(void*, void*, void*, void*, void*, void*);
+    if (Slot != 14 && self->rectangles.load()) {
+        auto* list = static_cast<ID3D12GraphicsCommandList*>(self->pc);
+        void* const program_pipeline = self->pipeline_pc.load();
+        const auto made = rectangles::pipeline_for(program_pipeline, list);
+        want(_ReturnAddress(), "8 drawing | rectangles | %s%s",
+             made->state ? "drawn through the rectangle pipeline (the fourth corner added)" : "held: ",
+             made->state ? "" : made->reason.c_str());
+        if (!made->state) {
+            ++rectangles::g_held;
+            return;
+        }
+        list->SetPipelineState(made->state);
+        reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][Slot])(self->pc, a1, a2, a3, a4, a5);
+        list->SetPipelineState(static_cast<ID3D12PipelineState*>(program_pipeline));
+        const unsigned long long n = ++rectangles::g_draws;
+        if ((n & (n - 1)) == 0) {
+            logf("rectangles: draw %llu (%s, %llu and %llu as numbers) through the rectangle pipeline\n", n,
+                 Slot == 13 ? "indexed" : "plain", reinterpret_cast<unsigned long long>(a1),
+                 reinterpret_cast<unsigned long long>(a2));
+        }
+        return;
+    }
     reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][Slot])(self->pc, a1, a2, a3, a4, a5);
 }
 
@@ -1932,6 +2149,12 @@ void __stdcall w_list_execute_indirect(Wrap* self, void* signature, unsigned int
     if (!pipeline_ready(self, "an indirect execution", _ReturnAddress())) {
         return;
     }
+    if (self->rectangles.load()) {
+        // Not yet answered: the rectangle pipeline is set around plain and indexed draws only.
+        want(_ReturnAddress(), "8 drawing | rectangles | held: an indirect execution while the rectangle list is set");
+        ++rectangles::g_held;
+        return;
+    }
     static_cast<ID3D12GraphicsCommandList*>(self->pc)->ExecuteIndirect(
         static_cast<ID3D12CommandSignature*>(to_pc(signature)), max_count,
         static_cast<ID3D12Resource*>(to_pc(arguments)), arguments_offset + placed_delta_of(arguments),
@@ -2005,6 +2228,8 @@ HRESULT __stdcall w_list_begin(Wrap* self, void* allocator, void* third, void* f
         self->compute_root.store(false);
         self->graphics_root.store(false);
         self->pipeline_set.store(false);
+        self->pipeline_pc.store(nullptr);
+        self->rectangles.store(false);
     }
     const int n = shown.fetch_add(1);
     if (hr != 0 || n < 3) {
@@ -4331,6 +4556,7 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
     unsigned topology_type = 0xFFFFFFFFu;  // none named
     void* const returns_to = _ReturnAddress();
     std::vector<std::shared_ptr<const whiwhi::weave::PcShader>> shaders;
+    std::shared_ptr<const whiwhi::weave::PcShader> vertex_shader;
     if (!out || !stream || size < 8 || size > 0x10000 || !can_read(stream, static_cast<std::size_t>(size))) {
         reason = "the stream or the result place cannot be read";
     } else {
@@ -4378,6 +4604,9 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
                 }
                 const D3D12_SHADER_BYTECODE pc_code{shader->container.data(), shader->container.size()};
                 std::memcpy(payload, &pc_code, sizeof(pc_code));
+                if (vertex) {
+                    vertex_shader = shader;
+                }
                 shaders.push_back(std::move(shader));
                 break;
             }
@@ -4396,6 +4625,13 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
             }
             case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY:
                 std::memcpy(&topology_type, payload, 4);
+                // Type 19 is the console's: measured 2026-11-28, the pipeline the program draws its rectangle
+                // list with (topology 0x11) is described with it. The GPU draws rectangles as triangles, so the PC
+                // is asked for a triangle pipeline (the PC's public types are 0 to 4).
+                if (topology_type == kConsoleRectangleType) {
+                    const unsigned triangle = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                    std::memcpy(payload, &triangle, 4);
+                }
                 break;
             case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO: {
                 D3D12_CACHED_PIPELINE_STATE cached;
@@ -4461,6 +4697,18 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
             windows_check::stream(copy, hr);
             if (hr == 0 && state) {
                 *out = wrap_kind(state, kPipeline);
+                // A triangle pipeline can be drawn with the console's rectangle list: its stream is kept for the
+                // rectangle pipeline (see "rectangles").
+                if ((topology_type != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE && topology_type != kConsoleRectangleType) ||
+                    !vertex_shader) {
+                    rectangles::not_kept(state, "its primitive topology type is " + std::to_string(topology_type) +
+                                                    (vertex_shader ? "" : ", and it has no vertex shader"));
+                } else {
+                    rectangles::remember(state, copy,
+                                         std::make_shared<const std::vector<std::shared_ptr<const whiwhi::weave::PcShader>>>(shaders),
+                                         vertex_shader->container.data(),
+                                         vertex_shader->container.size());
+                }
             } else {
                 char text[64];
                 std::snprintf(text, sizeof(text), "the PC device refused the pipeline (0x%08lx)",
