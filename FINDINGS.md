@@ -2623,3 +2623,22 @@ the audio part of the weave.
   4,271 pipeline streams made by both (was 2,921), 4 refused by Windows as before.
 - The requests now stop at "a sampler named as root parameter 0, which is 'T' in the root signature": 29,194 of
   32,768. Fault unchanged at image+0x161b994 (progress reports up to 72.2 s).
+## 2026-11-28 - the program's other systems from outside: a steady 30-frame rhythm, every frame empty (game tests 12:38, 12:43, measured)
+
+- weave/d3d12_xs.cpp `rhythm`: once a second, on its own thread and on the process clock the boot tool's watchdog
+  reports use, the weave writes how many pictures the program presented and the longest stretch without one, how
+  many frame events it waited for and how long, and how many submissions (the console's own queue method, slot 35)
+  with how many command lists it handed to its queues. Counts only. (The first build counted the PC's ordinary
+  submit method, which the program does not use, and showed 0 submissions: corrected the same day.)
+- scripts/game_test.ps1 with the measurement cache: the program started 1 s after the test (was 9 minutes).
+- Run 12:43, per second from 61 s to 75 s of the process: 90 presents, the longest stretch without one 32 ms; 180
+  frame waits, about 945 ms waited; 180 submissions with 270 command lists. Per frame of the frame clock (33.3 ms,
+  30 a second): 3 presents, 6 frame waits, 6 submissions, 9 command lists. Run 12:38 counted the frames: from
+  present 512 to present 1,024 the frame token advanced 171 - about 420 frames in 14 s, 1,256 presents.
+- Every draw of those frames is held (whole.txt: 1,247 draws held, 1,255 lists set the console's rectangle
+  topology 0x11 before them): no frame has anything drawn in it. The program waits most of each second for its
+  next frame: it is not overloaded.
+- At about 76 s the rhythm stops in one second (no present, no wait, no submission), then the fault at
+  image+0x161b994, the same as in every run since 2026-11-27. Set against run 2026-11-27 23:13 (253 lists, 241
+  draws), the program now records about 5 to 7 times as many frames before it: the same ending hides that
+  (docs/MAPPING-PITFALLS.md, "The same ending hides progress").
