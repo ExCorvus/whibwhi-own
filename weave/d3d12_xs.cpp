@@ -7896,3 +7896,121 @@ extern "C" __declspec(dllexport) long __stdcall D3D12CreateRootSignatureDeserial
     }
     return fn(data, size, riid, out);
 }
+
+// FidelityFX border (ExCorvus, 2026-11-28: "FSR doesn't overtake all of the graphics job, it only upscales it and we
+// need to check how"). The image imports ffxCreateContext, ffxDestroyContext, ffxDispatch and ffxQuery from its
+// FidelityFX loader; host_libraries.cpp hands them here when this library is there. Each call goes on unchanged to
+// Windows' own AMD library (amd_fidelityfx_dx12.dll in System32, from the driver). Written down: which call, the
+// type of each description in its chain (the public header {u64 type; next}), for an upscaler's create description
+// its flags and its two sizes (the public fields right after the header), the answer, and how often. The objects
+// handed over are not looked at (ExCorvus: "they are pc object in pc shape. it is ok").
+namespace ffx_border {
+
+HMODULE windows_library() {
+    static HMODULE m = LoadLibraryExA("amd_fidelityfx_dx12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    return m;
+}
+
+template <typename F>
+F windows_fn(const char* name) {
+    HMODULE m = windows_library();
+    return m ? reinterpret_cast<F>(GetProcAddress(m, name)) : nullptr;
+}
+
+constexpr unsigned long long kCreateUpscale = 0x00010000ull;
+
+std::string chain(const void* desc) {
+    std::string out;
+    const unsigned char* p = static_cast<const unsigned char*>(desc);
+    for (int i = 0; p && i < 8; ++i) {
+        if (!can_read(p, 16)) {
+            out += " (not readable)";
+            break;
+        }
+        unsigned long long type = 0;
+        const unsigned char* next = nullptr;
+        std::memcpy(&type, p, 8);
+        std::memcpy(&next, p + 8, 8);
+        char t[32];
+        std::snprintf(t, sizeof(t), "%s0x%llx", out.empty() ? "" : " -> ", type);
+        out += t;
+        p = next;
+    }
+    return out.empty() ? "(none)" : out;
+}
+
+std::string upscale_sizes(const void* desc) {
+    const unsigned char* p = static_cast<const unsigned char*>(desc);
+    if (!p || !can_read(p, 36)) {
+        return {};
+    }
+    unsigned long long type = 0;
+    std::memcpy(&type, p, 8);
+    if (type != kCreateUpscale) {
+        return {};
+    }
+    unsigned int f[5] = {};
+    std::memcpy(f, p + 16, sizeof(f));
+    char t[128];
+    std::snprintf(t, sizeof(t), "; upscaler flags 0x%x, largest render size %u x %u, largest output size %u x %u",
+                  f[0], f[1], f[2], f[3], f[4]);
+    return t;
+}
+
+void note(const char* call, std::atomic<unsigned long long>& count, const void* desc, unsigned int answer) {
+    const unsigned long long n = ++count;
+    const bool first = n <= 8;
+    if (!first && (n & (n - 1)) != 0) {
+        return;
+    }
+    const std::string types = desc ? chain(desc) : std::string("-");
+    const std::string sizes = desc ? upscale_sizes(desc) : std::string();
+    std::lock_guard<std::mutex> lock(g_log);
+    std::fprintf(stderr, "[d3d12_xs] [fidelityfx] %.1f s: %s #%llu, descriptions %s%s - Windows' library answered 0x%x\n",
+                 flow::run_seconds(), call, n, types.c_str(), sizes.c_str(), answer);
+}
+
+std::atomic<unsigned long long> g_create{0}, g_destroy{0}, g_dispatch{0}, g_query{0}, g_configure{0};
+
+} // namespace ffx_border
+
+extern "C" __declspec(dllexport) unsigned int whiwhi_ffx_ffxCreateContext(void* context, void* desc,
+                                                                          const void* callbacks) {
+    using F = unsigned int (*)(void*, void*, const void*);
+    static const F fn = ffx_border::windows_fn<F>("ffxCreateContext");
+    const unsigned int r = fn ? fn(context, desc, callbacks) : 1u;
+    ffx_border::note("create", ffx_border::g_create, desc, r);
+    return r;
+}
+
+extern "C" __declspec(dllexport) unsigned int whiwhi_ffx_ffxDestroyContext(void* context, const void* callbacks) {
+    using F = unsigned int (*)(void*, const void*);
+    static const F fn = ffx_border::windows_fn<F>("ffxDestroyContext");
+    const unsigned int r = fn ? fn(context, callbacks) : 1u;
+    ffx_border::note("destroy", ffx_border::g_destroy, nullptr, r);
+    return r;
+}
+
+extern "C" __declspec(dllexport) unsigned int whiwhi_ffx_ffxDispatch(void* context, const void* desc) {
+    using F = unsigned int (*)(void*, const void*);
+    static const F fn = ffx_border::windows_fn<F>("ffxDispatch");
+    const unsigned int r = fn ? fn(context, desc) : 1u;
+    ffx_border::note("dispatch", ffx_border::g_dispatch, desc, r);
+    return r;
+}
+
+extern "C" __declspec(dllexport) unsigned int whiwhi_ffx_ffxQuery(void* context, void* desc) {
+    using F = unsigned int (*)(void*, void*);
+    static const F fn = ffx_border::windows_fn<F>("ffxQuery");
+    const unsigned int r = fn ? fn(context, desc) : 1u;
+    ffx_border::note("query", ffx_border::g_query, desc, r);
+    return r;
+}
+
+extern "C" __declspec(dllexport) unsigned int whiwhi_ffx_ffxConfigure(void* context, const void* desc) {
+    using F = unsigned int (*)(void*, const void*);
+    static const F fn = ffx_border::windows_fn<F>("ffxConfigure");
+    const unsigned int r = fn ? fn(context, desc) : 1u;
+    ffx_border::note("configure", ffx_border::g_configure, desc, r);
+    return r;
+}
