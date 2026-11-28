@@ -2658,3 +2658,19 @@ the audio part of the weave.
   game. The fault at image+0x161b994 came as in every run.
 - What follows (ExCorvus): the program is started apart from the test's measurements, the way it is started by the
   user - the measuring, the start and the judging become three separate scripts.
+## 2026-11-28 - the game test in three parts: measuring, starting the program, judging (game tests 13:07, 13:26)
+
+- ExCorvus: the measurements and the program start separately. scripts\measure_test.ps1 measures the copy and starts
+  nothing (only when what the measurements read has changed); scripts\run_program.ps1 starts the program and nothing
+  else, where it can be seen, and writes run.txt beside the run's log (build, commit, times, whether the game folder
+  stayed unchanged, the key of the measurements of that moment); scripts\game_test.ps1 -Run <folder> starts nothing
+  and judges a finished run, against measurements whose key is the run's (taken again when what they read changed).
+  Without -Run it does all three, starting run_program.ps1 as a process of its own. What the three share is in
+  scripts\test_common.ps1. A run you start yourself is one Windows lets come to the front.
+- Found while doing it (two faults of the scripts, not of the program): Start-Process -Wait waits for every process
+  the started one starts, and the live log window never ends - the first game test waited after the program had
+  ended (it is now waited for as one process, and the log window closes 5 s after the program ends; 46 log windows
+  of earlier runs were still open). And the verdict's "end" line has named the boot tool's first watchdog-state
+  line since that reading came in (commit 968), not where the run ended: it now skips those lines.
+- Run 13:07 (judged on its own) and run 13:26 (all three): PASS; the window came to the front, frameless at
+  2560 x 1440 on DISPLAY1; the end is the fault at image+0x161b994, as before.
