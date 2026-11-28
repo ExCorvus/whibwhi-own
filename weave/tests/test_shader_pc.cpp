@@ -1592,7 +1592,7 @@ int main() {
         inputs.elements = {element("SV_Position", 0, 1, 3, 0, 0xF), element("TEXCOORD", 0, 0, 3, 1, 0x3)};
         outputs.elements = {element("SV_Target", 0, 64, 3, 0, 0xF)};
 
-        const auto build = [](bool clear_exec) {
+        const auto build = [](bool clear_exec, bool by_number = false) {
             P p;
             leading_no_operations(p);
             sopp(p, 32, 3);                    // s_inst_prefetch
@@ -1610,7 +1610,8 @@ int main() {
             vintrp(p, 1, 3, 0, 1, 1);
             sop2(p, 15, 126, 126, 14);         // EXEC = EXEC AND s14:s15
             sop2(p, 30, 14, 2, I(4));          // s14 = s2 * 16: the sampler's place in bytes
-            smem(p, 2, 28, 16, kNoRegister, 0x50); // the sampler's four words through s16:s17, place 5
+            // the sampler's four words through s16:s17, place 5 (by number: place 5 plus s14 / 16)
+            smem(p, 2, 28, 16, by_number ? 14u : kNoRegister, 0x50);
             sopp(p, 12, 0xC07F);               // s_waitcnt
             mimg(p, 32, 1, 0xF, 20, 2, 0, 28); // sample the 2-D texture at (v2, v3) into v0..v3
             if (clear_exec) {
@@ -1714,6 +1715,34 @@ int main() {
             machine.constant = [](std::uint32_t, std::uint32_t, std::uint32_t, unsigned) { return 0u; };
             machine.run(dead_shader.listing);
             CHECK(machine.error.empty() && machine.discarded);
+        }
+
+        // The same program with the sampler's place computed at run time (s14 = 5 * 16 bytes past place 5): the
+        // table's whole range is declared from place 0 and the sampler is taken from it as place 5 + s14 / 16.
+        const DecodedShader numbered = decode(build(false, true), ShaderStage::kPixel);
+        input.program = &numbered;
+        const PcShader numbered_shader = write_pc_shader(input);
+        if (!numbered_shader.ok) {
+            std::printf("FAIL: the program with a sampler by number was not written: %s\n",
+                        numbered_shader.reason.c_str());
+            ++failures;
+        } else {
+            const PcBinding* range = binding_of(numbered_shader, PcBindingKind::kSampler);
+            CHECK(range && range->space == 2 && range->shader_register == 0 && range->unbounded);
+            PcMachine machine = machine_for(numbered_shader);
+            machine.arguments[9] = 5;
+            machine.constant = [](std::uint32_t, std::uint32_t, std::uint32_t, unsigned) { return 0xBADu; };
+            machine.sample = [](const SampleCall&) { return Vec4{}; };
+            machine.run(numbered_shader.listing);
+            CHECK(machine.error.empty() && machine.finished && machine.samples.size() == 1);
+            if (machine.samples.size() == 1 && range) {
+                const SampleCall& call = machine.samples[0];
+                CHECK(call.sampler_id == range->id && call.sampler_by_number && call.sampler_number == 10);
+            }
+            char range_line[120];
+            std::snprintf(range_line, sizeof range_line, "dcl_sampler S%u[0:*], mode_default, space=2",
+                          range ? range->id : 0);
+            expect_lines(disassembler, "program with a sampler by number", numbered_shader.container, {range_line});
         }
 
         // An attribute number counts registers, not elements: two elements share register 1 (x, y and z, w), so
