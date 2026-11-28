@@ -527,6 +527,13 @@ struct Wrap {
     std::vector<UINT> layout_places;
     UINT layout_fixed_samplers = 0;  // the fixed samplers its description carries inside itself
     UINT layout_flags = 0;           // its description's flags
+    // The parameter the weave added for the sampler heap, indexed directly (program_layout_signature); UINT_MAX none.
+    UINT sampler_heap_parameter = UINT_MAX;
+    // For a command list: the start of the shader-visible sampler heap set on it, as the PC's shaders see it (0 none),
+    // and the sampler heap parameter of the graphics and compute root signatures set on it (UINT_MAX none).
+    std::atomic<unsigned long long> sampler_heap_gpu{0};
+    std::atomic<UINT> graphics_heap_parameter{UINT_MAX};
+    std::atomic<UINT> compute_heap_parameter{UINT_MAX};
 
     Wrap(void* pc_object, int kind_number, const char* kind_name)
         : vt(nullptr), image_area{}, pc(pc_object), refs(1), kind_id(kind_number), kind(kind_name) {}
@@ -1508,6 +1515,31 @@ bool few(std::atomic<int>& counter, int limit = 4) {
     return counter.fetch_add(1) < limit;
 }
 
+// The sampler heap's table (program_layout_signature): set to the start of the shader-visible sampler heap the list
+// has, for the graphics and the compute root signature set on it, whenever either changes. Counted.
+void set_sampler_heap_tables(Wrap* self) {
+    static std::atomic<unsigned long long> set{0};
+    const unsigned long long gpu = self->sampler_heap_gpu.load();
+    if (!gpu) {
+        return;
+    }
+    auto* list = static_cast<ID3D12GraphicsCommandList*>(self->pc);
+    const UINT graphics = self->graphics_heap_parameter.load();
+    const UINT compute = self->compute_heap_parameter.load();
+    if (graphics != UINT_MAX && self->graphics_root.load()) {
+        list->SetGraphicsRootDescriptorTable(graphics, D3D12_GPU_DESCRIPTOR_HANDLE{gpu});
+        set.fetch_add(1);
+    }
+    if (compute != UINT_MAX && self->compute_root.load()) {
+        list->SetComputeRootDescriptorTable(compute, D3D12_GPU_DESCRIPTOR_HANDLE{gpu});
+        set.fetch_add(1);
+    }
+    const unsigned long long n = set.load();
+    if (n && (n & (n - 1)) == 0 && n >= 1) {
+        logf("sampler heap: its table set to the start of the list's sampler heap %llu time(s)\n", n);
+    }
+}
+
 // Console list slot 32: SetDescriptorHeaps(count, heaps). A PC list takes at most one heap of each of the two
 // kinds shaders see.
 void __stdcall w_list_set_heaps(Wrap* self, unsigned int count, void* const* heaps) {
@@ -1531,7 +1563,15 @@ void __stdcall w_list_set_heaps(Wrap* self, unsigned int count, void* const* hea
     if (few(shown)) {
         logf("command list slot 32: %u descriptor heap(s) set on the PC list\n", count);
     }
-    static_cast<ID3D12GraphicsCommandList*>(self->pc)->SetDescriptorHeaps(count, pc);
+    auto* list = static_cast<ID3D12GraphicsCommandList*>(self->pc);
+    list->SetDescriptorHeaps(count, pc);
+    for (unsigned int i = 0; i < count; ++i) {
+        HeapRange r{};
+        if (heap_range_of(static_cast<Wrap*>(heaps[i]), r) && r.type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER && r.pc_gpu) {
+            self->sampler_heap_gpu.store(r.pc_gpu);
+        }
+    }
+    set_sampler_heap_tables(self);
 }
 
 // Console list slots 33 and 34: Set{Compute,Graphics}RootSignature(root signature).
@@ -1553,10 +1593,13 @@ void __stdcall w_list_root_signature(Wrap* self, void* signature) {
     if (Graphics) {
         list->SetGraphicsRootSignature(pc);
         self->graphics_root.store(true);
+        self->graphics_heap_parameter.store(static_cast<Wrap*>(signature)->sampler_heap_parameter);
     } else {
         list->SetComputeRootSignature(pc);
         self->compute_root.store(true);
+        self->compute_heap_parameter.store(static_cast<Wrap*>(signature)->sampler_heap_parameter);
     }
+    set_sampler_heap_tables(self);
     if (few(shown)) {
         logf("command list slot %d: %s root signature set on the PC list\n", 33 + Graphics,
              Graphics ? "graphics" : "compute");
@@ -2297,6 +2340,9 @@ HRESULT __stdcall w_list_begin(Wrap* self, void* allocator, void* third, void* f
         self->compute_root.store(false);
         self->graphics_root.store(false);
         self->pipeline_set.store(false);
+        self->sampler_heap_gpu.store(0);
+        self->graphics_heap_parameter.store(UINT_MAX);
+        self->compute_heap_parameter.store(UINT_MAX);
         self->pipeline_pc.store(nullptr);
         self->rectangles.store(false);
     }
@@ -4000,7 +4046,8 @@ HMODULE pc_d3d12();
 // table of samplers) and places each table's N.
 std::vector<std::uint8_t> program_layout_signature(const void* blob, std::size_t size, std::string& reason,
                                                    std::string& shape, std::vector<UINT>& places,
-                                                   UINT& fixed_samplers, UINT& flags) {
+                                                   UINT& fixed_samplers, UINT& flags,
+                                                   UINT& sampler_heap_parameter) {
     using Read = HRESULT(WINAPI*)(const void*, SIZE_T, REFIID, void**);
     using Write = HRESULT(WINAPI*)(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC*, ID3DBlob**, ID3DBlob**);
     static const auto read =
@@ -4078,14 +4125,59 @@ std::vector<std::uint8_t> program_layout_signature(const void* blob, std::size_t
         fixed[s].ShaderRegister = s;
         fixed[s].RegisterSpace = r.NumParameters;
     }
+    // The sampler heap, indexed directly (FINDINGS 2026-11-28): when the description carries Windows' flag
+    // SAMPLER_HEAP_DIRECTLY_INDEXED, the program's shaders take their samplers straight from the sampler heap set on
+    // the list, by number (the shader's own tables: kind 6 at the register after the last parameter's; its
+    // parameter byte is 0). The written shader names such a sampler as register n of space 0 of the sampler
+    // registers, n its number in the heap. Its PC form, in the shader language the translator writes, is one more
+    // parameter after the program's: a table of samplers over the whole heap from its start, which the weave sets
+    // to the start of the sampler heap the list has (w_list_set_heaps, w_list_root_signature). The same work as
+    // Windows' direct indexing, in the older language. Not added when parameter 0 is itself a table of samplers
+    // (its sampler registers of space 0 are taken), or when the description has no parameters.
+    std::vector<D3D12_DESCRIPTOR_RANGE1> heap_range;
+    sampler_heap_parameter = UINT_MAX;
+    if ((r.Flags & D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED) && r.NumParameters > 0 && shape[0] != 'S') {
+        heap_range.push_back({D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, UINT_MAX, 0, 0,
+                              D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE, 0});
+        D3D12_ROOT_PARAMETER1 q{};
+        q.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        q.DescriptorTable.NumDescriptorRanges = 1;
+        q.DescriptorTable.pDescriptorRanges = heap_range.data();
+        q.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        sampler_heap_parameter = static_cast<UINT>(parameters.size());
+        parameters.push_back(q);
+    }
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC renamed{};
     renamed.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     renamed.Desc_1_1 = r;
+    renamed.Desc_1_1.NumParameters = static_cast<UINT>(parameters.size());
     renamed.Desc_1_1.pParameters = parameters.data();
     renamed.Desc_1_1.pStaticSamplers = fixed.data();
     ID3DBlob* written = nullptr;
     ID3DBlob* error = nullptr;
-    const HRESULT hr = write(&renamed, &written, &error);
+    HRESULT hr = write(&renamed, &written, &error);
+    if (hr != 0 && sampler_heap_parameter != UINT_MAX) {
+        // Logged, then written as before without it: the shaders that take samplers from the heap are refused.
+        static std::atomic<int> said{0};
+        if (said.fetch_add(1) < 4) {
+            logf("device slot 16: the root signature with the sampler heap's table is not written (0x%08lx): "
+                 "written without it\n",
+                 static_cast<unsigned long>(hr));
+        }
+        if (written) {
+            written->Release();
+            written = nullptr;
+        }
+        if (error) {
+            error->Release();
+            error = nullptr;
+        }
+        parameters.pop_back();
+        sampler_heap_parameter = UINT_MAX;
+        renamed.Desc_1_1.NumParameters = static_cast<UINT>(parameters.size());
+        renamed.Desc_1_1.pParameters = parameters.data();
+        hr = write(&renamed, &written, &error);
+    }
     if (hr == 0 && written) {
         const auto* bytes = static_cast<const std::uint8_t*>(written->GetBufferPointer());
         out.assign(bytes, bytes + written->GetBufferSize());
@@ -4123,9 +4215,10 @@ HRESULT __stdcall w_device_slot16(Wrap* self, void* a1, void* a2, void* a3, void
     if (program) {
         std::string reason, shape;
         std::vector<UINT> places;
-        UINT fixed_samplers = 0, flags = 0;
+        UINT fixed_samplers = 0, flags = 0, heap_parameter = UINT_MAX;
         std::vector<std::uint8_t> renamed =
-            program_layout_signature(a2, reinterpret_cast<std::size_t>(a3), reason, shape, places, fixed_samplers, flags);
+            program_layout_signature(a2, reinterpret_cast<std::size_t>(a3), reason, shape, places, fixed_samplers, flags,
+                                     heap_parameter);
         static std::atomic<int> said{0};
         if (renamed.empty()) {
             logf("device slot 16: the program's root signature (%zu bytes) is not made: %s\n",
@@ -4142,6 +4235,7 @@ HRESULT __stdcall w_device_slot16(Wrap* self, void* a1, void* a2, void* a3, void
             static_cast<Wrap*>(*made)->layout_places = places;
             static_cast<Wrap*>(*made)->layout_fixed_samplers = fixed_samplers;
             static_cast<Wrap*>(*made)->layout_flags = flags;
+            static_cast<Wrap*>(*made)->sampler_heap_parameter = heap_parameter;
         }
         if (few(said)) {
             logf("device slot 16: the program's root signature (%zu bytes) made with its parameters as register "
@@ -4622,6 +4716,9 @@ std::string bindings_against_signature(const void* signature, const whiwhi::weav
     char text[200];
     for (const whiwhi::weave::PcBinding& b : shader.bindings) {
         const std::uint32_t p = b.space;
+        if (b.kind == PcBindingKind::kSampler && p == 0 && w->sampler_heap_parameter != UINT_MAX) {
+            continue;  // the sampler heap, indexed directly: the table the weave added (program_layout_signature)
+        }
         if (p >= w->layout_shape.size()) {
             std::snprintf(text, sizeof(text), "a %s named as root parameter %u, which the root signature does not have",
                           whiwhi::weave::pc_binding_kind_name(b.kind), p);
