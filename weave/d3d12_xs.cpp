@@ -228,6 +228,65 @@ void note_handed(int slot, const std::uint8_t* code, std::size_t bytes) {
 // lands on an end-of-program word and the rest up to the length is the filler word 0xBF9F0000, as in the
 // program's modules. No bytes are logged: shapes and counts only. The first 6 calls each, then a count of shapes
 // per pair at every power of two of calls.
+void* xmem_function(const char* name);  // defined below
+
+// Where a piece handed to slot 57 or 67 lies (ExCorvus, 2026-11-28: some shaders are handed over, some are
+// "heaped" - already in the program's memory). Named by what holds the place: one of the memory library's regions
+// (its kind, size, and the type, protect and attributes words as the program gave them, not read further), or what
+// Windows reports for it (private, mapped, or a loaded file and its module). The first time a region is named is
+// kept, on the process clock.
+namespace code_place {
+std::mutex lock;
+std::vector<WhiwhiXmemRegion> regions;
+std::map<std::string, double> first_seen;
+
+std::string of(unsigned long long address) {
+    std::lock_guard<std::mutex> hold(lock);
+    using Regions = unsigned long long (*)(WhiwhiXmemRegion*, unsigned long long);
+    static const auto list = reinterpret_cast<Regions>(xmem_function("whiwhi_xmem_regions"));
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const WhiwhiXmemRegion& r : regions) {
+            const auto base = reinterpret_cast<unsigned long long>(r.base);
+            if (address >= base && address < base + r.bytes) {
+                char text[220];
+                std::snprintf(text, sizeof(text),
+                              "memory library region kind %lu at 0x%llx, 0x%llx bytes, type 0x%lx, protect 0x%lx, "
+                              "attributes 0x%llx",
+                              r.kind, base, r.bytes, r.type, r.protect, r.attributes);
+                return text;
+            }
+        }
+        if (pass == 0 && list) {
+            regions.resize(static_cast<std::size_t>(list(nullptr, 0)) + 256);
+            regions.resize(static_cast<std::size_t>(std::min<unsigned long long>(
+                list(regions.data(), regions.size()), regions.size())));
+        }
+    }
+    MEMORY_BASIC_INFORMATION info{};
+    if (!VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info))) {
+        return "no memory Windows knows";
+    }
+    char text[MAX_PATH + 160];
+    if (info.Type == MEM_IMAGE) {
+        char file[MAX_PATH] = "?";
+        GetModuleFileNameA(static_cast<HMODULE>(info.AllocationBase), file, sizeof(file));
+        const char* name = std::strrchr(file, '\\');
+        std::snprintf(text, sizeof(text), "a loaded file, %s (protect 0x%lx)", name ? name + 1 : file, info.Protect);
+    } else {
+        std::snprintf(text, sizeof(text), "Windows memory type 0x%lx from 0x%llx (not the memory library's), protect 0x%lx",
+                      info.Type, reinterpret_cast<unsigned long long>(info.AllocationBase), info.Protect);
+    }
+    return text;
+}
+
+void note_first(const std::string& place, int slot) {
+    std::lock_guard<std::mutex> hold(lock);
+    if (first_seen.emplace(place, flow::run_seconds()).second) {
+        logf("device slot %d: a piece first seen in %s, at %.3f s\n", slot, place.c_str(), first_seen[place]);
+    }
+}
+}  // namespace code_place
+
 void note_compiled_pairs(int slot, const void* caller, const void* description) {
     static std::map<std::string, unsigned long long> shapes;
     static unsigned long long calls[2] = {};
@@ -237,6 +296,7 @@ void note_compiled_pairs(int slot, const void* caller, const void* description) 
         return;
     }
     std::vector<std::string> pair_shapes;
+    std::vector<std::string> places;
     std::string detail;
     for (int i = 0; i < kPairs; ++i) {
         std::uint64_t pointer = 0, length = 0;
@@ -245,12 +305,21 @@ void note_compiled_pairs(int slot, const void* caller, const void* description) 
         char text[200];
         if (!pointer && !length) {
             std::snprintf(text, sizeof(text), "pair %d: empty", i);
+            pair_shapes.push_back(text);
+            detail += std::string(" | ") + text;
+            continue;
         } else if (length > (16u << 20) || !can_read(reinterpret_cast<const void*>(pointer), length ? length : 1)) {
             std::snprintf(text, sizeof(text), "pair %d: not a readable (pointer, length)", i);
             pair_shapes.push_back(text);
             detail += std::string(" | ") + text;
             break;
-        } else if ((pointer & 0xff) != 0 || (length & 3) != 0 || length == 0) {
+        }
+        {
+            const std::string place = code_place::of(pointer);
+            code_place::note_first(place, slot);
+            places.push_back("pair " + std::to_string(i) + " in " + place);
+        }
+        if ((pointer & 0xff) != 0 || (length & 3) != 0 || length == 0) {
             // What the block begins with, by the two container forms this library reads (their magic words only).
             std::string form;
             if (length >= 0x20) {
@@ -307,9 +376,15 @@ void note_compiled_pairs(int slot, const void* caller, const void* description) 
     for (const std::string& s : pair_shapes) {
         ++shapes["slot " + std::to_string(slot) + " " + s];
     }
+    for (const std::string& p : places) {
+        ++shapes["slot " + std::to_string(slot) + " where: " + p];
+    }
     if (nth <= 6) {
         std::fprintf(stderr, "[d3d12_xs] device slot %d call %llu (returns to %p), its pairs:%s\n", slot, nth, caller,
                      detail.c_str());
+        for (const std::string& p : places) {
+            std::fprintf(stderr, "[d3d12_xs]   %s\n", p.c_str());
+        }
     }
     if ((nth & (nth - 1)) == 0 && nth >= 8) {
         std::fprintf(stderr, "[d3d12_xs] device slot %d after %llu calls, the shapes of its pairs (%s):\n", slot, nth,
