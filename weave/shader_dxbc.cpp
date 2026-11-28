@@ -3,6 +3,10 @@
 #include "shader_dxbc.hpp"
 
 #include <cstring>
+#include <iterator>
+#include <map>
+#include <string>
+#include <utility>
 
 namespace whiwhi::weave::dxbc {
 namespace {
@@ -876,6 +880,241 @@ std::vector<std::uint8_t> DxbcBuilder::build() const {
     out.resize(offset);
     write_u32(out.data() + 0x18, offset);
 
+    std::uint8_t checksum[16];
+    compute_dxbc_checksum(out.data(), out.size(), checksum);
+    std::memcpy(out.data() + 4, checksum, 16);
+    return out;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The rectangle geometry shader (see the header).
+
+namespace {
+
+struct OutputElement {
+    std::string name;
+    std::uint32_t semantic_index = 0;
+    std::uint32_t system_value = 0;
+    std::uint32_t component_type = 0;
+    std::uint32_t reg = 0;
+    std::uint8_t mask = 0;
+};
+
+std::uint32_t read_word(const std::uint8_t* p) {
+    std::uint32_t v;
+    std::memcpy(&v, p, 4);
+    return v;
+}
+
+// A source swizzle that reads only the components in `mask` (the others repeat the first one read), as the
+// system compiler writes it.
+std::uint8_t swizzle_for(std::uint8_t mask) {
+    std::uint8_t first = 0;
+    while (first < 4 && !(mask & (1u << first))) {
+        ++first;
+    }
+    std::uint8_t s = 0;
+    for (std::uint8_t c = 0; c < 4; ++c) {
+        s |= static_cast<std::uint8_t>(((mask & (1u << c)) ? c : first) << (2 * c));
+    }
+    return s;
+}
+
+// Operand tokens (D3D10/11 tokenized program format): register file in bits 12-19, index dimension in bits 20-21,
+// four components (2) with a write mask (bits 4-7) or a swizzle (mode 1 in bits 2-3, swizzle in bits 4-11).
+constexpr std::uint32_t kFileTemp = 0, kFileInput = 1, kFileOutput = 2, kFileStream = 16;
+std::uint32_t dest_token(std::uint32_t file, std::uint32_t dims, std::uint8_t mask) {
+    return 2u | (static_cast<std::uint32_t>(mask) << 4) | (file << 12) | (dims << 20);
+}
+std::uint32_t source_token(std::uint32_t file, std::uint32_t dims, std::uint8_t swizzle) {
+    return 2u | (1u << 2) | (static_cast<std::uint32_t>(swizzle) << 4) | (file << 12) | (dims << 20);
+}
+std::uint32_t opcode_token(std::uint32_t opcode, std::uint32_t length, std::uint32_t controls = 0) {
+    return opcode | (controls << 11) | (length << 24);
+}
+
+void put_u32(std::vector<std::uint8_t>& out, std::uint32_t v) {
+    const std::size_t at = out.size();
+    out.resize(at + 4);
+    std::memcpy(out.data() + at, &v, 4);
+}
+
+// A signature chunk: 'ISGN' (24-byte elements; for inputs the read mask is the element's mask) or 'OSG5' (each
+// element preceded by its stream, here 0; the written mask is 0), as the system compiler writes them for gs_5_1.
+std::vector<std::uint8_t> signature_chunk(const std::vector<OutputElement>& elements, bool output) {
+    std::vector<std::uint8_t> out;
+    const std::uint32_t size = output ? 28u : 24u;
+    put_u32(out, static_cast<std::uint32_t>(elements.size()));
+    put_u32(out, 8);
+    std::vector<std::uint8_t> names;
+    const std::uint32_t names_at = 8 + size * static_cast<std::uint32_t>(elements.size());
+    for (const OutputElement& e : elements) {
+        if (output) {
+            put_u32(out, 0);
+        }
+        put_u32(out, names_at + static_cast<std::uint32_t>(names.size()));
+        put_u32(out, e.semantic_index);
+        put_u32(out, e.system_value);
+        put_u32(out, e.component_type);
+        put_u32(out, e.reg);
+        out.push_back(e.mask);
+        out.push_back(output ? 0 : e.mask);
+        out.push_back(0);
+        out.push_back(0);
+        names.insert(names.end(), e.name.begin(), e.name.end());
+        names.push_back(0);
+    }
+    out.insert(out.end(), names.begin(), names.end());
+    while (out.size() % 4 != 0) {
+        out.push_back(0xAB);
+    }
+    return out;
+}
+
+} // namespace
+
+std::vector<std::uint8_t> rectangle_geometry_shader(const std::uint8_t* vertex_shader, std::size_t size,
+                                                    std::string* reason) {
+    auto refuse = [&](const char* why) {
+        if (reason) {
+            *reason = why;
+        }
+        return std::vector<std::uint8_t>();
+    };
+    if (!vertex_shader || size < 0x20 || std::memcmp(vertex_shader, "DXBC", 4) != 0) {
+        return refuse("the vertex shader is not a shader container");
+    }
+    const std::uint32_t parts = read_word(vertex_shader + 0x1c);
+    if (size < 0x20 + 4ull * parts) {
+        return refuse("the vertex shader's part table is cut off");
+    }
+    std::vector<OutputElement> elements;
+    bool found = false;
+    for (std::uint32_t i = 0; i < parts && !found; ++i) {
+        const std::uint32_t at = read_word(vertex_shader + 0x20 + 4 * i);
+        if (at + 8ull > size || std::memcmp(vertex_shader + at, "OSGN", 4) != 0) {
+            continue;
+        }
+        found = true;
+        const std::uint32_t bytes = read_word(vertex_shader + at + 4);
+        const std::uint8_t* chunk = vertex_shader + at + 8;
+        if (at + 8ull + bytes > size || bytes < 8) {
+            return refuse("the vertex shader's output signature is cut off");
+        }
+        const std::uint32_t count = read_word(chunk);
+        if (8ull + 24ull * count > bytes) {
+            return refuse("the vertex shader's output signature is cut off");
+        }
+        for (std::uint32_t k = 0; k < count; ++k) {
+            const std::uint8_t* e = chunk + 8 + 24 * k;
+            OutputElement out;
+            const std::uint32_t name_at = read_word(e);
+            for (std::uint32_t c = name_at; c < bytes && chunk[c]; ++c) {
+                out.name.push_back(static_cast<char>(chunk[c]));
+            }
+            out.semantic_index = read_word(e + 4);
+            out.system_value = read_word(e + 8);
+            out.component_type = read_word(e + 12);
+            out.reg = read_word(e + 16);
+            out.mask = static_cast<std::uint8_t>(e[20] & 0xF);
+            if (out.name.empty() || !out.mask || out.reg >= 32) {
+                return refuse("an output of the vertex shader has no name, no components or no register");
+            }
+            elements.push_back(out);
+        }
+    }
+    if (!found) {
+        return refuse("the vertex shader has no plain output signature ('OSGN')");
+    }
+    if (elements.empty()) {
+        return refuse("the vertex shader writes no outputs");
+    }
+    // One declaration per register, over all components written to it.
+    std::map<std::uint32_t, std::pair<std::uint8_t, std::uint32_t>> registers;  // register -> mask, system value
+    for (const OutputElement& e : elements) {
+        auto& r = registers[e.reg];
+        r.first = static_cast<std::uint8_t>(r.first | e.mask);
+        if (e.system_value && !r.second) {
+            r.second = e.system_value;
+        }
+    }
+
+    std::vector<std::uint32_t> t;
+    t.push_back(opcode_token(0x6A, 1, 1));  // dcl_globalFlags refactoringAllowed
+    for (const auto& [reg, r] : registers) {
+        if (r.second) {  // dcl_input_siv v[3][reg]
+            t.insert(t.end(), {opcode_token(0x61, 5), dest_token(kFileInput, 2, r.first), 3u, reg, r.second});
+        } else {  // dcl_input v[3][reg]
+            t.insert(t.end(), {opcode_token(0x5F, 4), dest_token(kFileInput, 2, r.first), 3u, reg});
+        }
+    }
+    t.insert(t.end(), {opcode_token(0x68, 2), 1u});                       // dcl_temps 1
+    t.push_back(opcode_token(0x5D, 1, 3));                                // dcl_inputprimitive triangle
+    t.insert(t.end(), {opcode_token(0x8F, 3), (kFileStream << 12) | (1u << 20), 0u});  // dcl_stream m0
+    t.push_back(opcode_token(0x5C, 1, 5));                                // dcl_outputtopology trianglestrip
+    for (const auto& [reg, r] : registers) {
+        if (r.second) {  // dcl_output_siv o[reg]
+            t.insert(t.end(), {opcode_token(0x67, 4), dest_token(kFileOutput, 1, r.first), reg, r.second});
+        } else {  // dcl_output o[reg]
+            t.insert(t.end(), {opcode_token(0x65, 3), dest_token(kFileOutput, 1, r.first), reg});
+        }
+    }
+    t.insert(t.end(), {opcode_token(0x5E, 2), 4u});  // dcl_maxout 4
+    const std::uint32_t emit[3] = {opcode_token(0x75, 3), (kFileStream << 12) | (1u << 20), 0u};
+    auto copy_corner = [&](std::uint32_t corner) {
+        for (const auto& [reg, r] : registers) {  // mov o[reg], v[corner][reg]
+            t.insert(t.end(), {opcode_token(0x36, 6), dest_token(kFileOutput, 1, r.first), reg,
+                               source_token(kFileInput, 2, swizzle_for(r.first)), corner, reg});
+        }
+        t.insert(t.end(), std::begin(emit), std::end(emit));
+    };
+    copy_corner(0);
+    copy_corner(1);
+    // The fourth corner: corner 0 + corner 2 - corner 1, for each value that is not an integer.
+    for (const OutputElement& e : elements) {
+        const std::uint8_t s = swizzle_for(e.mask);
+        if (e.component_type == 1 || e.component_type == 2) {  // mov o.mask, v[0] (an integer value)
+            t.insert(t.end(), {opcode_token(0x36, 6), dest_token(kFileOutput, 1, e.mask), e.reg,
+                               source_token(kFileInput, 2, s), 0u, e.reg});
+            continue;
+        }
+        // add r0.mask, v[2][reg], v[0][reg]
+        t.insert(t.end(), {opcode_token(0x00, 9), dest_token(kFileTemp, 1, e.mask), 0u,
+                           source_token(kFileInput, 2, s), 2u, e.reg, source_token(kFileInput, 2, s), 0u, e.reg});
+        // add o[reg].mask, r0, -v[1][reg] (the negation is an extended operand token, modifier "neg")
+        t.insert(t.end(), {opcode_token(0x00, 9), dest_token(kFileOutput, 1, e.mask), e.reg,
+                           source_token(kFileTemp, 1, s), 0u,
+                           source_token(kFileInput, 2, s) | 0x80000000u, 0x41u, 1u, e.reg});
+    }
+    t.insert(t.end(), std::begin(emit), std::end(emit));
+    copy_corner(2);
+    t.insert(t.end(), {opcode_token(0x76, 3), (kFileStream << 12) | (1u << 20), 0u});  // cut_stream m0
+    t.push_back(opcode_token(0x3E, 1));                                                 // ret
+
+    std::vector<std::uint8_t> shex;
+    put_u32(shex, (2u << 16) | (5u << 4) | 1u);  // gs_5_1
+    put_u32(shex, 2u + static_cast<std::uint32_t>(t.size()));
+    for (std::uint32_t w : t) {
+        put_u32(shex, w);
+    }
+    const std::vector<std::uint8_t> isgn = signature_chunk(elements, false);
+    const std::vector<std::uint8_t> osg5 = signature_chunk(elements, true);
+    const std::pair<const char*, const std::vector<std::uint8_t>*> chunks[3] = {
+        {"ISGN", &isgn}, {"OSG5", &osg5}, {"SHEX", &shex}};
+    std::vector<std::uint8_t> out(0x20 + 4 * 3, 0);
+    std::memcpy(out.data(), "DXBC", 4);
+    const std::uint32_t one = 1, three = 3;
+    std::memcpy(out.data() + 0x14, &one, 4);
+    std::memcpy(out.data() + 0x1c, &three, 4);
+    for (int i = 0; i < 3; ++i) {
+        const std::uint32_t at = static_cast<std::uint32_t>(out.size());
+        std::memcpy(out.data() + 0x20 + 4 * i, &at, 4);
+        out.insert(out.end(), chunks[i].first, chunks[i].first + 4);
+        put_u32(out, static_cast<std::uint32_t>(chunks[i].second->size()));
+        out.insert(out.end(), chunks[i].second->begin(), chunks[i].second->end());
+    }
+    const std::uint32_t total = static_cast<std::uint32_t>(out.size());
+    std::memcpy(out.data() + 0x18, &total, 4);
     std::uint8_t checksum[16];
     compute_dxbc_checksum(out.data(), out.size(), checksum);
     std::memcpy(out.data() + 4, checksum, 16);
