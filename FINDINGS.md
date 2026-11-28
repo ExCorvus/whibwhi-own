@@ -2514,3 +2514,22 @@ the audio part of the weave.
   as docs/exe-map/SHADER-PATH.md says. For graphics the two ways are separate: the requests through slot 57 (25,450
   in this run) are not asked again through slot 86. Those pipelines are not asked for in any other way, so today
   they are not made at all.
+## 2026-11-28 - Windows' own Direct3D 12 accepts 2,921 of 2,925 pipelines the weave makes (the "Windows accepts" game test 03:11, measured)
+
+- New: scripts/windows_check_test.ps1 runs the game test with WHIWHI_WINDOWS_CHECK set. weave/d3d12_xs.cpp then also
+  hands a copy of every root signature (device slot 16) and pipeline (slot 62 compute, slot 86 stream, with its
+  shaders and input layout) it gives vkd3d to weave/tools/windows_check.exe, through a pipe in memory, by a thread of
+  its own; the program's answers do not change. The helper loads d3d12.dll and dxgi.dll from System32 only (the run
+  folder also holds vkd3d's d3d12core.dll) and logs which files it got: C:\Windows\system32\d3d12.dll and
+  D3D12Core.dll, adapter AMD Radeon RX 9070 XT (vendor 0x1002, device 0x7550, 16,191 MiB).
+- Result of the run (game test PASS, the same fault at image+0x161b994):
+  - pipeline streams (slot 86; their vertex and pixel shaders are the weave's own DXBC, written from the program's
+    machine code): 2,921 made by both vkd3d and Windows; 4 made by vkd3d and refused by Windows with 0x80070057
+    (copies 2990, 3078, 3079, 3084, the last of the run);
+  - root signatures: 89 made by both; 17 made by vkd3d and refused by Windows with 0x80004005;
+  - compute pipelines (slot 62, the 53 shaders of the console library XboxBvhBuilder.dll, handed on unchanged in
+    the console's form of DXIL): not handed to Windows, because their root signature is among the 17 Windows did not
+    make.
+- Windows' debug layer (d3d12SDKLayers.dll) is not installed on this PC, so Windows gives its answer numbers only, no
+  reasons. Which root signatures the 17 are (the program's, renamed by the weave, or a library's as given) is not
+  measured yet.
