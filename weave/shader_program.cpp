@@ -213,13 +213,31 @@ ModuleProgram find_module_program(const std::uint8_t* block, std::size_t size) {
         return refuse(walk.stopped_unknown ? "a walk from the code's first word meets a word of no known format"
                                            : "a walk from the code's first word runs out of words");
     }
-    for (std::size_t i = walk.end_word_index + 1; i < words.size(); ++i) {
-        if (words[i] != kModuleFillerWord) {
-            return refuse("the code holds something other than filler after the end-of-program word");
+    // A program may have more than one end (measured on the program's compute shaders, FINDINGS 2026-11-28: after
+    // the first end-of-program word the rest walks on to one to five more and then only filler). The program is
+    // everything up to the last end-of-program word that only filler follows; the walk goes on from each end.
+    std::size_t end_index = walk.end_word_index;
+    std::size_t instructions = walk.instructions;
+    for (;;) {
+        bool only_filler = true;
+        for (std::size_t i = end_index + 1; i < words.size() && only_filler; ++i) {
+            only_filler = words[i] == kModuleFillerWord;
         }
+        if (only_filler) {
+            break;
+        }
+        const std::size_t from = end_index + 1;
+        const WalkResult more = walk_program(words.data() + from, words.size() - from);
+        if (!more.reached_end) {
+            return refuse(more.stopped_unknown
+                              ? "after an end-of-program word, a walk meets a word of no known format"
+                              : "the code holds something other than filler after the end-of-program word");
+        }
+        end_index = from + more.end_word_index;
+        instructions += more.instructions;
     }
-    found.program_bytes = static_cast<std::uint32_t>((walk.end_word_index + 1) * 4);
-    found.instructions = static_cast<std::uint32_t>(walk.instructions);
+    found.program_bytes = static_cast<std::uint32_t>((end_index + 1) * 4);
+    found.instructions = static_cast<std::uint32_t>(instructions);
     found.found = true;
     found.reason.clear();
     return found;
