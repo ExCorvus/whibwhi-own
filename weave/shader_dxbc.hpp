@@ -401,6 +401,22 @@ private:
 // `data` must be at least 0x20 bytes and `size` must be its whole length.
 void compute_dxbc_checksum(const std::uint8_t* data, std::size_t size, std::uint8_t out[16]);
 
+// The geometry shader that draws a rectangle the way the console's graphics chip does (ExCorvus, 2026-11-28: the
+// weave answers the rectangle mode correctly). The console's rectangle list gives three corners of each rectangle
+// and leaves the fourth to the chip; the PC's drawing interface has no such mode. This shader takes the three
+// corners as a triangle, adds the fourth as corner 0 + corner 2 - corner 1 (measured in the executable: the
+// program writes (-1, 1), (-1, -1), (1, -1) for a whole-screen rectangle) and gives the rectangle on as two
+// triangles: corners 0, 1, 3, 2 as a strip. Every value the vertex shader writes travels with its corner; the
+// fourth corner's values are made the same way as its place (a rectangle's values change evenly across it),
+// except integer values, which are taken from corner 0.
+//
+// `vertex_shader` is a container this writer made (or any with a plain 'OSGN' output signature). Its outputs
+// become the geometry shader's inputs and outputs, so the pixel shader receives exactly what it received before.
+// The instruction and signature forms are those of the system compiler's gs_5_1 output (measured 2026-11-28).
+// Returns an empty vector and a reason when the vertex shader's outputs cannot be read.
+std::vector<std::uint8_t> rectangle_geometry_shader(const std::uint8_t* vertex_shader, std::size_t size,
+                                                    std::string* reason);
+
 } // namespace whiwhi::weave::dxbc
 
 #endif // WHIWHI_WEAVE_SHADER_DXBC_HPP
