@@ -94,8 +94,15 @@ void logf(const char* format, ...) {
 // returns to) and what it was given, so the call can be read in the image.
 void want(const void* from, const char* format, ...);
 
+namespace flow {
+void note_order(int slot);
+}
+
 void log_slot(const char* kind, int kind_id, int slot, const void* caller, void* const* arguments) {
     want(caller, "not provided | %s method slot %d | answered not implemented", kind, slot);
+    if (std::strcmp(kind, "device") == 0 && (slot == 57 || slot == 67)) {
+        flow::note_order(slot);
+    }
     std::lock_guard<std::mutex> lock(g_log);
     const unsigned long long key = (static_cast<unsigned long long>(kind_id) << 32) |
                                     static_cast<unsigned>(slot);
@@ -2335,6 +2342,17 @@ long open_second = -1;
 unsigned long long total = 0;
 std::atomic<long> at_once{0}, most_at_once{0};
 std::atomic<unsigned long long> let_go{0}, translations{0}, translation_us{0}, device_us{0}, from_store{0};
+// Which pipeline request follows which on the same thread (device slots 57, 62, 67, 86; 0 = the thread's first):
+// whether the program asks slot 57/67 first and slot 86/62 after the refusal. Under `lock`.
+std::map<std::pair<int, int>, unsigned long long> order;
+thread_local int last_slot = 0;
+
+void note_order(int slot) {
+    AcquireSRWLockExclusive(&lock);
+    ++order[{last_slot, slot}];
+    ReleaseSRWLockExclusive(&lock);
+    last_slot = slot;
+}
 
 struct Timer {
     LARGE_INTEGER start{};
@@ -2393,6 +2411,21 @@ std::string whole_picture(double at) {
             out += text;
         }
     }
+    std::string pairs;
+    for (const auto& o : order) {
+        char pair[96];
+        if (o.first.first) {
+            std::snprintf(pair, sizeof(pair), "%s%d then %d: %llu", pairs.empty() ? "" : "; ", o.first.first,
+                          o.first.second, o.second);
+        } else {
+            std::snprintf(pair, sizeof(pair), "%sfirst on a thread %d: %llu", pairs.empty() ? "" : "; ",
+                          o.first.second, o.second);
+        }
+        pairs += pair;
+    }
+    if (!pairs.empty()) {
+        out += "[pipeline flow]   order on each thread (device slot asked, then the next one asked): " + pairs + "\n";
+    }
     return out;
 }
 
@@ -2422,6 +2455,8 @@ void done(int which, const Timer& t, unsigned long long key, void* signature, HR
     slot.us_all += us;
     slot.us_longest = (std::max)(slot.us_longest, us);
     threads.insert(GetCurrentThreadId());
+    ++order[{last_slot, which ? 86 : 62}];
+    last_slot = which ? 86 : 62;
     if (second > open_second) {
         if (open_second >= 0) {
             closed = second_line(open_second);
