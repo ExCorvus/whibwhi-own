@@ -2472,6 +2472,17 @@ private:
         if (!covered(ins.format, ins.opcode)) {
             refuse(not_written(ins));
         }
+        // A VOP1/VOP2/VOPC whose first source field is 0xF9 (SDWA), 0xFA (DPP16), 0xE9 or 0xEA (DPP8) carries one
+        // more word that changes which lanes and which parts of the registers it works on (public instruction set
+        // of this GPU generation). This pass carries one lane, so it refuses them by name; the field is not an
+        // inline constant.
+        if (ins.format == WalkFormat::kVop1 || ins.format == WalkFormat::kVop2 || ins.format == WalkFormat::kVopc) {
+            const std::uint32_t source = ins.words[0] & 0x1FFu;
+            if (source == 0xF9u || source == 0xFAu || source == 0xE9u || source == 0xEAu) {
+                refuse(not_written(ins, source == 0xF9u ? "its sub-word form (SDWA)"
+                                                        : "its cross-lane form (DPP), which reads other lanes"));
+            }
+        }
         ++result_.console_instructions;
         switch (ins.format) {
             case WalkFormat::kSop1: sop1(ins); return;
