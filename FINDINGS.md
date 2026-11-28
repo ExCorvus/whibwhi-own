@@ -2999,3 +2999,28 @@ ExCorvus decided not to follow this further now; it is written down as a hint.
 - So the Windows console's graphics library asks for exactly the slots' size, and keeps nothing of its own inside
   that memory. vkd3d's own pieces (null descriptor, the descriptors it lends itself) do not fit into the program's
   memory as they are.
+## 2026-11-28 - one memory for the heaps shaders see: both ways checked one after the other (game tests 18:07, 18:19, PASS, measured)
+
+- Check 1, the weave's way (WHIWHI_ONE_HEAP_MEMORY=0: the weave gives the program its memory and moves every
+  handle across to vkd3d's own heap; the new vkd3d-xbox library present but not handed the memory library): PASS,
+  loading watch scope to 101 s, 1,222 presents, then the fault at image+0x161b994 at about 120 s. vkd3d-xbox
+  behaves as before when it is not given the memory library.
+- Check 2, one memory: vkd3d-xbox asks the memory library, inside the program's creating call, for exactly the
+  slots (39,845,888 bytes = 1,245,184 x 32 for the large heap, 2,048 = 128 x 16 for the sampler heap) - the request
+  the program's own routine answers - and the driver takes that memory over as its descriptor heap. vkd3d's own
+  pieces behind the slots stay out (its null descriptor serves heap robustness, off; the reserved ranges are 0 on
+  this driver; without descriptors to lend itself vkd3d uses its own existing fallback). Only the heaps shaders
+  see; the others keep vkd3d's bookkeeping beside their slots and stay held twice. PASS: the program's heap check
+  holds (start = the address it chose), the heap comparison reports "one memory" for both (334,365 and 43 slots
+  filled at 64 s), no device removal, 1,228 presents, then the same fault at image+0x161b994 (about 72 s).
+- Against the exe map (DESCRIPTORS.md C.2, C.3): the program chooses the address of all five heaps (only its
+  staging sampler heap is made without one) and copies descriptors itself as 32 raw bytes unless the device
+  object's byte +0x18 asks for the library's copy (the weave's device has 0 there). So in the program's shape every
+  heap is one memory and a raw copy is a real copy. Still two memories: the heaps shaders do not see; a raw copy
+  from one of them into a heap shaders see carries the program's own numbers, not a descriptor. Not seen as a
+  failure in this run (no device removal), not measured further.
+- weave/d3d12_xs.cpp: heap_memory (hands XMemAlloc to vkd3d-xbox, d3d12core.dll export
+  vkd3d_xbox_set_descriptor_heap_memory; WHIWHI_ONE_HEAP_MEMORY=0 keeps the weave's way), slot 14 takes the
+  memory the library gave, VKD3D_CONFIG=no_default_heap_robustness unless set, compare_heaps reads the PC handle
+  without its low marks and reports one memory. vkd3d-xbox: libs/vkd3d (device.c, memory.c, resource.c,
+  vkd3d_private.h) and libs/d3d12core (main.c, d3d12core.def).
