@@ -620,6 +620,41 @@ int main() {
                     "skipped.\n");
     }
 
+    // 9. The rectangle geometry shader, made from a vertex shader with a position, a two-component value and an
+    //    integer value: the system disassembler reads it as a gs_5_1 that passes corners 0 and 1, makes the fourth
+    //    as corner 0 + corner 2 - corner 1 (the integer taken from corner 0), and ends with corner 2.
+    {
+        DxbcBuilder vs(ShaderType::kVertex);
+        vs.add_input_signature({"POSITION", 0, SystemValue::kUndefined, ComponentType::kFloat32, 0, kMaskAll});
+        vs.add_output_signature({"SV_Position", 0, SystemValue::kPosition, ComponentType::kFloat32, 0, kMaskAll});
+        vs.add_output_signature({"TEXCOORD", 0, SystemValue::kUndefined, ComponentType::kFloat32, 1, kMaskXY});
+        vs.add_output_signature({"TEXCOORD", 1, SystemValue::kUndefined, ComponentType::kUint32, 2, kMaskX});
+        vs.declare_input(0, kMaskAll);
+        vs.declare_output_siv(0, kMaskAll, SystemValue::kPosition);
+        vs.declare_output(1, kMaskXY);
+        vs.declare_output(2, kMaskX);
+        vs.emit(Opcode::kMov, {output_dest(0), input_source(0)});
+        vs.emit(Opcode::kMov, {output_dest(1, kMaskXY), input_source(0)});
+        vs.emit(Opcode::kMov, {output_dest(2, kMaskX), immediate1u(7)});
+        vs.emit(Opcode::kRet, {});
+        const std::vector<std::uint8_t> vertex = vs.build();
+        std::string why;
+        const std::vector<std::uint8_t> gs = rectangle_geometry_shader(vertex.data(), vertex.size(), &why);
+        CHECK(!gs.empty());
+        if (!gs.empty()) {
+            expect_container(compiler, "rectangle geometry shader", gs,
+                             {"dcl_input_siv v[3][0].xyzw, position", "dcl_input v[3][1].xy", "dcl_input v[3][2].x",
+                              "dcl_inputprimitive triangle", "dcl_stream m0", "dcl_outputtopology trianglestrip",
+                              "dcl_output_siv o0.xyzw, position", "dcl_output o1.xy", "dcl_output o2.x",
+                              "dcl_maxout 4", "mov o0.xyzw, v[0][0].xyzw", "mov o1.xy, v[1][1].xyxx",
+                              "add r0.xyzw, v[2][0].xyzw, v[0][0].xyzw", "add o0.xyzw, r0.xyzw, -v[1][0].xyzw",
+                              "add o1.xy, r0.xyxx, -v[1][1].xyxx", "mov o2.x, v[0][2].xxxx",
+                              "mov o2.x, v[2][2].xxxx", "emit_stream m0", "cut_stream m0", "ret"});
+        }
+        std::string refused;
+        CHECK(rectangle_geometry_shader(gs.data(), 8, &refused).empty() && !refused.empty());
+    }
+
     if (failures == 0) {
         std::printf("shader_dxbc: all checks passed\n");
         return 0;
