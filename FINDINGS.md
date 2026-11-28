@@ -3148,3 +3148,14 @@ ExCorvus decided not to follow this further now; it is written down as a hint.
   is in a parcel relates to the code in the region. The programs inside the parcels are not the same as the
   pieces handed to slots 57 and 67 (2026-11-28 "the code handed to device slots 57 and 67 is not the code inside
   the containers").
+## 2026-11-28 - the parcels are put together on the stack of the thread that asks (game test 19:47, measured)
+
+- weave/d3d12_xs.cpp (code_place::count): a container's place is first compared with the stack of the thread
+  that hands it over (GetCurrentThreadStackLimits).
+- Run 19:47: every one of the program's own containers lies on the stack of the thread that asks. That is 1,995
+  of 2,048 at slot 62 (the other 53 are the builder library's, in its own file), and 65,526 of 65,536 at slot 86
+  (the other 10 are vertex containers inside the program's image). The "1 MiB blocks of ordinary memory" of run
+  19:41 are these threads' stacks.
+- So the parcel is not something kept anywhere. It is put together in the moment, on the asking thread, after
+  the first way (slot 57 or 67) is refused, and handed over from there. The program's prepared code stays in its
+  own region of the memory library. Not measured yet: which code on that thread writes the parcel, and from what.
