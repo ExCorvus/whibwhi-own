@@ -3327,6 +3327,8 @@ void stream(const std::vector<std::uint8_t>& copy, HRESULT vkd3d) {
 
 }  // namespace windows_check
 
+void note_compute_ray_census(const void* bytes, unsigned long long length);
+
 HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, void* zero2, void* identifier,
                                   void** out) {
     if (out) {
@@ -3350,6 +3352,7 @@ HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, vo
         want(_ReturnAddress(), "7 pipelines | slot 62, a compute pipeline of a console shader | not made: not "
                                "covered yet");
         log_console_shader_parts(pc.CS.pShaderBytecode, pc.CS.BytecodeLength);
+        note_compute_ray_census(pc.CS.pShaderBytecode, pc.CS.BytecodeLength);
         static std::once_flag once;
         void* const returns_to = _ReturnAddress();
         std::call_once(once, [&] {
@@ -3919,10 +3922,42 @@ void note_ray_census(const std::vector<std::uint8_t>& stream, const std::string&
         ++a.without;
     }
     const unsigned long long n = ++g_ray_requests;
-    if (n >= 1024 && (n & (n - 1)) == 0) {
+    if (n >= 1024 && ((n & (n - 1)) == 0 || n % 8192 == 0)) {
         log_ray_census_locked();
     }
     ReleaseSRWLockExclusive(&g_ray_lock);
+}
+
+// The same count for the program's own compute shaders of slot 62 (ExCorvus, 2026-11-28: "the last ones are the
+// raytracing ones"): each different shader read once for the ray test; logged at every power of two of the
+// requests, with the process time. Numbers only.
+void note_compute_ray_census(const void* bytes, unsigned long long length) {
+    static std::mutex m;
+    static std::unordered_map<unsigned long long, RayShader> shaders;
+    static unsigned long long requests = 0, with_ray = 0, unread = 0;
+    if (!bytes || !length || length > 0x1000000 || !can_read(bytes, static_cast<std::size_t>(length))) {
+        return;
+    }
+    const auto* c = static_cast<const std::uint8_t*>(bytes);
+    const unsigned long long print = shader_fingerprint(c, static_cast<std::size_t>(length));
+    std::lock_guard<std::mutex> lock(m);
+    auto found = shaders.find(print);
+    if (found == shaders.end()) {
+        found = shaders.emplace(print, read_ray_shader(c, static_cast<std::size_t>(length))).first;
+    }
+    const unsigned long long n = ++requests;
+    with_ray += found->second.ray ? 1 : 0;
+    unread += found->second.known ? 0 : 1;
+    if (n >= 8 && (n & (n - 1)) == 0) {
+        std::size_t ray_shaders = 0, unread_shaders = 0;
+        for (const auto& s : shaders) {
+            ray_shaders += s.second.ray ? 1 : 0;
+            unread_shaders += s.second.known ? 0 : 1;
+        }
+        logf("[ray census] compute, slot 62, %.1f s: after %llu requests of the program's own compute shaders: %llu "
+             "with the ray test, %llu not read; different shaders %zu, %zu with the ray test, %zu not read\n",
+             flow::run_seconds(), n, with_ray, unread, shaders.size(), ray_shaders, unread_shaders);
+    }
 }
 
 void log_ray_census() {
