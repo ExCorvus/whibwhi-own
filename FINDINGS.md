@@ -2445,3 +2445,24 @@ the audio part of the weave.
   smaller part of it; the larger part is the PC device building the pipelines. The time before the first report
   (57.1 s in this run, 51.3 s in run 00:36) is not changed by the store: no pipeline is asked before it.
 - Both runs ended as before at the user-interface fault image+0x161b994.
+## 2026-11-28 - vkd3d's pipeline cache: the pipelines built once, taken again in the next run (game tests 01:32, 01:43, measured)
+
+- weave/d3d12_xs.cpp no longer turns vkd3d's on-disk pipeline cache off; it keeps it on the PC in
+  %LOCALAPPDATA%\whiwhi\vkd3d-cache (AGENTS.md rule 5). vkd3d confirms it in its log ("shader_cache is used",
+  "Attempting to load disk cache from ...").
+- Run 01:32 (new build: both stores empty): 2,751 translations (27.3 s of thread time together - about ten times
+  the earlier runs, not explained), the PC device 3.42 s; vkd3d wrote 781 KB. The first report came at 58.7 s of the
+  process; the program itself started about 9.5 minutes after the game test began (the network watch's and the
+  window pictures' times; most likely the measure/ scripts the test runs first).
+- Run 01:43 (same build): 1,091 shaders loaded from the store before the start; vkd3d took its cache ("Promoting
+  write cache to read cache"). Up to the 32,768th request: 0 translations, the store used 65,343 times, and the PC
+  device took **0.07 s** of thread time together (3.42 s in run 01:32, 3.68-3.91 s in the runs before).
+- The time without a progress report during the big wave: **0.58 s** (1.62 s in run 01:17 with the shader store
+  only, 1.81 s in run 00:36 with neither).
+- The run ended as before at the user-interface fault image+0x161b994: the fault does not move when the pipelines
+  come about three times faster.
+- Not changed by any of this: the same 16 device and command-list methods, the storage queue's method +0x30 and
+  (since run 2026-11-27 17:41) the texture object's method +0x50 are answered "not implemented" in every run. Where
+  each returns to in the program: Temp notes; command-list slot 72 returns into a function one of whose callers is
+  a progress report of the watchdog (fn 0xc9e350, MAP.md 4.6); slots 131 and 132 are the buffer requests made right
+  after each frame list is created (COMMAND-LIST.md).
