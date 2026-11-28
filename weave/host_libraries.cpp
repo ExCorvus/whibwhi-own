@@ -70,6 +70,13 @@ void* HostLibraries::resolve(const std::string& library, const ImportedFunction&
         if (!module && key == "gameinput.dll") {
             module = LoadLibraryExA("GameInputRedist.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         }
+        // FidelityFX (ExCorvus, 2026-11-28): the image imports amd_fidelityfx_loader_xbox.dll (ffxCreateContext,
+        // ffxDestroyContext, ffxDispatch, ffxQuery). Windows on a PC with an AMD driver has the PC's own
+        // FidelityFX library, amd_fidelityfx_dx12.dll in System32, installed by the driver, with the same exports.
+        // So the import is answered by that one when it is there.
+        if (!module && key == "amd_fidelityfx_loader_xbox.dll") {
+            module = LoadLibraryExA("amd_fidelityfx_dx12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        }
         if (!module) {
             module = LoadLibraryExA(library.c_str(), nullptr, has_directories_ ? LOAD_LIBRARY_SEARCH_DEFAULT_DIRS : 0);
         }
