@@ -317,6 +317,8 @@ void note_compiled_pairs(int slot, const void* caller, const void* description) 
     std::fflush(stderr);
 }
 
+std::string handle_place(unsigned long long handle);
+
 void log_slot(const char* kind, int kind_id, int slot, const void* caller, void* const* arguments) {
     want(caller, "not provided | %s method slot %d | answered not implemented", kind, slot);
     if (std::strcmp(kind, "device") == 0 && (slot == 57 || slot == 67)) {
@@ -362,6 +364,13 @@ void log_slot(const char* kind, int kind_id, int slot, const void* caller, void*
                     std::fprintf(stderr, "%s%08x", w % 0x20 == 0 ? (w ? "\n[d3d12_xs]     " : " ") : " ", word);
                 }
                 std::fprintf(stderr, "\n");
+            }
+            if (slot == 61) {
+                // Where the sampler would go: the place of argument 2 among the descriptor heaps made here.
+                std::fprintf(stderr, "[d3d12_xs]   slot 61: argument 2 lies %s; arguments 3 and 4: %llu %llu\n",
+                             handle_place(reinterpret_cast<unsigned long long>(arguments[1])).c_str(),
+                             reinterpret_cast<unsigned long long>(arguments[2]),
+                             reinterpret_cast<unsigned long long>(arguments[3]));
             }
             std::fflush(stderr);
         }
@@ -516,6 +525,8 @@ struct Wrap {
     // (program_layout_signature) and each table's number of places. Empty for any other.
     std::string layout_shape;
     std::vector<UINT> layout_places;
+    UINT layout_fixed_samplers = 0;  // the fixed samplers its description carries inside itself
+    UINT layout_flags = 0;           // its description's flags
 
     Wrap(void* pc_object, int kind_number, const char* kind_name)
         : vt(nullptr), image_area{}, pc(pc_object), refs(1), kind_id(kind_number), kind(kind_name) {}
@@ -3930,7 +3941,8 @@ HMODULE pc_d3d12();
 // shape gets one letter for each parameter (c root constants, b t u a root buffer, T a table of resources, S a
 // table of samplers) and places each table's N.
 std::vector<std::uint8_t> program_layout_signature(const void* blob, std::size_t size, std::string& reason,
-                                                   std::string& shape, std::vector<UINT>& places) {
+                                                   std::string& shape, std::vector<UINT>& places,
+                                                   UINT& fixed_samplers, UINT& flags) {
     using Read = HRESULT(WINAPI*)(const void*, SIZE_T, REFIID, void**);
     using Write = HRESULT(WINAPI*)(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC*, ID3DBlob**, ID3DBlob**);
     static const auto read =
@@ -3956,6 +3968,8 @@ std::vector<std::uint8_t> program_layout_signature(const void* blob, std::size_t
         return out;
     }
     const D3D12_ROOT_SIGNATURE_DESC1& r = given->Desc_1_1;
+    fixed_samplers = r.NumStaticSamplers;
+    flags = static_cast<UINT>(r.Flags);
     std::vector<D3D12_ROOT_PARAMETER1> parameters(r.pParameters, r.pParameters + r.NumParameters);
     std::vector<std::vector<D3D12_DESCRIPTOR_RANGE1>> ranges(r.NumParameters);
     shape.assign(r.NumParameters, '?');
@@ -4051,8 +4065,9 @@ HRESULT __stdcall w_device_slot16(Wrap* self, void* a1, void* a2, void* a3, void
     if (program) {
         std::string reason, shape;
         std::vector<UINT> places;
+        UINT fixed_samplers = 0, flags = 0;
         std::vector<std::uint8_t> renamed =
-            program_layout_signature(a2, reinterpret_cast<std::size_t>(a3), reason, shape, places);
+            program_layout_signature(a2, reinterpret_cast<std::size_t>(a3), reason, shape, places, fixed_samplers, flags);
         static std::atomic<int> said{0};
         if (renamed.empty()) {
             logf("device slot 16: the program's root signature (%zu bytes) is not made: %s\n",
@@ -4067,6 +4082,8 @@ HRESULT __stdcall w_device_slot16(Wrap* self, void* a1, void* a2, void* a3, void
         if (hr == 0 && made && is_wrap(*made)) {
             static_cast<Wrap*>(*made)->layout_shape = shape;
             static_cast<Wrap*>(*made)->layout_places = places;
+            static_cast<Wrap*>(*made)->layout_fixed_samplers = fixed_samplers;
+            static_cast<Wrap*>(*made)->layout_flags = flags;
         }
         if (few(said)) {
             logf("device slot 16: the program's root signature (%zu bytes) made with its parameters as register "
@@ -4485,6 +4502,53 @@ void write_shader_check() {
     ReleaseSRWLockExclusive(&g_check_lock);
 }
 
+// Where the second part is (a measurement only, no answer changes): for a sampler the shader's own tables name in a
+// root parameter that is a table of resources, what the root signature carries (its parameters' letters, the fixed
+// samplers inside it) and what else the shader reads from that same table, at which words. Each different picture
+// is logged once (up to 48), with its count at every power of two.
+void note_sampler_place(const Wrap* w, const whiwhi::weave::PcShader& shader, const whiwhi::weave::PcBinding& b) {
+    using whiwhi::weave::PcBindingKind;
+    std::string key;
+    char part[160];
+    std::snprintf(part, sizeof(part), "root signature '%s', flags 0x%x, with %u fixed sampler(s); the sampler at table %u word %u "
+                  "(register %u%s); the same table also gives:",
+                  w->layout_shape.c_str(), w->layout_flags, w->layout_fixed_samplers, b.space, b.offset_words, b.shader_register,
+                  b.unbounded ? ", a range with no end" : "");
+    key = part;
+    bool any = false;
+    for (const whiwhi::weave::PcBinding& o : shader.bindings) {
+        if (&o == &b || o.space != b.space) {
+            continue;
+        }
+        std::snprintf(part, sizeof(part), " %s at word %u%s", whiwhi::weave::pc_binding_kind_name(o.kind),
+                      o.offset_words, o.unbounded ? " (no end)" : "");
+        key += part;
+        any = true;
+    }
+    if (!any) {
+        key += " nothing else";
+    }
+    static std::mutex m;
+    static std::map<std::string, unsigned long long> seen;
+    static unsigned long long total = 0;
+    std::lock_guard<std::mutex> lock(m);
+    const unsigned long long n = ++seen[key];
+    ++total;
+    if (n == 1 && seen.size() <= 48) {
+        logf("[sampler place] new: %s\n", key.c_str());
+    }
+    if ((total & (total - 1)) == 0 && total >= 8) {
+        logf("[sampler place] after %llu: %zu different pictures\n", total, seen.size());
+        unsigned shown = 0;
+        for (const auto& item : seen) {
+            if (++shown > 24) {
+                break;
+            }
+            logf("[sampler place]   %llu x %s\n", item.second, item.first.c_str());
+        }
+    }
+}
+
 // Whether everything a written shader reads is in the program's root signature where program_layout puts it:
 // its parameter has the kind the shader's own tables give it, and a table place is one of the table's places.
 // Empty when it is; else what is not.
@@ -4514,6 +4578,9 @@ std::string bindings_against_signature(const void* signature, const whiwhi::weav
         case PcBindingKind::kRawBuffer: ok = s == 't' || s == 'T'; break;
         case PcBindingKind::kTexture: ok = s == 'T'; break;
         case PcBindingKind::kSampler: ok = s == 'S'; break;
+        }
+        if (!ok && b.kind == PcBindingKind::kSampler && s == 'T') {
+            note_sampler_place(w, shader, b);
         }
         if (!ok) {
             std::snprintf(text, sizeof(text), "a %s named as root parameter %u, which is '%c' in the root signature",
