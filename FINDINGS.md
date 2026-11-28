@@ -1309,7 +1309,7 @@ Follow-up, game test 00:12 (visible, the copy's folder unchanged; FAIL about 5 s
 - The lane count change is in the same converter; this run still cannot show whether it is taken.
 ## 2026-11-27 - all builder shaders through the translator at once, and the next stop (game test 00:22)
 
-- A checker outside the repository (C:\Users\fabiq\AppData\Local\Temp\opencode\bvh_check) reads XboxBvhBuilder.dll
+- A checker outside the repository (in the user's temporary folder, bvh_check) reads XboxBvhBuilder.dll
   from the copy into memory, finds its 52 shader containers and passes each through dxil-spirv as vkd3d-proton does
   (buffers by GPU address, root constants as push constants). Nothing of the file or of the translated code is
   written anywhere. Before any change it agreed with the game test of 00:12 on both shaders that run reached
