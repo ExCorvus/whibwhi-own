@@ -3546,8 +3546,12 @@ unsigned long long translated_check(const std::uint8_t* container, std::uint32_t
 // The time the shaders take to be written falls on time the program's own clock already counts. So every PC shader
 // this library writes (and every refusal, with its reason) is kept in a file on this PC, and the file is loaded
 // before the program's entry thread starts (whiwhi_d3d12_load_shader_store, called by the boot tool). The file is
-// named by a hash of this library's own file, so a new build of the translator starts a new store and never takes
-// shaders an older build wrote. What is kept: per shader the hash, length and stage of the program's bytes (not the
+// named by the translator's own code (WHIWHI_TRANSLATOR_HASH, a hash of its source files, CMakeLists.txt) and by
+// kStoreCaller below, so a change to the translator starts a new store and never takes shaders an older one wrote,
+// while a change elsewhere in the weave (a log line, an answer) keeps it: such a run would otherwise translate
+// everything again on the program's clock (ExCorvus, 2026-11-28: the time would taint the results). The second
+// translator (the program's own compute shaders) gets a store of its own. What is kept: per shader the hash, length
+// and stage of the program's bytes (not the
 // bytes), the PC container written for it, its bindings, or the reason it was refused. It stays on this PC, in
 // %LOCALAPPDATA%\whiwhi\shader-store; nothing of it belongs in the repository.
 namespace store {
@@ -3557,6 +3561,20 @@ std::FILE* file = nullptr;
 std::string path;
 bool tried = false;
 constexpr std::uint32_t kRecord = 0x31535357u;  // "WSS1"
+
+// How translated_shader below hands the program's shaders to the translator and what it keeps of the answer. Raise
+// it whenever that changes: the translator's own hash does not see this file.
+constexpr unsigned kStoreCaller = 1;
+
+std::string translator_name() {
+#ifdef WHIWHI_TRANSLATOR_HASH
+    char text[64];
+    std::snprintf(text, sizeof(text), "translator-%s-%u", WHIWHI_TRANSLATOR_HASH, kStoreCaller);
+    return text;
+#else
+    return std::string();
+#endif
+}
 
 std::string library_hash() {
     HMODULE self = nullptr;
@@ -3591,7 +3609,10 @@ bool open_path() {
     tried = true;
     char base[MAX_PATH] = {};
     const DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", base, sizeof(base));
-    const std::string hash = library_hash();
+    std::string hash = translator_name();
+    if (hash.empty()) {
+        hash = library_hash();  // built without the translator's hash: one store per build of this library
+    }
     if (n == 0 || n >= sizeof(base) || hash.empty()) {
         logf("[shader store] no place for it (LOCALAPPDATA or this library's file not readable) - not kept\n");
         return false;
@@ -3941,9 +3962,83 @@ void note_compute_ray_census(const void* bytes, unsigned long long length) {
     const auto* c = static_cast<const std::uint8_t*>(bytes);
     const unsigned long long print = shader_fingerprint(c, static_cast<std::size_t>(length));
     std::lock_guard<std::mutex> lock(m);
+    static std::map<std::string, unsigned long long> why_unread;
     auto found = shaders.find(print);
     if (found == shaders.end()) {
         found = shaders.emplace(print, read_ray_shader(c, static_cast<std::size_t>(length))).first;
+        if (!found->second.known) {
+            // Why the reader stops on it: the packed program, or the module inside it.
+            using namespace whiwhi::weave;
+            const PackedProgram program = read_packed_program(c, static_cast<std::size_t>(length));
+            std::string why;
+            if (!program.ok()) {
+                why = "the packed program: " + program.reason;
+            } else {
+                const ModuleProgram module = find_module_program(program.bytes.data(), program.bytes.size());
+                why = module.found ? std::string("the module's program reaches past the unpacked bytes")
+                                   : "the module: " + module.reason;
+                if (!module.found && module.code_bytes >= 4 &&
+                    module.code_offset + static_cast<std::uint64_t>(module.code_bytes) <= program.bytes.size()) {
+                    // Where the walk stops (formats and numbers only): after the first end-of-program word, whether
+                    // the rest walks on to more of them; on a word of no known format, its top bits and the step
+                    // before it.
+                    std::vector<std::uint32_t> words(module.code_bytes / 4);
+                    std::memcpy(words.data(), program.bytes.data() + module.code_offset, words.size() * 4);
+                    std::vector<WalkStep> steps;
+                    const WalkResult walk = walk_program(words.data(), words.size(), &steps);
+                    char part[200];
+                    if (walk.reached_end) {
+                        std::size_t at = walk.end_word_index + 1, ends = 0, filler_from = words.size();
+                        bool unknown = false;
+                        unsigned top = 0;
+                        while (at < words.size()) {
+                            bool all_filler = true;
+                            for (std::size_t i = at; i < words.size(); ++i) {
+                                all_filler = all_filler && words[i] == kModuleFillerWord;
+                            }
+                            if (all_filler) {
+                                filler_from = at;
+                                break;
+                            }
+                            const WalkResult more = walk_program(words.data() + at, words.size() - at);
+                            if (!more.reached_end) {
+                                unknown = more.stopped_unknown;
+                                top = more.stopped_top_bits;
+                                break;
+                            }
+                            ++ends;
+                            at += more.end_word_index + 1;
+                        }
+                        std::snprintf(part, sizeof(part),
+                                      " (first end at word %zu of %zu; after it %zu more end-of-program word(s) reached, "
+                                      "%s)",
+                                      walk.end_word_index, words.size(), ends,
+                                      filler_from < words.size() || at >= words.size()
+                                          ? "then only filler"
+                                          : unknown ? "then a word of no known format" : "then the words run out");
+                        why += part;
+                        (void)top;
+                    } else if (walk.stopped_unknown) {
+                        const WalkStep* before = steps.empty() ? nullptr : &steps.back();
+                        std::snprintf(part, sizeof(part), " (at word %zu of %zu, top bits 0x%x; the step before: %s %u)",
+                                      walk.stopped_word_index, words.size(), walk.stopped_top_bits,
+                                      before ? walk_format_name(before->format) : "none", before ? before->opcode : 0u);
+                        why += part;
+                    }
+                }
+            }
+            const unsigned long long k = ++why_unread[why];
+            if (k == 1 && why_unread.size() <= 16) {
+                std::string kinds;
+                char part[48];
+                for (const ProgramDirectoryEntry& e : program.entries) {
+                    std::snprintf(part, sizeof(part), " {kind 0x%x, %u bytes}", e.kind, e.size);
+                    kinds += part;
+                }
+                logf("[ray census] compute, slot 62: a shader of %llu bytes not read - %s; its directory:%s\n", length,
+                     why.c_str(), kinds.empty() ? " none" : kinds.c_str());
+            }
+        }
     }
     const unsigned long long n = ++requests;
     with_ray += found->second.ray ? 1 : 0;
@@ -3957,6 +4052,9 @@ void note_compute_ray_census(const void* bytes, unsigned long long length) {
         logf("[ray census] compute, slot 62, %.1f s: after %llu requests of the program's own compute shaders: %llu "
              "with the ray test, %llu not read; different shaders %zu, %zu with the ray test, %zu not read\n",
              flow::run_seconds(), n, with_ray, unread, shaders.size(), ray_shaders, unread_shaders);
+        for (const auto& item : why_unread) {
+            logf("[ray census]   compute, not read: %llu x %s\n", item.second, item.first.c_str());
+        }
     }
 }
 
