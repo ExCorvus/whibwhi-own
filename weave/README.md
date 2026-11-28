@@ -77,6 +77,9 @@ The runtime, the console libraries it provides, the tools and the tests. All of 
   which imports connect.
 - `boot_image <image file> [library folder] [--seconds N] [--no-callbacks] [--same-thread]` — loads the image
   and starts its entry point; logs calls to imports nothing provides, and faults with a backtrace.
+- `windows_check <result file>` — the helper of the "Windows accepts" game test: started by the graphics library
+  when `WHIWHI_WINDOWS_CHECK` is set, it hands the copies it is sent to Windows' own Direct3D 12 and writes both
+  answers side by side.
 - `vkhost_probe` — checks that the GPU can read ordinary host memory without a copy. Built only when the Vulkan
   SDK is installed.
 
