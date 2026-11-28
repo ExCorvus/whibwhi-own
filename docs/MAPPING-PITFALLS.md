@@ -40,5 +40,8 @@ for anyone who maps what a program asks of the system it was made for, and answe
 6. **The crash site is a symptom.** The program fell over reading an empty value. The question is who should have
    filled it, not how to make the read survive.
 7. **A switch you did not see.** A path looked closed by a version check; it was a single flag byte.
-8. **A fix that erases the evidence.** Making a failure pass before writing down what failed and where removes the
+8. **The same ending hides progress.** When every run stops at the same place, each step looks like it changed
+   nothing, and that pulls you away from the real hurdle into new fixes. Compare what happens before the end
+   (frames, draws, built objects, the watchdog's rhythm), not where the run stops.
+9. **A fix that erases the evidence.** Making a failure pass before writing down what failed and where removes the
    one clue to the cause. Let it fail, write it down, then decide.
