@@ -2674,3 +2674,30 @@ the audio part of the weave.
   line since that reading came in (commit 968), not where the run ended: it now skips those lines.
 - Run 13:07 (judged on its own) and run 13:26 (all three): PASS; the window came to the front, frameless at
   2560 x 1440 on DISPLAY1; the end is the fault at image+0x161b994, as before.
+## 2026-11-28 - the console's rectangle list answered: drawn through a rectangle pipeline that adds the fourth corner (game tests 13:47, 13:50, 13:52, measured)
+
+- Measured first (run 13:26, wants ledger): the program draws once per picture at one place (image+0xbff06), and
+  before it sets the triangle list (0x4) and then the rectangle list (0x11); all 1,193 draws were held, none drawn
+  with triangles. So every picture the program shows is that one rectangle draw.
+- ExCorvus: "we need to make our weave answer correctly". The PC's drawing interface (Windows' Direct3D 12 as much
+  as Vulkan) has no rectangle mode; the console's chip adds each rectangle's fourth corner. The weave now gives the
+  same answer in its own words: weave/shader_dxbc.cpp rectangle_geometry_shader makes, from the vertex shader's
+  outputs, a geometry shader (gs_5_1, forms measured from the system compiler's output) that passes corners 0 and
+  1, adds corner 0 + corner 2 - corner 1 (the formula measured in the executable, FINDINGS 2026-11-27), and ends with
+  corner 2, as two triangles; every value goes with its corner, integers from corner 0. weave/d3d12_xs.cpp keeps the
+  stream of each triangle pipeline made at device slot 86 and, at a draw while 0x11 is set, makes once the same
+  pipeline with that geometry shader, sets it around the draw and sets the program's pipeline back. The PC list is
+  set to a triangle list for 0x11. Indirect executions while 0x11 is set stay held (not answered yet).
+- Run 13:47: no rectangle pipeline - the pipeline set for the rectangle draws had not been kept. Run 13:50 measured
+  why: it is described with primitive topology type 19. Correction of 2026-11-27: type 19 was inferred to be the
+  quad list from its number; measured, it is the type of the program's rectangle pipelines. The 4 streams Windows'
+  own Direct3D refused (0x80070057) while vkd3d made them were these. The weave now asks the PC for type 19 as a
+  triangle pipeline (the type the chip draws rectangles with), and keeps those streams as well.
+- Run 13:52 (with the Windows check): PASS. One rectangle pipeline made (932-byte geometry shader); 1,187
+  rectangle draws drawn through it (3 corners, 1 instance each), none held. Windows' own Direct3D 12 accepts all
+  4,276 pipeline streams now (none refused) and the program's 89 root signatures.
+- Pointing forward (noted, not followed): the run still ends at the user-interface fault image+0x161b994 (~72 s),
+  and after it the program's breakpoint image+0x344196 follows a texture the weave's texture library has no size
+  for: 2560 x 1440 (the screen's size), format 115, flags 0xc00001. The window reports "not responding" from that
+  moment (fullscreen.txt: 18.5 s after it appeared) until the process ends. The program's loading (its watch scope
+  open) lasts from 3.2 s to 50.9 s of the process.
