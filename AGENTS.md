@@ -61,6 +61,9 @@ What works today, and where a run currently stops, is in the **Current state** b
     that something works. Rules 1, 2 and 5 still hold: nothing of the game is written to the repository, and on
     the PC only the shader store of rule 5. A shader taken from the store was written in an earlier run, so a run
     that takes it does not test the translator on that shader.
+12. **No leaked development kits or other confidential material, not even as a reference** (ExCorvus,
+    2026-11-28). Everything comes from the program itself, from Windows on the user's PC and from public
+    documentation. Do not download, open or read such material, and do not take anything from texts that quote it.
 
 ## How work is done
 
