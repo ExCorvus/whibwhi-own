@@ -2785,3 +2785,13 @@ the audio part of the weave.
   0x14 (linear, mip point), 0x0 (point), 0x55 (anisotropic, 4 or 8); address modes 1-4; LOD 0..12, bias 0; no
   comparison sampler. No device removal. The shaders still take their samplers from root parameter 0 (the
   29,195 refusals remain), so nothing reads these yet; the fault at image+0x161b994 is unchanged.
+## 2026-11-28 - sources: no leaked development kit
+
+- First public reports that the console development kit was leaked: 28 November 2026 (news sites, citing
+  Notebookcheck; no date of the leak itself is given). This project used none of it, before or after: nothing was
+  downloaded, opened or read. Everything here comes from the program itself, from Windows on this PC and from public
+  documentation, and each result in this file names where in the program it was measured.
+- For the dates: the first commit of this repository is from 25 November 2026; the description of how the program
+  makes its samplers (docs/exe-map/DESCRIPTORS.md, device slot 61 and the sampler records) is from 26 November 2026;
+  the finding of today that the records carry Windows' own filter number builds on that description and on the game
+  tests of today, all in the history.
