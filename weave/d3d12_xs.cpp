@@ -285,6 +285,26 @@ void note_first(const std::string& place, int slot) {
         logf("device slot %d: a piece first seen in %s, at %.3f s\n", slot, place.c_str(), first_seen[place]);
     }
 }
+// For the containers of slots 62 and 86: the place of each one counted by slot and stage; the counts are written
+// at every power of two (from 8) of the slot's containers.
+void count(int slot, const char* what, const void* address) {
+    const std::string place = of(reinterpret_cast<unsigned long long>(address));
+    note_first(place, slot);
+    static std::map<std::string, unsigned long long> counts;
+    static std::map<int, unsigned long long> per_slot;
+    std::lock_guard<std::mutex> hold(lock);
+    ++counts["slot " + std::to_string(slot) + " " + what + " in " + place];
+    const unsigned long long n = ++per_slot[slot];
+    if (n >= 8 && (n & (n - 1)) == 0) {
+        logf("device slot %d after %llu containers, where they lie:\n", slot, n);
+        const std::string prefix = "slot " + std::to_string(slot) + " ";
+        for (const auto& [key, c] : counts) {
+            if (key.rfind(prefix, 0) == 0) {
+                logf("  %s: %llu\n", key.c_str(), c);
+            }
+        }
+    }
+}
 }  // namespace code_place
 
 void note_compiled_pairs(int slot, const void* caller, const void* description) {
@@ -3711,6 +3731,9 @@ HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, vo
         can_read(pc.CS.pShaderBytecode, static_cast<std::size_t>(pc.CS.BytecodeLength))) {
         key = flow::hash(pc.CS.pShaderBytecode, static_cast<std::size_t>(pc.CS.BytecodeLength), key);
     }
+    code_place::count(62, is_plain_pc_shader(pc.CS.pShaderBytecode, pc.CS.BytecodeLength) ? "PC container"
+                                                                                           : "console container",
+                      pc.CS.pShaderBytecode);
     if (!is_plain_pc_shader(pc.CS.pShaderBytecode, pc.CS.BytecodeLength)) {
         want(_ReturnAddress(), "7 pipelines | slot 62, a compute pipeline of a console shader | not made: not "
                                "covered yet");
@@ -5325,6 +5348,7 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
                     reason = std::string(vertex ? "vertex" : "pixel") + " shader: its bytes cannot be read";
                     break;
                 }
+                code_place::count(86, vertex ? "vertex container" : "pixel container", code.pShaderBytecode);
                 shader_named_at.emplace_back(at + payload_at,
                                              flow::hash(code.pShaderBytecode, static_cast<std::size_t>(code.BytecodeLength)));
                 record_shader_against_signature(game_signature, static_cast<const std::uint8_t*>(code.pShaderBytecode),
