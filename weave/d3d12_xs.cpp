@@ -100,11 +100,92 @@ void want(const void* from, const char* format, ...);
 namespace flow {
 void note_order(int slot);
 }
+bool can_read(const void* address, std::size_t bytes);  // defined below, with the command-list checks
+
+// Device slots 57 and 67: their first argument is a root signature followed by (pointer, length) pairs
+// (FINDINGS 2026-11-28). Each pair is looked at for its shape only - its length, whether its place is 0x100-aligned,
+// and, for an aligned one, whether a walk of the console's instruction formats (shader_walk) from its first word
+// lands on an end-of-program word and the rest up to the length is the filler word 0xBF9F0000, as in the
+// program's modules. No bytes are logged: shapes and counts only. The first 6 calls each, then a count of shapes
+// per pair at every power of two of calls.
+void note_compiled_pairs(int slot, const void* caller, const void* description) {
+    static std::map<std::string, unsigned long long> shapes;
+    static unsigned long long calls[2] = {};
+    const auto* base = static_cast<const std::uint8_t*>(description);
+    constexpr int kPairs = 12;
+    if (!base || !can_read(base, 8 + kPairs * 16)) {
+        return;
+    }
+    std::vector<std::string> pair_shapes;
+    std::string detail;
+    for (int i = 0; i < kPairs; ++i) {
+        std::uint64_t pointer = 0, length = 0;
+        std::memcpy(&pointer, base + 8 + i * 16, 8);
+        std::memcpy(&length, base + 16 + i * 16, 8);
+        char text[200];
+        if (!pointer && !length) {
+            std::snprintf(text, sizeof(text), "pair %d: empty", i);
+        } else if (length > (16u << 20) || !can_read(reinterpret_cast<const void*>(pointer), length ? length : 1)) {
+            std::snprintf(text, sizeof(text), "pair %d: not a readable (pointer, length)", i);
+            pair_shapes.push_back(text);
+            detail += std::string(" | ") + text;
+            break;
+        } else if ((pointer & 0xff) != 0 || (length & 3) != 0 || length == 0) {
+            std::snprintf(text, sizeof(text), "pair %d: %s, %llu bytes", i,
+                          length == 0         ? "a place with length 0"
+                          : (pointer & 0xff)  ? "unaligned place"
+                                              : "aligned place, length not whole words",
+                          static_cast<unsigned long long>(length));
+            const std::string shape = text;
+            pair_shapes.push_back(shape.substr(0, shape.rfind(',')));
+            detail += std::string(" | ") + text;
+            continue;
+        } else {
+            const auto* words = reinterpret_cast<const std::uint32_t*>(pointer);
+            const std::size_t count = static_cast<std::size_t>(length / 4);
+            const whiwhi::weave::WalkResult walk = whiwhi::weave::walk_program(words, count);
+            bool filler = walk.reached_end;
+            for (std::size_t w = walk.end_word_index + 1; filler && w < count; ++w) {
+                filler = words[w] == 0xBF9F0000u;
+            }
+            std::snprintf(text, sizeof(text), "pair %d: aligned place, %llu bytes, walk %s%s", i,
+                          static_cast<unsigned long long>(length),
+                          walk.reached_end ? "reaches end-of-program" :
+                          walk.stopped_unknown ? "stops on a word of no format" : "runs past the length",
+                          walk.reached_end ? (filler ? ", the rest filler" : ", the rest not all filler") : "");
+            const std::string shape = text;
+            pair_shapes.push_back(shape.substr(0, shape.find(',')) + shape.substr(shape.find(", walk")));
+            detail += std::string(" | ") + text;
+            continue;
+        }
+        pair_shapes.push_back(text);
+        detail += std::string(" | ") + text;
+    }
+    std::lock_guard<std::mutex> hold(g_log);
+    const unsigned long long nth = ++calls[slot == 57 ? 0 : 1];
+    for (const std::string& s : pair_shapes) {
+        ++shapes["slot " + std::to_string(slot) + " " + s];
+    }
+    if (nth <= 6) {
+        std::fprintf(stderr, "[d3d12_xs] device slot %d call %llu (returns to %p), its pairs:%s\n", slot, nth, caller,
+                     detail.c_str());
+    }
+    if ((nth & (nth - 1)) == 0 && nth >= 8) {
+        std::fprintf(stderr, "[d3d12_xs] device slot %d after %llu calls, the shapes of its pairs:\n", slot, nth);
+        for (const auto& [shape, n] : shapes) {
+            if (shape.rfind("slot " + std::to_string(slot) + " ", 0) == 0) {
+                std::fprintf(stderr, "[d3d12_xs]   %s: %llu\n", shape.c_str(), n);
+            }
+        }
+    }
+    std::fflush(stderr);
+}
 
 void log_slot(const char* kind, int kind_id, int slot, const void* caller, void* const* arguments) {
     want(caller, "not provided | %s method slot %d | answered not implemented", kind, slot);
     if (std::strcmp(kind, "device") == 0 && (slot == 57 || slot == 67)) {
         flow::note_order(slot);
+        note_compiled_pairs(slot, caller, arguments[0]);
     }
     std::lock_guard<std::mutex> lock(g_log);
     const unsigned long long key = (static_cast<unsigned long long>(kind_id) << 32) |
@@ -2623,15 +2704,16 @@ void send(std::uint32_t kind, HRESULT vkd3d, const std::string& payload) {
     wake.notify_one();
 }
 
-// Kind 1: a root signature as handed to the PC device, named by the PC object it became.
-void root_signature(const void* pc_signature, const void* blob, std::size_t bytes, HRESULT vkd3d) {
+// Kind 1: a root signature of the program's own code, as the weave made it for the PC device; kind 5: one a
+// library created, as given. Named by the PC object it became.
+void root_signature(const void* pc_signature, const void* blob, std::size_t bytes, HRESULT vkd3d, bool program) {
     if (!on() || !blob || !bytes) {
         return;
     }
     std::string p;
     put64(p, reinterpret_cast<std::uint64_t>(pc_signature));
     p.append(static_cast<const char*>(blob), bytes);
-    send(1, vkd3d, p);
+    send(program ? 1 : 5, vkd3d, p);
 }
 
 // Kind 2: a compute pipeline as handed to the PC device.
@@ -3626,7 +3708,7 @@ HRESULT __stdcall w_device_slot16(Wrap* self, void* a1, void* a2, void* a3, void
                                                     a4, a5, a6, a7, a8);
         void** const made = static_cast<void**>(a5);
         windows_check::root_signature(hr == 0 && made && *made ? to_pc(*made) : nullptr, renamed.data(), renamed.size(),
-                                      hr);
+                                      hr, true);
         if (hr == 0 && made && is_wrap(*made)) {
             static_cast<Wrap*>(*made)->layout_shape = shape;
             static_cast<Wrap*>(*made)->layout_places = places;
@@ -3640,7 +3722,7 @@ HRESULT __stdcall w_device_slot16(Wrap* self, void* a1, void* a2, void* a3, void
         hr = create_thunk<16, 4, 5, kRootSignature>(self, a1, a2, a3, a4, a5, a6, a7, a8);
         void** const made = static_cast<void**>(a5);
         windows_check::root_signature(hr == 0 && made && *made ? to_pc(*made) : nullptr, a2,
-                                      reinterpret_cast<std::size_t>(a3), hr);
+                                      reinterpret_cast<std::size_t>(a3), hr, false);
     }
     void** const out = static_cast<void**>(a5);
     if (hr == 0 && out && *out && shader_check_on()) {
