@@ -3159,3 +3159,15 @@ ExCorvus decided not to follow this further now; it is written down as a hint.
 - So the parcel is not something kept anywhere. It is put together in the moment, on the asking thread, after
   the first way (slot 57 or 67) is refused, and handed over from there. The program's prepared code stays in its
   own region of the memory library. Not measured yet: which code on that thread writes the parcel, and from what.
+## 2026-11-28 - correction: the compute parcel is put together before the first way is asked, in a scratch area on the stack (read in the exe)
+
+- fn 0x247fd30, the compute way, takes 0x32080 bytes of stack. At its start it names 0x32000 bytes of it, from
+  rsp+0x80, as the thread's scratch area: it writes the size and the start into the thread's own block (thread
+  storage +0x770 and +0x778). Then fn 0x86f8e0 fills the compute description on the stack, and the shader
+  container with it, into that scratch area. Only after that does the function ask slot 67 (through fn 0x2480050,
+  and only when the object at 0x75ddb90 exists), and then slot 62 with the same description when slot 67 gave
+  nothing.
+- So the parcel is not put together after the refusal, as the entry "the parcels are put together on the stack"
+  said for compute. It is made first, every time, and it is only handed over when the first way gives nothing.
+  The few milliseconds measured are the time between the two asks.
+- Graphics (slot 86, built by fn 0x86f090 at draw time) is not read in this way yet.
