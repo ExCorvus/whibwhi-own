@@ -65,6 +65,9 @@ WHIWHI_D3D12_XS_API unsigned long long __stdcall whiwhi_d3d12_view_pages_shown(v
 // per kind of object, which of those bytes the game has written, and returns how many.
 WHIWHI_D3D12_XS_API unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void);
 
+// The frame pacer's last 10 s: every frame call of that time, with the process time (called at a fault).
+WHIWHI_D3D12_XS_API void __stdcall whiwhi_d3d12_report_last_frames(void);
+
 // The shader store (ExCorvus, 2026-11-28: "we need to pretranslate shaders. it is the CURRENT PROBLEM"): every PC
 // shader the library writes is kept on this PC (%LOCALAPPDATA%\whiwhi\shader-store, never in the repository), one
 // file per build of this library. Called before the program's entry thread starts, this loads the store into
