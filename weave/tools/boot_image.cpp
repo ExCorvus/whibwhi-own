@@ -675,6 +675,16 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // The shader store (ExCorvus, 2026-11-28: "we need to pretranslate shaders"): the PC shaders written in
+        // earlier runs are loaded before the program's clock starts, not while it already counts.
+        if (const HMODULE graphics = GetModuleHandleA("d3d12_xs.dll")) {
+            if (const auto load = reinterpret_cast<unsigned long long(__stdcall*)(void)>(
+                    GetProcAddress(graphics, "whiwhi_d3d12_load_shader_store"))) {
+                load();
+            }
+        } else {
+            std::fprintf(stderr, "[boot] the graphics library is not loaded yet - no shader store before the start\n");
+        }
         ResumeThread(thread);
         std::fprintf(stderr, "[boot] entry thread resumed\n");
         std::fflush(stderr);
