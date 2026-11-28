@@ -82,7 +82,8 @@ std::string module_path(const wchar_t* name) {
 
 const char* kind_name(std::uint32_t kind) {
     switch (kind) {
-    case 1: return "root signature";
+    case 1: return "root signature (the program's, made by the weave)";
+    case 5: return "root signature (a library's, as given)";
     case 2: return "compute pipeline";
     case 3: return "pipeline stream";
     case 4: return "pipeline stream not copied";
@@ -177,7 +178,7 @@ int wmain(int argc, wchar_t** argv) {
         std::uint32_t windows = 0xFFFFFFFFu;
         std::string note;
         std::size_t at = 0;
-        if (kind == 1) {
+        if (kind == 1 || kind == 5) {
             const std::uint64_t id = get64(p, at);
             ID3D12RootSignature* signature = nullptr;
             windows = static_cast<std::uint32_t>(device->CreateRootSignature(
