@@ -5787,10 +5787,24 @@ HMODULE pc_d3d12() {
                 dir.resize(slash + 1);
             }
             const std::string vk = dir + "d3d12_vk.dll";
-            // Translated shaders stay in memory: vkd3d's on-disk shader cache is turned off unless the user
-            // has set the variable themselves.
+            // vkd3d's own pipeline cache (ExCorvus, 2026-11-28, AGENTS.md rule 5: on the PC, not committed) is kept
+            // in %LOCALAPPDATA%\whiwhi\vkd3d-cache, so that what the PC device built in an earlier run is there
+            // before the program asks again (measured 2026-11-28: building inside the PC device is the larger part
+            // of the time the program goes without a progress report). A path the user set themselves is kept.
             if (GetEnvironmentVariableA("VKD3D_SHADER_CACHE_PATH", nullptr, 0) == 0) {
-                SetEnvironmentVariableA("VKD3D_SHADER_CACHE_PATH", "0");
+                char base[MAX_PATH] = {};
+                const DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", base, sizeof(base));
+                if (n > 0 && n < sizeof(base)) {
+                    std::string cache = std::string(base) + "\\whiwhi";
+                    CreateDirectoryA(cache.c_str(), nullptr);
+                    cache += "\\vkd3d-cache";
+                    CreateDirectoryA(cache.c_str(), nullptr);
+                    SetEnvironmentVariableA("VKD3D_SHADER_CACHE_PATH", cache.c_str());
+                    logf("vkd3d's pipeline cache: %s\n", cache.c_str());
+                } else {
+                    SetEnvironmentVariableA("VKD3D_SHADER_CACHE_PATH", "0");
+                    logf("vkd3d's pipeline cache: no place for it (LOCALAPPDATA not readable) - turned off\n");
+                }
             }
             d3d12 = LoadLibraryExA(vk.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
             if (d3d12) {
