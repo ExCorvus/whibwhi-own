@@ -3111,3 +3111,19 @@ ExCorvus decided not to follow this further now; it is written down as a hint.
   program's fallbacks, taken because slots 57 and 67 are refused.
 - Not read: inside fn 0x247b6c0, which programs of one effect go which way, and whether the ray-tracing and
   global-illumination compute programs are told apart there. Calls through tables are not in this reading.
+## 2026-11-28 - where the pieces handed to slots 57 and 67 lie: two areas of the program's own memory (game test 19:35, measured)
+
+- weave/d3d12_xs.cpp (code_place): for every piece handed to device slots 57 and 67, the weave writes down which
+  of the memory library's regions holds it, with the type, protect and attributes words as the program gave them
+  (not read further), or what Windows reports for the place. It also records when a region is first named.
+  Counts only, no bytes.
+- Run 19:35, slot 57 after 16,384 calls and slot 67 after 2,048: every piece lies in one of two regions of
+  committed memory the program asked the memory library for (XMemVirtualAlloc). Both regions are first named at
+  54.9 s, with the first slot 67 call.
+  - The pieces that walk to an end of program (slot 57 pairs 2, 4 and 6; slot 67 pair 2) all lie in one region of
+    0x89800000 bytes (type 0x20003000, protect 0x2404, attributes 0x283).
+  - The pieces around them (slot 57 pairs 0, 1, 3, 5 and 7; slot 67 pairs 0, 1 and 3) all lie in another region
+    of 0x49400000 bytes (type 0x20003000, protect 0x22004, attributes 0x183).
+- So the code handed to slots 57 and 67 is already lying in the program's own memory, in one region of its own,
+  and the program only names where it is. No piece lies in a loaded file or in memory the library does not hold.
+  Not measured: when the program writes the code there, and where the containers handed to slots 62 and 86 lie.
