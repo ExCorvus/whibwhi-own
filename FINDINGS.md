@@ -2930,3 +2930,18 @@ the audio part of the weave.
   the descriptor in the driver's heap, the program's own number in its memory. On the console there is one memory:
   the library's write of a descriptor lands in the slot the program sees. A raw copy the program makes of such a
   slot (DESCRIPTORS.md C.2) copies its number, not the descriptor.
+## 2026-11-28 - the driver takes memory someone else chose as a descriptor heap (measured with the driver, no game run)
+
+- A second small probe (local, not in the repository) on the RX 9070 XT, driver 26.11.2, with VK_EXT_descriptor_heap
+  and VK_EXT_external_memory_host (no capture/replay feature enabled), on 1 MiB of plain CPU memory from
+  VirtualAlloc (64 KB aligned, like the program's heaps):
+  1. The driver writes a sampler descriptor straight into that CPU memory (vkWriteSamplerDescriptorsEXT, slot 3,
+     16 bytes): result 0; the slot then holds 00000000 01800000 08500000 00000000 - the same shape as the samplers in
+     the driver's heap in run 17:02.
+  2. The driver imports that memory (host memory types 0xaaaa), a buffer with descriptor-heap usage accepts types
+     0xa00 (types 9 and 11: host-visible and coherent, 11 also cached; alignment 4), the import as type 9 succeeds,
+     the buffer is bound to it and gets a GPU address. The descriptor written before is still in its slot.
+- So, on this PC, one memory can be both: the memory the CPU sees and writes, and the descriptor heap the driver
+  reads, at the address the CPU chose. Not measured yet: a shader reading a descriptor through such a heap (no
+  dispatch was made), and how vkd3d's own block in front of the slots (64 bytes, run 16:31) fits when the slots must
+  start at the program's address.
