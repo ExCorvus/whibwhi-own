@@ -2429,3 +2429,19 @@ the audio part of the weave.
 - So the program does not report progress while a wave of pipeline requests is being answered, and reports again
   right after it. Which thread waits for which is not measured. The watchdog's budget (30 s) is not near in this
   run; the time the pipelines take is time without an answer to it.
+## 2026-11-28 - the shader store: filled in one run, loaded before the start in the next (game tests 01:06, 01:17, measured)
+
+- weave/d3d12_xs.cpp keeps every PC shader it writes, and every refusal with its reason, in a store on the PC
+  (AGENTS.md rule 5; %LOCALAPPDATA%\whiwhi\shader-store, one file per build of the graphics library); the boot tool
+  loads it before the program's entry thread starts.
+- Run 01:06 (empty store): 3,148 translations were made, but only 1,111 different shaders were kept (735 of them
+  refusals). The difference: several of the program's threads ask for pipelines with the same shader at the same
+  moment, each writes it, and only the first is kept (about 2,000 translations were made twice or more). After
+  about 4,000 requests no new shader comes; the later requests only combine shaders already seen. Store file 1.9 MB.
+- Run 01:17 (same build): "loaded 1111 written shaders ... in 0.00 s, before the program starts". No shader was
+  written during the run (0 translations); the shaders were taken from the store 65,342 times. Pipelines made inside
+  the PC device: 3.68 s of thread time up to the 32,768th request (3.91 s in run 01:06).
+- The time without a progress report during the big wave: 1.62 s (run 00:36: 1.81 s). So the shaders were the
+  smaller part of it; the larger part is the PC device building the pipelines. The time before the first report
+  (57.1 s in this run, 51.3 s in run 00:36) is not changed by the store: no pipeline is asked before it.
+- Both runs ended as before at the user-interface fault image+0x161b994.
