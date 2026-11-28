@@ -3656,6 +3656,24 @@ HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, vo
                  "arguments 3 and 4: %p %p) - not covered yet, answered not implemented\n",
                  returns_to, file, offset, static_cast<unsigned long long>(pc.CS.BytecodeLength), zero1, zero2);
         });
+        // Step 0 of handing the program's own shaders to vkd3d-xbox (ExCorvus, 2026-11-28): the first three are also
+        // handed unchanged to the PC device, only to write down what it answers; the program's answer stays the
+        // one above. A pipeline the PC device made anyway is let go at once.
+        static std::atomic<int> handed{0};
+        if (handed.fetch_add(1) < 3) {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC unchanged = pc;
+            unchanged.pRootSignature = static_cast<ID3D12RootSignature*>(to_pc(pc.pRootSignature));
+            void* made = nullptr;
+            const HRESULT vkd3d = static_cast<ID3D12Device*>(self->pc)->CreateComputePipelineState(
+                &unchanged, *pc_identifier(kPipeline), &made);
+            logf("device slot 62: a console compute shader (%llu bytes) handed unchanged to the PC device, as a test "
+                 "only: answered 0x%lx, %s\n",
+                 static_cast<unsigned long long>(pc.CS.BytecodeLength), static_cast<unsigned long>(vkd3d),
+                 made ? "an object (let go)" : "no object");
+            if (made) {
+                static_cast<IUnknown*>(made)->Release();
+            }
+        }
         flow::done(0, timer, key, program_signature, 0x80004001L, false);
         return 0x80004001L;
     }
