@@ -3041,3 +3041,18 @@ ExCorvus decided not to follow this further now; it is written down as a hint.
     descriptors are made in vkd3d's own memory for them, the weave moving the handles there).
 - Not told apart yet: which of the changes the library makes (a view or sampler call) and which the program makes
   itself (its raw copies).
+## 2026-11-28 - the shell speaks what the library writes into the heaps held twice (game test 18:36, PASS, measured)
+
+- weave/d3d12_xs.cpp `speak_slots`: after every call that writes into a heap of type 0 or 1 that is still held
+  twice (the heaps shaders do not see: a view, a sampler, the program's own sampler call slot 61, its view call
+  slot 70, a copy through slot 23 or 24), the shell writes the same bytes into the memory the program sees, at the
+  same place. vkd3d keeps its own memory and its bookkeeping beside the slots; the program's raw copies (DESCRIPTORS.md
+  C.2) now read the descriptor itself. Heaps that are one memory are left alone. The listening line counts it.
+- Run 18:36: about 270 slots a second spoken (9 in each beat); in the program's memory of the resource heaps
+  shaders do not see, one slot changes in every beat (30 a second; it was not one in run 18:29). Heap comparison
+  at 64 s: the sampler heap shaders do not see holds the same 43 samplers in both memories (run 17:02: 43
+  different), the slots the program keeps its own numbers in (85) unchanged; the resource heaps shaders do not see:
+  the same in both. The heaps shaders see: one memory, the pulse of 3 to 5 slots a beat as before; the burst
+  before the fault (69-70 s: 1,262 newly filled, 60 emptied, up to 764 in one beat).
+- The program: 1,300 presents, no device removal, then the same fault at image+0x161b994 (about 70 s), and after
+  it the breakpoint at image+0x344196 on another thread again (seen since 2026-11-27 20:27).
