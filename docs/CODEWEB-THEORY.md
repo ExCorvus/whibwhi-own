@@ -81,6 +81,26 @@ hides the real cause. That is the thermometer being repaired instead of the feve
 The rules above are also a protection against that: let failures stand, follow the thread back, keep the words
 exact, and only accept a step when the whole program runs, not just one piece.
 
+## Open hypotheses
+
+These are ideas that have not been shown yet. Each one counts as a result only once it runs and a picture is on
+screen.
+
+**Two solutions, two languages, one fabric** (ExCorvus, 2026-11-28). The program solves the same problem, "how
+does the GPU get its code", in two ways. In one, it hands its code over as a parcel. In the other, the finished
+code is already lying in its own memory, and it only says where. The hypothesis: if the weave follows each way as
+the program means it, instead of forcing all of the code through one translator, both ways can be answered at the
+same time. One goes through Direct3D, carried out on Vulkan; the other goes through Vulkan straight to the driver.
+Both happen inside the same program, over the same memory and the same driver, without getting in each other's
+way, and the program gets a Direct3D answer either way.
+
+- *Measured so far:* the program asks for the "already in memory" way first, and only takes the parcel way when
+  the first is refused. The code of the first way lies in one area of the program's own memory.
+- *Not new by itself:* Direct3D and Vulkan in one process already exist (Direct3D carried out on Vulkan, shared
+  memory between the two, both side by side in compatibility layers). What could be new is that one program's own
+  two ways are answered in two languages at once, as one fabric.
+- *Not shown yet:* the second way is not built, and nothing of it runs.
+
 ## What it builds on
 
 Codeweb theory stands on the shoulders of others: programs like Wine and Proton, which answer the calls a
