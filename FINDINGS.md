@@ -2893,3 +2893,22 @@ the audio part of the weave.
   To measure first: what Wine answers for the game runtime (xgameruntime) and GameInput, which Windows answers here
   with its own files. The forks are separate repositories (AGENTS.md rule 8); their licences (Wine LGPL, Proton
   mostly BSD) allow it.
+## 2026-11-28 - the GPU on this PC answers in its own instruction words (measured with the driver, no game run)
+
+- A small probe (local, not in the repository) asked the graphics driver on this PC (AMD Radeon RX 9070 XT, driver
+  26.11.2, its LLPC compiler) for its own machine code of two small compute shaders, through VK_AMD_shader_info
+  (disassembly with the instruction words, and the binary: an ELF file of 7,552 and 10,928 bytes).
+- The driver's own words, set against the program's own GPU code as the weave reads it (581 modules, every walk
+  ending on its end-of-program word, 2026-11-26):
+  - end of program: the driver writes 0xBFB00000; the program's code ends on 0xBF810000.
+  - waiting for memory: the driver writes separate waits per kind (s_wait_kmcnt 0xBFC70000, s_wait_loadcnt
+    0xBFC00000) and an extra scheduling word (s_delay_alu 0xBF87....); the program's code has one wait instruction
+    for all kinds.
+  - scalar loads (s_load_b128: F4004000 F8000000) and buffer loads and stores (buffer_store_b32: C406807C ...)
+    are laid out differently from the scalar and buffer loads of the program's code, which the weave reads by the
+    public layout of the program's GPU generation (shader_walk.cpp: MUBUF/MTBUF of that generation).
+  - cross-lane work is there in the driver's own code: DPP steps (v_add_nc_u32_dpp ... 0xFA), v_permlanex16,
+    v_permlane64, v_readfirstlane; the compute shaders ran 64 lanes wide (exec as a 64-bit mask).
+- So the GPU of this PC does not take the program's GPU code word for word: the end word alone already differs.
+  What the GPU runs is written by its driver, from a shader the driver is handed (SPIR-V through vkd3d). Not
+  measured: a full table of which of the program's instructions keep their words on this GPU.
