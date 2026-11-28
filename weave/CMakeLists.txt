@@ -23,6 +23,23 @@ add_library(d3d12_xs SHARED d3d12_xs.cpp inflate.cpp shader_check.cpp shader_con
                             shader_emit_flow.cpp shader_access.cpp shader_dxbc.cpp shader_pc.cpp)
 target_compile_definitions(d3d12_xs PRIVATE WHIWHI_D3D12_XS_BUILD)
 target_link_libraries(d3d12_xs PRIVATE onecore)
+# The shader store (AGENTS.md rule 5) is named by the translator's own code, not by the whole library: a hash of
+# the translator's source files, worked out again whenever one of them changes.
+file(GLOB WHIWHI_TRANSLATOR_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shader_*.cpp
+     ${CMAKE_CURRENT_SOURCE_DIR}/shader_*.hpp ${CMAKE_CURRENT_SOURCE_DIR}/inflate.cpp
+     ${CMAKE_CURRENT_SOURCE_DIR}/inflate.hpp)
+list(SORT WHIWHI_TRANSLATOR_FILES)
+set(_translator_hashes "")
+foreach(_file IN LISTS WHIWHI_TRANSLATOR_FILES)
+    file(SHA256 "${_file}" _file_hash)
+    get_filename_component(_file_name "${_file}" NAME)
+    string(APPEND _translator_hashes "${_file_name}=${_file_hash};")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_file}")
+endforeach()
+string(SHA256 WHIWHI_TRANSLATOR_HASH "${_translator_hashes}")
+string(SUBSTRING "${WHIWHI_TRANSLATOR_HASH}" 0 16 WHIWHI_TRANSLATOR_HASH)
+target_compile_definitions(d3d12_xs PRIVATE WHIWHI_TRANSLATOR_HASH="${WHIWHI_TRANSLATOR_HASH}")
+message(STATUS "shader store: translator ${WHIWHI_TRANSLATOR_HASH}")
 
 # The console's texture-computer library and ray-tracing builder library, as honest skeletons.
 add_library(xg_xs SHARED xg_xs.cpp)
