@@ -2533,3 +2533,22 @@ the audio part of the weave.
 - Windows' debug layer (d3d12SDKLayers.dll) is not installed on this PC, so Windows gives its answer numbers only, no
   reasons. Which root signatures the 17 are (the program's, renamed by the weave, or a library's as given) is not
   measured yet.
+## 2026-11-28 - which root signatures Windows refuses, and what the program hands over with device slots 57 and 67 (game test 03:25, measured)
+
+- The Windows check (scripts/windows_check_test.ps1) now tells the program's root signatures (made by the weave from
+  the program's own layout) from a library's (handed over as given). Run 03:25: the program's 89 are made by vkd3d and
+  by Windows alike; the 17 Windows refuses (0x80004005) are all a library's, as given. Pipeline streams as before:
+  2,921 made by both, 4 refused by Windows (0x80070057). The 53 compute pipelines of that library are not handed to
+  Windows because their root signature was not made there.
+- weave/d3d12_xs.cpp: for device slots 57 (graphics) and 67 (compute) the weave reads the 12 (pointer, length) pairs
+  after the root signature and logs only their shape: empty, not readable, aligned to the GPU's code alignment or
+  not, and for aligned ones whether the weave's own instruction walker reaches an end-of-program within the length.
+  No bytes are logged.
+- Slot 57, 16,384 calls: pairs 2 and 4 are aligned blocks; in 13,744 (pair 2) and 12,368 (pair 4) calls the walker
+  reaches an end-of-program (inference: the program's compiled GPU code, two stages; pair 2 empty in 579 calls,
+  pair 4 empty in 4,016). In 2,061 (pair 2) the walker stops on a word it has no format for. Pairs 0, 1, 3, 5 are
+  unaligned blocks of tens to hundreds of bytes (inference: descriptions); pairs 6-11 empty in all.
+- Slot 67, 2,048 calls: pair 2 is the aligned block (end-of-program in 1,213, unknown word in 835); pairs 0, 1, 3
+  unaligned; pair 4 is not a readable (pointer, length) in 2,036.
+- Both: after the end-of-program the rest of the block is not all filler. Not read further.
+- Fault unchanged at image+0x161b994.
