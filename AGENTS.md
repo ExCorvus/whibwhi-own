@@ -70,6 +70,9 @@ What works today, and where a run currently stops, is in the **Current state** b
 - **Running the game:** only the coordinating agent starts the game's entry point, and only one run at a time.
 - **The game test before every code commit:** a change under `weave/` or `scripts/` is committed only after
   `scripts\game_test.ps1` has passed on that exact build (docs/BUILD-AND-RUN.md, "The game test").
+- **Measure only when it has changed** (ExCorvus, 2026-11-28: "only measure when it has changed ... we cannot test
+  every time"). The measurements of `measure/` run again only when what they read changed (the game folder, the
+  exe, the scripts, the weave's PC graphics library); otherwise the game test takes over the last results.
 - **Subagents:** allowed when ExCorvus has agreed to it. A subagent never starts the game, never uses the GPU and
   never pushes.
 - **ExCorvus decides** the scope of the project and anything that changes how it is described in public.
