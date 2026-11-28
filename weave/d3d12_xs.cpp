@@ -3632,8 +3632,10 @@ HMODULE pc_d3d12();
 // parameters in the same order, with the same kinds, visibility and flags; what each parameter's shaders read is
 // named by the parameter's number as register space. A descriptor table of N places gives its space one range
 // of each kind (constant buffers, read-only and writable resources; or samplers) over places 0 to N - 1, from
-// register 0, so that register k of space p is place k of the table whatever the shader holds there. N is the
-// table's own size (the end of its last range; no end if a range has none). Root constants, root buffers: register
+// register 0, so that register k of space p is place k of the table whatever the shader holds there. The ranges
+// have no end: on the console a table is the address the program sets, and its shaders read the place their own
+// tables give, past the end of the root signature's ranges too (the shader table check, FINDINGS 2026-11-28: of
+// 3,856 table resources, 2,255 sit at a place the named table's ranges do not have). Root constants, root buffers: register
 // 0 of space p. The fixed samplers: register i of the space after the last parameter (how a console program
 // receives one is not read yet; the pass refuses them). Returns an empty blob, with the reason, when the
 // description cannot be read or written.
@@ -3674,22 +3676,12 @@ std::vector<std::uint8_t> program_layout_signature(const void* blob, std::size_t
         D3D12_ROOT_PARAMETER1& q = parameters[p];
         switch (q.ParameterType) {
         case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE: {
-            UINT end = 0, next = 0;
-            bool samplers = false, endless = false;
+            bool samplers = false;
             for (UINT i = 0; i < q.DescriptorTable.NumDescriptorRanges; ++i) {
-                const D3D12_DESCRIPTOR_RANGE1& g = q.DescriptorTable.pDescriptorRanges[i];
-                samplers = samplers || g.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
-                const UINT start =
-                    g.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND ? next
-                                                                                              : g.OffsetInDescriptorsFromTableStart;
-                if (g.NumDescriptors == UINT_MAX) {
-                    endless = true;
-                } else {
-                    next = start + g.NumDescriptors;
-                    end = (std::max)(end, next);
-                }
+                samplers = samplers || q.DescriptorTable.pDescriptorRanges[i].RangeType ==
+                                           D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
             }
-            const UINT count = endless ? UINT_MAX : end;
+            const UINT count = UINT_MAX;
             shape[p] = samplers ? 'S' : 'T';
             places[p] = count;
             if (samplers) {
