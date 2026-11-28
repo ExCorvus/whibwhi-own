@@ -40,6 +40,9 @@ public static class FullscreenWindow {
     [DllImport("user32.dll")] public static extern IntPtr SetWindowLongPtr(IntPtr h, int index, IntPtr value);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr h);
 
     public static IntPtr Find(uint pid) {
         IntPtr found = IntPtr.Zero;
@@ -97,3 +100,31 @@ $ok = [FullscreenWindow]::SetWindowPos($window, [IntPtr]::Zero, $m.L, $m.T, $m.R
 $on = [FullscreenWindow]::Info([FullscreenWindow]::MonitorFromWindow($window, 2))
 Note ("set frameless over {0}: {1}; now {2}, style 0x{3:x}, on {4}" -f $Monitor, $(if ($ok) { 'done' } else { 'Windows refused' }),
     (Place $r), [FullscreenWindow]::GetWindowLongPtr($window, -16).ToInt64(), $on.Device)
+# On the console the program's window is the screen, in front. Windows lets a process bring a window to the front
+# only in some cases; the answer is written down as it comes.
+$front = [FullscreenWindow]::SetForegroundWindow($window)
+Note ("brought to the front: {0}" -f $(if ($front) { 'yes' } else { 'Windows refused' }))
+
+# Then, as long as the program runs: every change of the window's place, style, front state or responsiveness is
+# written down with its time (seconds since this script found the window), and a place other than the monitor is
+# set back to the monitor once each time it changes (also written down).
+$found = Get-Date
+$last = ''
+while (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) {
+    Start-Sleep -Milliseconds 500
+    if (-not [FullscreenWindow]::GetWindowRect($window, [ref]$r)) { break }
+    $style = [FullscreenWindow]::GetWindowLongPtr($window, -16).ToInt64()
+    $isFront = [FullscreenWindow]::GetForegroundWindow() -eq $window
+    $hung = [FullscreenWindow]::IsHungAppWindow($window)
+    $now = "{0}, style 0x{1:x}, in front: {2}, not responding: {3}" -f (Place $r), $style, $isFront, $hung
+    if ($now -ne $last) {
+        $t = ((Get-Date) - $found).TotalSeconds
+        Note ("{0:0.0} s: {1}" -f $t, $now)
+        $last = $now
+        if ($r.L -ne $m.L -or $r.T -ne $m.T -or $r.R -ne $m.R -or $r.B -ne $m.B) {
+            $ok = [FullscreenWindow]::SetWindowPos($window, [IntPtr]::Zero, $m.L, $m.T, $m.R - $m.L, $m.B - $m.T, 0x260)
+            Note ("{0:0.0} s: set back over {1}: {2}" -f $t, $Monitor, $(if ($ok) { 'done' } else { 'Windows refused' }))
+        }
+    }
+}
+Note 'the program ended'
