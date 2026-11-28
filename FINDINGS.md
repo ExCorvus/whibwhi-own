@@ -32,7 +32,7 @@ below it is the dated log, oldest entry first. A later entry overrides an earlie
   or sent a chad page, so the sound round trip is not tested.
 - **Storage:** the weave's storage library reads with one event per reading thread (fix of 18:20); no read has
   failed since.
-- **Graphics:** a real Direct3D 12 device on Vulkan through vkd3d-proton (forks ExCorvus/vkd3d-proton and
+- **Graphics:** a real Direct3D 12 device on Vulkan through vkd3d-proton (forks ExCorvus/vkd3d-xbox and
   ExCorvus/dxil-spirv-xbox, branch whibwhi-own) on the RX 9070 XT. Pipelines are made with the program's own root
   signatures; rectangle and quad lists are made as triangle pipelines, and draws with them are still held (steps 2
   and 3 not built). At 20:05, of 32,768 pipeline requests 2,052 were made (42 shaders); the largest refusal, 29,608
