@@ -2945,3 +2945,22 @@ the audio part of the weave.
   reads, at the address the CPU chose. Not measured yet: a shader reading a descriptor through such a heap (no
   dispatch was made), and how vkd3d's own block in front of the slots (64 bytes, run 16:31) fits when the slots must
   start at the program's address.
+## 2026-11-28 - vkd3d's heap safeguard switched off for two runs: the block in front of the slots is gone, the rest unchanged (game tests 17:37, 17:40, measured)
+
+- vkd3d switches "descriptor heap robustness" on for every program when it runs on the driver's descriptor heaps
+  (libs/vkd3d/state.c, "Too much content in the wild is just straight up broken"): shaders get the heap's size and
+  a bad slot number is clamped to a null descriptor; for that vkd3d keeps a 64-byte block in front of the slots.
+  The program's own GPU code reads its slots directly by place (its tables, shader_program.hpp). vkd3d's own
+  switch VKD3D_CONFIG=no_default_heap_robustness was set for these two runs only (environment, no code change).
+- Both runs: vkd3d logs "Disabling heap redzone."; the driver's heap shaders see now starts on a 64 KB boundary
+  (earlier 0x40 after it). No device removal, no driver failure.
+- Run 17:37 (120 s): the switch changes vkd3d's pipeline cache key ("Cannot load existing on-disk cache due to
+  driver version mismatch"), so every pipeline was built anew; the program was still inside its loading watch
+  scope at 121 s (about 270 pipelines a second), 1 present, no fault - not a result about the switch.
+- Run 17:40 (300 s, cache written by 17:37): loading watch scope 59.3 -> 89.8 s, frames 61.6 -> 106 s (1,289
+  presents), then the same fault at image+0x161b994 as in every run. The heap comparison is as before (slots of
+  the program's memory hold the program's numbers, the driver's hold descriptors).
+- Read in vkd3d (not measured in a run): its GPU handles for a heap are numbers it makes up (a heap number in the
+  upper bits and the slot's place; device.c d3d12_device_get_descriptor_heap_gpu_va), not the GPU address of the
+  heap memory; the heaps shaders do not see carry marks in their CPU handles' low bits and vkd3d keeps its own
+  data for each slot beside them, which a raw copy of 32 bytes does not carry.
