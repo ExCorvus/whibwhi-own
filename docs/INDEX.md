@@ -33,6 +33,9 @@ Not all shaders come the same way. Do not treat them all the same.
 - **Slot 57** (graphics base pipelines, asked first): bare code pieces plus descriptions, no container. Never
   answered so far. FINDINGS 2026-11-28 "what device slots 57, 61 and 67 are handed", "the code handed to device
   slots 57 and 67 is not the code inside the containers", "slot 57 makes base pipelines".
+- **Where the 57/67 pieces lie:** the code is in one region of the program's own memory, and the pieces around it
+  are in another. The program names the place; it hands over no container. FINDINGS 2026-11-28 "where the pieces
+  handed to slots 57 and 67 lie".
 - **Slot 55:** a pipeline derived from a base that slot 57 made. Never reached, because slot 57 is never answered.
   [exe-map/GRAPHICS-CALLS.md](exe-map/GRAPHICS-CALLS.md).
 - **Slot 86** (graphics, the fallback when no base pipeline exists): a stream with one container per stage. The
