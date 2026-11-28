@@ -2815,3 +2815,17 @@ the audio part of the weave.
   image+0x161b994 did not come within 120 s. Before this, the refused pipelines cost almost no time, so the
   loading ended at once and the user interface came; now each is made by the PC driver. vkd3d's pipeline cache is
   filled in this run; whether the next run is faster is not measured yet.
+## 2026-11-28 - second run with the sampler heap: the loading ends at 76 s, frames for 10 s, then the same fault (game test 15:55, measured)
+
+- Same build as 15:51, 300 s allowed, vkd3d's pipeline cache filled by the run before (11 MB in two files).
+- Pipelines: 40-60 s of the process 42,597 asked, 41,775 made; 60-80 s 10,556 asked, 7,744 made; from 80 s 4,151
+  asked, 44 made. Up to request #53,656: 49,560 made, 4,096 not. The late refusals are new shaders meeting the
+  translator's remaining gaps (vertex MUBUF 0, SOP1 15, SOP2 53, VOP1 53/54, reads s0 / v3 before any write; pixel
+  VOP3 257/320/785, SOP1 11, a texel read whose values tell no kind of number, data after the end-of-program word).
+- The watch scope opened at 50.6 s closes at 76.1 s: the loading ended, 25 s after it began (in the run before it
+  was still open at 121 s). Frames from 77.9 s to 87.9 s, 883 presents; the watchdog's crash callback alternates
+  with the run loop's marker as in the runs before 15:51. Then the fault at image+0x161b994 (read at 0x8), at
+  about 89 s of the process.
+- Correction to the entry of 15:51: there I wrote that the fault had probably followed from the refused pipelines.
+  It did not: with the loading over, the program reaches its user interface and the fault comes as before. It is
+  its own cause, after the loading.
