@@ -94,8 +94,27 @@ $measureLog = Join-Path $run 'measure.txt'
 $measureFail = New-Object System.Collections.Generic.List[string]
 $measureDir = Join-Path $repo 'measure'
 $measureTools = Join-Path $outFull 'measure-tools'
+# Measured only when something they read has changed (ExCorvus, 2026-11-28: "only measure when it has changed"):
+# the scripts take 9 minutes and their input is the read-only game folder. Their key is the game folder's listing
+# (names, sizes, times), the exe's hash, every script in measure/ and the build's PC graphics library (the C++
+# measurement runs beside it). With the same key, the results of the run that measured them are taken over, and
+# measure.txt says so and from which run.
+$measureCache = Join-Path $outFull 'measure-cache'
+$keyRows = @("game $before", "exe $exeHashBefore") +
+    @(Get-ChildItem -LiteralPath $measureDir -File | Sort-Object Name | ForEach-Object { "$($_.Name) $((Get-FileHash -LiteralPath $_.FullName).Hash)" }) +
+    @('d3d12_vk.dll', 'd3d12core.dll' | ForEach-Object { "$_ $((Get-FileHash -LiteralPath (Join-Path $build $_)).Hash)" })
+$measureKey = $keyRows -join "`n"
+$cachedKey = Join-Path $measureCache 'key.txt'
+$reuse = (Test-Path -LiteralPath $cachedKey) -and ((Get-Content -LiteralPath $cachedKey -Raw).TrimEnd() -eq $measureKey.TrimEnd())
+if ($reuse) {
+    $from = (Get-Content -LiteralPath (Join-Path $measureCache 'from.txt') -Raw).Trim()
+    Add-Content -LiteralPath $measureLog -Value "---- not measured again: the game folder, the exe, measure/ and the PC graphics library are the same as in $from; its results:" -Encoding utf8
+    Add-Content -LiteralPath $measureLog -Value (Get-Content -LiteralPath (Join-Path $measureCache 'measure.txt')) -Encoding utf8
+    Get-Content -LiteralPath (Join-Path $measureCache 'fail.txt') -ErrorAction SilentlyContinue | Where-Object { $_ } | ForEach-Object { $measureFail.Add($_) }
+    Write-Host "measurements: unchanged since $from - its results are taken over ($($measureFail.Count) failing)"
+}
 $ErrorActionPreference = 'Continue'  # a line a tool writes to its error output is part of its record, not a stop
-foreach ($script in Get-ChildItem -LiteralPath $measureDir -File | Where-Object { $_.Extension -in '.py', '.cpp' } | Sort-Object Name) {
+foreach ($script in Get-ChildItem -LiteralPath $measureDir -File | Where-Object { -not $reuse -and $_.Extension -in '.py', '.cpp' } | Sort-Object Name) {
     $text = Get-Content -LiteralPath $script.FullName -Raw
     $usage = [regex]::Match($text, 'game folder>\\+([A-Za-z0-9_.]+)')
     if (-not $usage.Success) {
@@ -131,6 +150,13 @@ foreach ($script in Get-ChildItem -LiteralPath $measureDir -File | Where-Object 
     if ($code -ne 0) { $measureFail.Add("measure/$($script.Name): $(if ($last) { $last } else { "exit $code" }) (measure.txt)") }
 }
 $ErrorActionPreference = 'Stop'
+if (-not $reuse) {
+    New-Item -ItemType Directory -Force -Path $measureCache | Out-Null
+    Copy-Item -LiteralPath $measureLog (Join-Path $measureCache 'measure.txt') -Force
+    Set-Content -LiteralPath (Join-Path $measureCache 'fail.txt') -Value @($measureFail) -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $measureCache 'from.txt') -Value "run-$stamp" -Encoding utf8
+    Set-Content -LiteralPath $cachedKey -Value $measureKey -Encoding utf8
+}
 $log = Join-Path $run 'run.err'
 $env:WHIWHI_CALL_LEDGER = Join-Path $run 'calls.tsv'
 $env:WHIWHI_WANTS_LEDGER = Join-Path $run 'wants.txt'
