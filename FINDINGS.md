@@ -2771,3 +2771,17 @@ the audio part of the weave.
   heap by number, the same way Windows' own D3D12 allows it; the program writes them there through slot 61.
 - What is missing, from this: the samplers are never written (slot 61 not answered), and the translator gives the
   sampler as part of root parameter 0 instead of the sampler heap the flag names.
+## 2026-11-28 - device slot 61 answered: the program's samplers written into Windows' sampler heap (game test 15:35, measured)
+
+- Read in the exe (docs/exe-map/DESCRIPTORS.md section A, one row corrected: description +0x40 is the record's
+  byte +0x09 when the flags' bit 7 is set, else 1): the sampler record's flags word fits Windows' own filter number
+  (default 0x15 = MIN_MAG_MIP_LINEAR, bit 0x40 anisotropic, bits 7-8 the reduction); fn 0x12b96b0 takes it apart
+  into the description's fields +0x04..+0x14, and after slot 61 the program copies the place into its
+  shader-visible sampler heap with the public copy (device slot 24, one descriptor, type 1).
+- weave/d3d12_xs.cpp, device slot 61: the description is put back together into Windows' sampler description the
+  way fn 0x12b96b0 took it apart, and Windows' CreateSampler writes it at the place the program names. Stated
+  choices: a comparison sampler is told by its comparison function not being 1; an address mode 0 is given as 1.
+- Run 15:35 (PASS): all 49 calls answered; every sampler lies in the sampler heap (type 1). Filters 0x15 (linear),
+  0x14 (linear, mip point), 0x0 (point), 0x55 (anisotropic, 4 or 8); address modes 1-4; LOD 0..12, bias 0; no
+  comparison sampler. No device removal. The shaders still take their samplers from root parameter 0 (the
+  29,195 refusals remain), so nothing reads these yet; the fault at image+0x161b994 is unchanged.
