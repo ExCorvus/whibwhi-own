@@ -688,19 +688,48 @@ int main(int argc, char** argv) {
         ULONGLONG longest = 0;
         unsigned long long last = *progress;
         unsigned long long changes = 0;
+        // The stamp is the QueryPerformanceCounter value of the report itself, so the report's own moment is read
+        // from it, not the moment it was seen. It is given in seconds since the process was created, the time the
+        // graphics library's "[pipeline flow]" lines use, so the two can be laid side by side.
+        LARGE_INTEGER frequency{};
+        QueryPerformanceFrequency(&frequency);
+        FILETIME created{}, unused1{}, unused2{}, unused3{};
+        GetProcessTimes(GetCurrentProcess(), &created, &unused1, &unused2, &unused3);
+        const unsigned long long created_at =
+            (static_cast<unsigned long long>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+        const auto run_seconds_of = [&](unsigned long long counter) {
+            FILETIME now_file{};
+            LARGE_INTEGER now_counter{};
+            GetSystemTimePreciseAsFileTime(&now_file);
+            QueryPerformanceCounter(&now_counter);
+            const unsigned long long now_at =
+                (static_cast<unsigned long long>(now_file.dwHighDateTime) << 32) | now_file.dwLowDateTime;
+            const double now_run = static_cast<double>(now_at - created_at) / 1e7;
+            return now_run - static_cast<double>(static_cast<long long>(now_counter.QuadPart) -
+                                                 static_cast<long long>(counter)) /
+                                 static_cast<double>(frequency.QuadPart);
+        };
+        double last_report = -1;
         DWORD wait = WAIT_TIMEOUT;
         while (wait == WAIT_TIMEOUT && GetTickCount64() - started < static_cast<ULONGLONG>(seconds) * 1000) {
-            wait = WaitForSingleObject(thread, 500);
+            wait = WaitForSingleObject(thread, 50);
             const ULONGLONG now = GetTickCount64();
             const unsigned long long value = *progress;
             if (value != last) {
                 last = value;
                 changed_at = now;
                 ++changes;
-                if (changes <= 40) {
-                    std::fprintf(stderr, "[boot] progress stamp: new report %llu at %.1f s\n", changes,
-                                 static_cast<double>(now - started) / 1000.0);
+                if (changes <= 200) {
+                    const double report = run_seconds_of(value);
+                    char gap[64] = "";
+                    if (last_report >= 0) {
+                        std::snprintf(gap, sizeof(gap), ", %.3f s after the one before", report - last_report);
+                    }
+                    std::fprintf(stderr, "[boot] progress stamp: new report %llu at %.1f s (the report itself at %.3f s "
+                                         "of the process%s)\n",
+                                 changes, static_cast<double>(now - started) / 1000.0, report, gap);
                     std::fflush(stderr);
+                    last_report = report;
                 }
             } else if (value != 0 && now - changed_at > longest) {
                 const ULONGLONG before = longest;
