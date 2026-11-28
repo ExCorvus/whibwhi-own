@@ -2717,3 +2717,18 @@ the audio part of the weave.
   own scaling, the screen being at 150 %); set frameless at 3840 x 2160 on DISPLAY6; the log window shown on
   DISPLAY1. "Brought to the front: Windows refused" (started from a console in the background, as at 12:43). The
   rectangle pipeline made, rectangles drawn; the end as before.
+## 2026-11-28 - the shell's process tells Windows what it is: made for Windows 10/11, aware of each screen's scaling (game test 14:15)
+
+- ExCorvus: "it needs to seem the same for Windows"; "the shell part of the software is where the weaver weaves
+  from". Measured: the executable has no resource section, so no manifest of its own; the program runs in the
+  process of boot_image.exe, and that process's manifest held only the execution level (asInvoker). So Windows took
+  the process for an old program: no Windows version named as the one it was made for, and no word on screen
+  scaling - Windows scaled the window itself (run 14:11: the program's 3840 x 2160 window placed at 5760 x 2190 on a
+  screen at 150 %).
+- weave/tools/boot_image.manifest (embedded by the linker, weave/CMakeLists.txt): supportedOS Windows 10/11, and
+  dpiAware true/pm with dpiAwareness PerMonitorV2 (Windows hands the process real pixels, as nothing scales the
+  program's window on the console). Read back from the built boot_image.exe with mt.exe: both are in it.
+- Run 14:15: PASS. Windows placed the program's window at 0,0 3840 x 2160 on DISPLAY6 by itself - exactly the
+  program's own size and the screen's; the swap chain 3840 x 2160; rectangles drawn; the end as before (fault
+  image+0x161b994, then the breakpoint image+0x344196). Brought to the front: Windows refused (the run started from
+  a console in the background).
