@@ -2482,3 +2482,24 @@ the audio part of the weave.
 - The gate byte 0xa9438f4 is 0 for the whole run, so the version gate never reaches its Windows-version test and
   device slot 49 is not called because of that byte, not because of the Windows version. In the exe the byte is
   read at 34 places and has no direct store, so it is filled some other way (not read further).
+## 2026-11-28 - what device slots 57, 61 and 67 are handed (game test 02:37, measured; answers unchanged)
+
+- weave/d3d12_xs.cpp logs, for device slots 57, 61 and 67 (all still answered "not implemented"), the thread and
+  the first 0x60 bytes behind each of the first two arguments, as words (slot 61 up to 64 calls, 57 and 67 the
+  first 6). In the exe, slot 57 is called in fn 0x24774c0 with (a block, 0x61e06b8 = IID_ID3D12PipelineState, a
+  result slot) and its HRESULT is checked (negative -> 0x2477a07).
+- Slots 57 and 67 both get IID_ID3D12PipelineState as their second argument: both ask for a pipeline object.
+  Their first argument is a pointer (the root signature, as in slot 62) followed by pairs of (pointer, length):
+  for slot 67 blocks of 0x1c and 0x14 bytes, then one of 0x180-0x2c0 bytes at a 0x200-aligned place, then 0x118-0x1d8
+  bytes, two pointers and an 8-byte number that differs per call; for slot 57 a block of 0x184 bytes, one of 0xbc,
+  then 0x200-aligned blocks of 0x140-0x200 bytes each with a block of 0xd0 next to it, one pair per stage (one call
+  has an empty pair). Reading (inference, not measured: the blocks' bytes were not read): these are the program's
+  own compiled GPU code at aligned places with their descriptions - a pipeline made from already compiled code,
+  graphics (57, 25,450 requests in run 01:43) and compute (67, 2,689). The earlier reading of slot 67 as a cache
+  lookup (docs/exe-map/SHADER-PATH.md) does not fit these arguments.
+- Slot 61 (the program's only way to make a sampler, DESCRIPTORS.md A): 46 calls, 26 different descriptions. Word +0x00 is 0; +0x04/+0x08 take 1, 2 or 3 (always equal to each other); +0x0c and +0x10 take 1
+  or 2; +0x14 is 0; +0x18/+0x1c/+0x20 take 1, 2, 3, 4 (the public address modes wrap, mirror, clamp, border);
+  +0x24 0.0 and +0x28 12.0 (min and max LOD); +0x30 0.0 (bias); +0x34 takes 1, 4 or 8 and is above 1 only where
+  +0x04 is 3 (reading: maximum anisotropy, 3 = anisotropic filter); +0x40 is 1; +0x44..+0x50 are 0 or four times
+  1.0, the 1.0 only with address mode 4 (border colour). So a PC sampler description can be read from all fields
+  except the exact meaning of the values 1/2 at +0x04..+0x10 (point or linear for min, mag, mip).
