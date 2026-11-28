@@ -2862,3 +2862,18 @@ the audio part of the weave.
   inflate.*, plus kStoreCaller in d3d12_xs.cpp for the place that calls it), not by the whole library: a change
   elsewhere in the weave keeps it. AGENTS.md rule 5 says so. Run 16:14 (PASS) started the new store
   (translator-1468d784190cabc4-1.bin, 5.9 MB).
+## 2026-11-28 - the code reader knows the extension word and programs with several ends: 69 of 2,041 compute shaders left unread, 55 hold the ray test (game test 16:31, measured)
+
+- weave/shader_walk.cpp: a VOP1/VOP2/VOPC whose first source field is 0xF9 (SDWA), 0xFA (DPP16), 0xE9 or 0xEA (DPP8)
+  is two words (public instruction set of this GPU generation). weave/shader_program.cpp: a module's program runs
+  to the last end-of-program word that only filler follows (the walk goes on from each end). weave/shader_pc.cpp:
+  the translator refuses such an instruction by name ("its cross-lane form (DPP)" / "its sub-word form (SDWA)"),
+  since it carries one lane and the field is not an inline constant. Tests: test_shader_walk (the forms, a DPP
+  word starting with 0xFF), test_shader_program (a program with a second end).
+- Run 16:31 (PASS, the translator changed, so a new shader store): of 2,041 different compute shaders of the
+  program's own, 69 are left unread (was 1,170); 55 hold the ray test (was 14 counted). The 69 reach a second end
+  and then run out of words. Graphics, slot 86: after 49,152 requests 48,251 made, as before; some pixel shaders
+  now stop one step later, in the decode ("the program ends at word N but there are M words after it": the
+  decode does not follow several ends yet), the same shaders that were refused before.
+- With vkd3d's cache the loading ended at 64.2 s; the fault at image+0x161b994 came at about 65 s, then the
+  breakpoint at image+0x344196 on another thread, as before.
