@@ -2466,3 +2466,19 @@ the audio part of the weave.
   each returns to in the program: Temp notes; command-list slot 72 returns into a function one of whose callers is
   a progress report of the watchdog (fn 0xc9e350, MAP.md 4.6); slots 131 and 132 are the buffer requests made right
   after each frame list is created (COMMAND-LIST.md).
+## 2026-11-28 - the watchdog's whole state over a run, and the version gate's byte (game test 02:24, measured)
+
+- weave/tools/boot_image.cpp also reads, every 50 ms and only reading, the rest of the watchdog's state
+  (docs/exe-map/MAP.md section 4: pause 0x71b6330, kick 0x71b6331, open watch scopes 0x71b6334, stop 0x71b6340,
+  crash callback 0x71b6348) and two bytes of the one version gate in fn 0x2478440 (0xa9438f4, and 0x765a6d9 that
+  is set when device slot 49 is called), and logs each change.
+- Pause, kick and stop stay 0 for the whole run. One watch scope is open from 3.4 s to 56.0 s: all of loading runs
+  under the watchdog's long budget (300 s). After that, scopes open and close for a few tenths of a second each.
+- The crash callback is set at 0.1 s to image+0x4380, which is an empty function (a single ret). From 57.7 s, when
+  frames run, it switches back and forth between that and image+0x258b000 (`mov dword [0], 0x2ef1e94b; ret` - the
+  program's own crash with a marker number, MAP.md 4.5): the run loop arms the marker for part of each frame. The
+  fault in the user interface (image+0x161b994, at 60.4 s) came while the marker was armed; the callback was
+  switched back afterwards, so other threads went on running after the fault.
+- The gate byte 0xa9438f4 is 0 for the whole run, so the version gate never reaches its Windows-version test and
+  device slot 49 is not called because of that byte, not because of the Windows version. In the exe the byte is
+  read at 34 places and has no direct store, so it is filled some other way (not read further).
