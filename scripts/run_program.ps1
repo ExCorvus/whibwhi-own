@@ -62,6 +62,12 @@ $before = Get-Listing $Game
 $exeHashBefore = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash
 
 $log = Join-Path $run 'run.err'
+# On the console nothing else is open when the program starts (ExCorvus, 2026-11-28: "minimize everything before
+# the program starts"): every window on the desktop is minimised first, through Windows' own shell (as Win+D).
+if (-not $Hidden) {
+    (New-Object -ComObject Shell.Application).MinimizeAll()
+    Start-Sleep -Milliseconds 500
+}
 $env:WHIWHI_CALL_LEDGER = Join-Path $run 'calls.tsv'
 $env:WHIWHI_WANTS_LEDGER = Join-Path $run 'wants.txt'
 $env:DISABLE_RTSS_LAYER = '1'
