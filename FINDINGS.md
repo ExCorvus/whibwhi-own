@@ -3056,3 +3056,22 @@ ExCorvus decided not to follow this further now; it is written down as a hint.
   before the fault (69-70 s: 1,262 newly filled, 60 emptied, up to 764 in one beat).
 - The program: 1,300 presents, no device removal, then the same fault at image+0x161b994 (about 70 s), and after
   it the breakpoint at image+0x344196 on another thread again (seen since 2026-11-27 20:27).
+## 2026-11-28 - the watchdog's and the frame pacer's last 10 s before the fault (game tests 18:45, 18:48, PASS, measured)
+
+- weave/tools/boot_image.cpp keeps every progress report and every change of the watchdog's state in a ring in
+  memory; weave/d3d12_xs.cpp keeps every frame call (interval, scheduled events, frame waits, statistics, with the
+  answer) the same way (export whiwhi_d3d12_report_last_frames). The last 10 s of both are written at the first
+  access fault. Run 18:45 wrote nothing: the program puts its own unhandled-exception handler in, so the run ends
+  through Windows' error reporting and the boot tool's end-of-run step never comes; since 18:48 they are written at
+  the fault itself.
+- Run 18:48 (fault at image+0x161b994 at about 71.9 s of the process, on thread 6196):
+  - The watchdog: progress reports every 0.01-0.10 s up to 71.734 s; no watch scope open; the run loop's crash
+    marker switched in at 71.631 s (image+0x258b000; image+0x4380 between). Nothing stopped, nothing waited.
+  - The frame pacer: one thread (44352, not the faulting one) makes all frame calls: per frame a wait for event 2
+    with no time limit, a wait for event 0 that does not wait (flags 2), and the statistics of an earlier frame.
+    886 frames in the last 10 s, the longest gap between two frame calls 119 ms (71.744 -> 71.863 s, just before
+    the fault); no wait held longer than 23 ms. The statistics: 63 of 886 answered with a display time, 823 with
+    the present time only, type 0x100 never.
+  - Pipelines: the wave of requests at 71.5-71.9 s (about 970 asked, 36 made) as in earlier runs.
+- So up to the fault the watchdog and the frame pacer run as they always do; neither stops or decides anything in
+  the last second. The fault comes on another thread while the frames are still running.
