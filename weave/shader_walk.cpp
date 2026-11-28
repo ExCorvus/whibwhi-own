@@ -98,6 +98,14 @@ bool read_instruction_length(const std::uint32_t* words, std::size_t available, 
             literal = vop2_always_has_constant(step->opcode);
         }
         literal = literal || (w & 0x1FF) == kLiteral;
+        // A first source field of 0xF9 (SDWA), 0xFA (DPP16), 0xE9 or 0xEA (DPP8) means one more word follows
+        // with the real source and how it is taken (public definition of this generation: SIDefines.h SDWA /
+        // DPP / DPP8 / DPP8_FI). Measured on the program's compute shaders (FINDINGS 2026-11-28): the walks that
+        // stopped on a word of no known format stopped on such a word, right after a VOP1 or VOP2.
+        const std::uint32_t source = w & 0x1FF;
+        if (source == 0xF9 || source == 0xFA || source == 0xE9 || source == 0xEA) {
+            length = 2;
+        }
     } else if ((w & 0xC0000000u) == 0x80000000u) {
         const std::uint32_t top9 = w >> 23;
         if (top9 == 0x17F) {
