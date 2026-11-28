@@ -311,6 +311,118 @@ void count(int slot, const char* what, const void* address) {
 }
 }  // namespace code_place
 
+// Which of the program's passes a pipeline request comes from (ExCorvus, 2026-11-28: the lighting is one setting
+// made of parts that take different paths). The passes are the functions the set-up function fn 0xcba630 calls,
+// each named by the shader names it hands to the effect loader (FINDINGS 2026-11-28 "how the program's passes hand
+// over their shaders"). At each request the thread's stack is walked (the image's unwind tables are registered by
+// the loader); the innermost frame inside one of these functions names the pass. Without one, the two outermost
+// frames in the image are named instead. Counts per slot at every power of two from 8; the first 3 walks per slot
+// are written out as image offsets.
+namespace lighting_map {
+struct Pass {
+    unsigned long long start, bytes;
+    const char* name;
+};
+constexpr Pass kPasses[] = {
+    {0xcc5160, 1649, "bvh_skinning"},          {0x5708f50, 2154, "indirect_light_probes"},
+    {0xcc4b00, 1618, "indirect_diffuse_lighting"}, {0xccc430, 3133, "sr_tracing / sr_denoising"},
+    {0xcbd110, 399, "tiled / deferred lighting"},  {0xcbd670, 1418, "wdcascade"},
+    {0x5704e30, 1019, "subsurfacescatter"},     {0x56ffe70, 267, "depth_pyramid"},
+    {0x570c130, 4240, "compute_graph_ops"},     {0xcc69e0, 1931, "vehicleglass"},
+    {0xcc7900, 2042, "weathering"},            {0xccb860, 3021, "deepsurface"},
+    {0x56fffa0, 269, "shadtexture_ld"},        {0x57042b0, 799, "prefilter_env_map"},
+    {0x56ff7c0, 445, "deferredmirror"},        {0x57010f0, 421, "puddledetect"},
+    {0x5703690, 693, "entitymask"},            {0x570a160, 2398, "unlit_draw"},
+    {0xcba630, 816, "the set-up function itself"},
+};
+std::mutex lock;
+
+void note(int slot, const void* caller) {
+    MEMORY_BASIC_INFORMATION info{};
+    if (!caller || !VirtualQuery(caller, &info, sizeof(info))) {
+        return;
+    }
+    const auto image = reinterpret_cast<unsigned long long>(info.AllocationBase);
+    // Walked by hand: Windows' own walk stops at the first frame of the image (run 19:57), which is not a module it
+    // has loaded. Each frame is unwound by its function's unwind data; a function without any is a leaf.
+    void* frames[64] = {};
+    int n = 0;
+    {
+        CONTEXT c{};
+        RtlCaptureContext(&c);
+        ULONG_PTR low = 0, high = 0;
+        GetCurrentThreadStackLimits(&low, &high);
+        while (n < 64 && c.Rip) {
+            frames[n++] = reinterpret_cast<void*>(c.Rip);
+            DWORD64 base = 0;
+            if (auto* fn = RtlLookupFunctionEntry(c.Rip, &base, nullptr)) {
+                void* handler = nullptr;
+                DWORD64 frame = 0;
+                RtlVirtualUnwind(0, base, c.Rip, fn, &c, &handler, &frame, nullptr);
+            } else {
+                if (c.Rsp < low || c.Rsp + 8 > high) {
+                    break;
+                }
+                c.Rip = *reinterpret_cast<DWORD64*>(c.Rsp);
+                c.Rsp += 8;
+            }
+            if (c.Rsp < low || c.Rsp >= high) {
+                break;
+            }
+        }
+    }
+    std::vector<unsigned long long> in_image;
+    const char* pass = nullptr;
+    for (int i = 0; i < n; ++i) {
+        const auto at = reinterpret_cast<unsigned long long>(frames[i]);
+        if (at < image || at >= image + 0x10000000ull) {
+            continue;
+        }
+        const unsigned long long offset = at - image;
+        in_image.push_back(offset);
+        for (const Pass& p : kPasses) {
+            if (!pass && offset >= p.start && offset < p.start + p.bytes) {
+                pass = p.name;
+            }
+        }
+    }
+    char key[200];
+    if (pass) {
+        std::snprintf(key, sizeof(key), "slot %d from the pass %s", slot, pass);
+    } else if (in_image.size() >= 2) {
+        std::snprintf(key, sizeof(key), "slot %d, no pass on the stack; outermost frames image+0x%llx <- image+0x%llx",
+                      slot, in_image[in_image.size() - 2], in_image.back());
+    } else {
+        std::snprintf(key, sizeof(key), "slot %d, no pass on the stack", slot);
+    }
+    static std::map<std::string, unsigned long long> counts;
+    static std::map<int, unsigned long long> per_slot;
+    std::lock_guard<std::mutex> hold(lock);
+    ++counts[key];
+    const unsigned long long nth = ++per_slot[slot];
+    if (nth <= 3) {
+        std::string walk;
+        for (unsigned long long o : in_image) {
+            char item[24];
+            std::snprintf(item, sizeof(item), " 0x%llx", o);
+            walk += item;
+        }
+        logf("[lighting map] slot %d request %llu, the program's frames, innermost first:%s\n", slot, nth,
+             walk.c_str());
+    }
+    if (nth >= 8 && (nth & (nth - 1)) == 0) {
+        logf("[lighting map] slot %d after %llu requests:\n", slot, nth);
+        const std::string prefix = "slot " + std::to_string(slot) + " ";
+        const std::string prefix2 = "slot " + std::to_string(slot) + ",";
+        for (const auto& [k, c] : counts) {
+            if (k.rfind(prefix, 0) == 0 || k.rfind(prefix2, 0) == 0) {
+                logf("[lighting map]   %s: %llu\n", k.c_str(), c);
+            }
+        }
+    }
+}
+}  // namespace lighting_map
+
 void note_compiled_pairs(int slot, const void* caller, const void* description) {
     static std::map<std::string, unsigned long long> shapes;
     static unsigned long long calls[2] = {};
@@ -428,6 +540,7 @@ void log_slot(const char* kind, int kind_id, int slot, const void* caller, void*
     want(caller, "not provided | %s method slot %d | answered not implemented", kind, slot);
     if (std::strcmp(kind, "device") == 0 && (slot == 57 || slot == 67)) {
         flow::note_order(slot);
+        lighting_map::note(slot, caller);
         note_compiled_pairs(slot, caller, arguments[0]);
     }
     std::lock_guard<std::mutex> lock(g_log);
@@ -3725,6 +3838,7 @@ HRESULT __stdcall w_device_slot62(Wrap* self, void* description, void* zero1, vo
         return 0x80070057L;
     }
     const flow::Timer timer;
+    lighting_map::note(62, _ReturnAddress());
     D3D12_COMPUTE_PIPELINE_STATE_DESC pc{};
     std::memcpy(&pc, description, sizeof(pc));
     // The request by its contents: the shader's bytes, the root signature, and the rest of the description.
@@ -5298,6 +5412,7 @@ HRESULT __stdcall w_device_stream_pipeline(Wrap* self, const void* desc, const G
     static std::atomic<unsigned long long> asked{0}, made{0}, refused{0};
     const unsigned long long n = ++asked;
     const flow::Timer timer;
+    lighting_map::note(86, _ReturnAddress());
     // Where in the stream each shader is named (its pointer and length), so that the request is keyed by the
     // shader's contents rather than by where the program keeps it.
     std::vector<std::pair<std::size_t, unsigned long long>> shader_named_at;
