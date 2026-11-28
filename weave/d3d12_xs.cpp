@@ -5711,13 +5711,57 @@ bool frame_time_of(unsigned long long token, FrameTime& out) {
 // The first kFrameLedgerLines calls are written.
 constexpr int kFrameLedgerLines = 1500;
 
+// The frame pacer's last seconds (ExCorvus, 2026-11-28: "or it is the frampacer itself, that has more logic running
+// than only pacing frames"): the ledger's lines are also kept in a ring in memory, with the process time, and the
+// last 10 s of them are written at the end of the run (whiwhi_d3d12_report_image_writes) - so the second before a
+// fault is there even after the first kFrameLedgerLines.
+constexpr int kFrameRing = 4096;
+struct FrameRingLine {
+    double seconds = -1;
+    char text[200] = {};
+};
+SRWLOCK g_frame_ring_lock = SRWLOCK_INIT;
+FrameRingLine g_frame_ring[kFrameRing];
+unsigned long long g_frame_ring_next = 0;
+
+void report_last_frames() {
+    AcquireSRWLockShared(&g_frame_ring_lock);
+    const unsigned long long n = g_frame_ring_next;
+    const unsigned long long first = n > kFrameRing ? n - kFrameRing : 0;
+    const double last = n ? g_frame_ring[(n - 1) % kFrameRing].seconds : 0;
+    unsigned long long shown = 0;
+    for (unsigned long long i = first; i < n; ++i) {
+        const FrameRingLine& l = g_frame_ring[i % kFrameRing];
+        if (l.seconds >= last - 10.0) {
+            ++shown;
+        }
+    }
+    logf("[frames, the last 10 s] %llu frame calls in all, the newest at %.3f s of the process; the last %llu:\n", n, last,
+         shown);
+    for (unsigned long long i = first; i < n; ++i) {
+        const FrameRingLine& l = g_frame_ring[i % kFrameRing];
+        if (l.seconds >= last - 10.0) {
+            logf("[frames, the last 10 s] %.3f s %s\n", l.seconds, l.text);
+        }
+    }
+    ReleaseSRWLockShared(&g_frame_ring_lock);
+}
+
 void frame_ledger(const char* what, void* returns_to, unsigned a, unsigned b, unsigned c, unsigned long long in,
                   unsigned long long out, long long held_us) {
+    const long long at = g_clock.frequency ? clock_now_us() : -1;
+    {
+        AcquireSRWLockExclusive(&g_frame_ring_lock);
+        FrameRingLine& l = g_frame_ring[g_frame_ring_next++ % kFrameRing];
+        l.seconds = flow::run_seconds();
+        std::snprintf(l.text, sizeof(l.text), "frame clock %lld us, thread %lu, %s, returns to %p, %u %u 0x%x, in 0x%llx, "
+                      "out 0x%llx, held %lld us", at, GetCurrentThreadId(), what, returns_to, a, b, c, in, out, held_us);
+        ReleaseSRWLockExclusive(&g_frame_ring_lock);
+    }
     static std::atomic<int> lines{0};
     if (lines.fetch_add(1) >= kFrameLedgerLines) {
         return;
     }
-    const long long at = g_clock.frequency ? clock_now_us() : -1;
     logf("[frames] %lld us, thread %lu, %s, returns to %p, %u %u 0x%x, in 0x%llx, out 0x%llx, held %lld us\n", at,
          GetCurrentThreadId(), what, returns_to, a, b, c, in, out, held_us);
 }
@@ -7464,6 +7508,10 @@ void log_memory_kinds() {
 
 unsigned long long __stdcall whiwhi_d3d12_load_shader_store(void) {
     return load_shader_store();
+}
+
+void __stdcall whiwhi_d3d12_report_last_frames(void) {
+    report_last_frames();
 }
 
 unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
