@@ -161,6 +161,19 @@ int main() {
         0x20, 5);
     ONE(std::vector<std::uint32_t>({top6(0x3C, (0x20u << 18) | 1u), pad}), WalkFormat::kMimg, 0xA0, 2);
 
+    // The cross-lane and sub-word forms: a first source field of 0xFA / 0xE9 / 0xEA (DPP) or 0xF9 (SDWA) carries one
+    // more word; a DPP word with row and bank masks 0xF starts with 0xFF (top bits 111111) and is not an instruction.
+    ONE(std::vector<std::uint32_t>({vop2(28, 1, 2, 0xFA), 0xFF00E400u}), WalkFormat::kVop2, 28, 2);
+    ONE(std::vector<std::uint32_t>({vop1(1, 1, 0xFA), 0xFF00E400u}), WalkFormat::kVop1, 1, 2);
+    ONE(std::vector<std::uint32_t>({vop1(1, 1, 0xE9), 0x00FAC688u}), WalkFormat::kVop1, 1, 2);
+    ONE(std::vector<std::uint32_t>({vopc(4, 1, 0xEA), 0x00FAC688u}), WalkFormat::kVopc, 4, 2);
+    ONE(std::vector<std::uint32_t>({vop2(3, 1, 2, 0xF9), 0x06060600u}), WalkFormat::kVop2, 3, 2);
+    {
+        const std::uint32_t program[3] = {vop2(28, 1, 2, 0xFA), 0xFF00E400u, kEndOfProgramWord};
+        const WalkResult r = walk_program(program, 3);
+        CHECK(r.reached_end && r.end_word_index == 2 && r.instructions == 2);
+    }
+
     // Words of no known format: top six bits 110000, 110001, 110100, 111001, 111011, 111111.
     for (unsigned format : {0x30u, 0x31u, 0x34u, 0x39u, 0x3Bu, 0x3Fu}) {
         const std::uint32_t words[2] = {top6(format, 0), pad};
