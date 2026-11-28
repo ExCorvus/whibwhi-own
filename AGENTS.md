@@ -74,6 +74,10 @@ What works today, and where a run currently stops, is in the **Current state** b
 - **Running the game:** only the coordinating agent starts the game's entry point, and only one run at a time.
 - **The game test before every code commit:** a change under `weave/` or `scripts/` is committed only after
   `scripts\game_test.ps1` has passed on that exact build (docs/BUILD-AND-RUN.md, "The game test").
+- **Look it up first** (ExCorvus, 2026-11-28). Not all of the project fits into one agent's memory, and what
+  falls out of it gets found again as if it were new. Before reading the executable or measuring anything, search
+  [docs/INDEX.md](docs/INDEX.md), [FINDINGS.md](FINDINGS.md), `docs/` and the comments in `weave/` for it, and say
+  what is already known. A larger question of that kind can go to a read-only helper agent.
 - **Measure only when it has changed** (ExCorvus, 2026-11-28: "only measure when it has changed ... we cannot test
   every time"). The measurements of `measure/` run again only when what they read changed (the game folder, the
   exe, the scripts, the weave's PC graphics library); otherwise the game test takes over the last results.
