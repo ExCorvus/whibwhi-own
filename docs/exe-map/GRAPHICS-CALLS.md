@@ -109,8 +109,8 @@ end of a PC vtable.
 |---|---|---|
 | 48 | creates four more command queues right after the main one: (device, 16-byte description, the public identifier of ID3D12CommandQueue, output). The descriptions are {2, 0, 1, 0}, {2, 0, 2, 0}, {2, 0, 3, 0}, {2, 0, 0, 1}; the main queue (slot 8) uses {0, 0, 0, 1}. A failure is fatal by the game's own check. Meaning of the third number: not known | fn 0x2478440, calls at 0x2478813, 0x2478853, 0x2478893, 0x24788d3 |
 | 49 | one call with two integers, after a version-string comparison | fn 0x2478440 |
-| 55 | derived pipeline state (a pipeline made from a base pipeline of slot 57) | fn 0x2479f40 |
-| 57 | base pipeline state (a pipeline derived from it) | fn 0x24774c0 |
+| 55 | derived pipeline state (a pipeline made from a base pipeline of slot 57): (base, a number, a description built on the stack, the public identifier of ID3D12PipelineState, output). Fn 0x2479f40 first looks the base up in a hash table filled after slot 57 succeeds; when there is none it returns no pipeline, and its caller fn 0x2479760 then builds a whole pipeline stream (fn 0x86f090, 0x2b0 bytes) and asks slot 86. So slot 86 is the program's own way when there is no base pipeline (FINDINGS 2026-11-28) | fn 0x2479f40 |
+| 57 | base pipeline state: (description, the public identifier of ID3D12PipelineState, output). The description is a root signature followed by (pointer, length) pairs: up to three pieces of compiled code (pairs 2, 4, 6), each followed by an unaligned piece, and two unaligned pieces first (FINDINGS 2026-11-28). Asked from a job (fn 0x24772f0) for each entry of a list; on success the result goes into the table fn 0x2479f40 reads | fn 0x24774c0 |
 | 61 | one call in the shader system | fn 0x12b9800 |
 | 62 | compute pipeline state: desc {pointer at +0, count 1 at +0x18}, riid, out | fn 0x247fd30 |
 | 67 | pipeline state from a stream description; called on a cache miss | fn 0x2480050 |
