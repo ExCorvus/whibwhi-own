@@ -2570,3 +2570,17 @@ the audio part of the weave.
   (pointer, length), so slot 67's description has another layout after pair 3.
 - The weave's walk stops on a word it has no format for in 2,061 of slot 57's pair 2 and 836 of slot 67's pair 2.
 - Fault unchanged at image+0x161b994.
+## 2026-11-28 - slot 57 makes base pipelines; without them the program builds whole pipelines through slot 86 (read in the exe)
+
+- fn 0x2479760 (the program's way to a graphics pipeline, reached from fn 0xb5a5d0 and fn 0x2479f10): if the
+  base-pipeline manager exists (global at 0x75ddb90), it first calls fn 0x2479f40. That function looks a base
+  pipeline up in a hash table; when one is there it asks device slot 55 (+0x1b8) for a pipeline derived from it,
+  with a small description built on its stack. When none is there it returns no pipeline, and fn 0x2479760 then
+  builds a whole pipeline stream (fn 0x86f090, 0x2b0 bytes) and asks device slot 86 (+0x2b0).
+- The base pipelines are made by device slot 57 from a job (fn 0x24772f0 -> fn 0x24774c0, one per list entry); only
+  a pipeline slot 57 made goes into the table.
+- So: because the weave answers slot 57 with "not implemented", the table stays empty, slot 55 is never asked
+  (no run has logged it), and every graphics pipeline comes through slot 86 as a whole stream. Correction to the
+  02:51 entry: graphics slot 57 does have the program's own other way - slot 86, on another thread and later, which
+  the per-thread order count could not see.
+- docs/exe-map/GRAPHICS-CALLS.md rows 55 and 57 say this now.
