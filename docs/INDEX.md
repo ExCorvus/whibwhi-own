@@ -43,7 +43,11 @@ Not all shaders come the same way. Do not treat them all the same.
   [exe-map/GRAPHICS-CALLS.md](exe-map/GRAPHICS-CALLS.md).
 - **Slot 86** (graphics, the fallback when no base pipeline exists): a stream with one container per stage. The
   weave translates these into its own PC form today. FINDINGS 2026-11-28 "the sampler heap reached".
-- **Slot 67** (compute, asked first): bare pieces, no container. Never answered.
+- **Slot 67** (compute, asked first): bare pieces, no container. Never answered. The installation's FidelityFX
+  library names it in its own text: DeserializeComputePipelineStateX, a pipeline from code already compiled for the
+  GPU. FINDINGS 2026-11-28 "the installation's FidelityFX library names the first compute way".
+- **FidelityFX:** the installation holds FSR 4 (the AI upscaler) alone. The denoiser is the program's own.
+  Requests come from job workers, so the pass that asks is not on the stack (same entry).
 - **Slot 62** (compute, the fallback): a container. The installation's builder library's 52 shaders are PC DXIL
   and are made by vkd3d unchanged (53 pipelines). None of them has run yet. The program's own (2,041) are answered "not implemented"; vkd3d refuses
   them unchanged with "invalid shader bytecode" (step 0, 2026-11-28 19:04/19:07).
