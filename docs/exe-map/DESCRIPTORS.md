@@ -54,7 +54,7 @@ instruction's operand in fn 0x12b96b0.
 | +0x34 | 4 | record byte +0x08 & 0x1f | 0x12b97a4 |
 | +0x38 | 4 | always 0 | zeroed |
 | +0x3c | 4 | always 0 | zeroed |
-| +0x40 | 4 | 1 if `flags & 0x80`; else record byte +0x09 | 0x12b97ad..0x12b97c3 |
+| +0x40 | 4 | record byte +0x09 if `flags & 0x80`; else 1 (corrected 2026-11-28: `cmovs` takes the byte when bit 7 of the flags' low byte is set) | 0x12b97ad..0x12b97c3 |
 | +0x44 | 16 | record bytes +0x0c..+0x1b | 0x12b97c7 |
 
 Value sets (**measured**, from the derived expressions and the two tables):
@@ -97,6 +97,16 @@ What can be shown from the values:
   values {1,2} and {1,2,3}), +0x14 (table lookup, values {0,1,2,-1}), +0x40. These are where a console sampler
   keeps its filter, comparison and mip-filter state, but nothing in the image names them and the value sets do not
   line up with any public field. **unknown.**
+- **Added 2026-11-28: the record's `flags` word is the public `D3D12_FILTER` number** (**inferred** from the
+  values, which all fit its bit layout: mip filter bit 0, mag bit 2, min bit 4, anisotropic bit 6, reduction bits 7
+  and 8). The record default 0x15 is `MIN_MAG_MIP_LINEAR`; 0x101 is `MINIMUM_MIN_MAG_POINT_MIP_LINEAR`; 0x401 has bit
+  10 set, which the public filter does not have (it lands in `table_a`'s index only). Read that way, the unmatched
+  fields are the filter taken apart: +0x04 is 1 when mag is linear (bit 2), 2 when point, 3 when anisotropic; +0x08
+  the same for min (bit 4); +0x0c is 2 when mip is linear (bit 0); +0x10 is 2 when mag is linear (bit 2);
+  +0x14 = `table_a[flags >> 7]` is the reduction: 0 for standard and comparison, 1 minimum, 2 maximum; +0x40 is the
+  comparison function in the public numbering (1 = NEVER). The heaps of FINDINGS 2026-11-28 back it: the
+  description's destination lies in a sampler heap (type 1), and the root signatures whose shaders pick samplers by
+  number carry the flag "sampler heap directly indexed" (0x800).
 
 ### A.4 The sampler record (0x24 bytes) and how many exist
 
