@@ -1205,6 +1205,41 @@ unsigned long long handle_to_pc(unsigned long long handle, bool gpu) {
     return result;
 }
 
+// The shell speaks a written descriptor into the memory the program sees (ExCorvus, 2026-11-28: "listen to these
+// heaps and speak them out in cpu code"; "stitch it"). The heaps shaders do not see are still held twice: the PC
+// library writes a view there into its own memory, which keeps its bookkeeping beside the slots (the program's
+// request is exactly the slots, so there is no room for it in the program's memory). The program then copies such
+// a slot itself, raw, from the memory it sees (DESCRIPTORS.md C.2) - and found nothing there: run 18:29, not one
+// slot of these heaps changed in the program's memory. So after each call that writes into such a heap, the shell
+// writes the same bytes into the program's memory at the same place: the two hold the same descriptor, and the
+// program's raw copy is a real copy. Heaps that are one memory need nothing; nothing else is touched.
+std::atomic<unsigned long long> g_spoken{0};
+void speak_slots(unsigned long long program_handle, unsigned count) {
+    if (!program_handle || !count) {
+        return;
+    }
+    AcquireSRWLockShared(&g_heaps_lock);
+    for (const HeapRange& r : g_heaps) {
+        if (r.type > 1 || !r.title || program_handle < r.title || program_handle >= r.title + r.bytes) {
+            continue;
+        }
+        const unsigned long long pc_base = r.pc_cpu & ~0x3Full;  // the PC library's handles carry marks in these bits
+        if (pc_base == r.title) {
+            break;  // one memory
+        }
+        const unsigned step = r.type == 1 ? 16u : 32u;
+        const unsigned long long offset = program_handle - r.title;
+        unsigned long long bytes = static_cast<unsigned long long>(count) * step;
+        if (offset + bytes > r.bytes) {
+            bytes = r.bytes - offset;
+        }
+        std::memcpy(reinterpret_cast<void*>(program_handle), reinterpret_cast<const void*>(pc_base + offset), bytes);
+        g_spoken.fetch_add(bytes / step);
+        break;
+    }
+    ReleaseSRWLockShared(&g_heaps_lock);
+}
+
 // For the wants ledger: where a handle the program hands over lies, in words - inside a heap this library made,
 // as the program sees that heap or as the PC sees it, or in none.
 std::string handle_place(unsigned long long handle) {
@@ -1434,6 +1469,7 @@ void __stdcall w_device_slot61(Wrap* self, const void* description, void* destin
     const unsigned long long pc = handle_to_pc(reinterpret_cast<unsigned long long>(destination), false);
     using Fn = void(__stdcall*)(void*, const D3D12_SAMPLER_DESC*, unsigned long long);
     reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][22])(self->pc, &d, pc);
+    speak_slots(reinterpret_cast<unsigned long long>(destination), 1);
     static std::atomic<int> said{0};
     if (said.fetch_add(1) < 64) {
         logf("device slot 61: Windows' sampler written at %s: filter 0x%x, address %u %u %u, LOD %g..%g bias %g, "
@@ -1465,12 +1501,18 @@ void __stdcall cpu_handle_thunk(Wrap* self, void* a1, void* a2, void* a3, void* 
                  (Slot >= 18 && Slot <= 21 && !a[1]) ? " of no resource" : "", first.c_str());
         }
     }
+    const unsigned long long written_at = reinterpret_cast<unsigned long long>(a[First]);  // as the program sees it
     a[First] = reinterpret_cast<void*>(handle_to_pc(reinterpret_cast<unsigned long long>(a[First]), false));
     if (Second) {
         a[Second] = reinterpret_cast<void*>(handle_to_pc(reinterpret_cast<unsigned long long>(a[Second]), false));
     }
     using Fn = void(__stdcall*)(void*, void*, void*, void*, void*, void*, void*);
     reinterpret_cast<Fn>(reinterpret_cast<void***>(self->pc)[0][Slot])(self->pc, a[1], a[2], a[3], a[4], a[5], a[6]);
+    if (Slot == 17 || Slot == 18 || Slot == 19 || Slot == 22) {
+        speak_slots(written_at, 1);
+    } else if (Slot == 24) {
+        speak_slots(written_at, static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(a[1])));
+    }
     if (Slot == 20 || Slot == 21) {
         // A render-target or depth view (resource, description, handle): a view of no resource is not one a
         // clear or a binding can use.
@@ -1514,6 +1556,9 @@ void __stdcall w_device_copy_descriptors(Wrap* self, unsigned int dest_count, co
     static_cast<ID3D12Device*>(self->pc)->CopyDescriptors(dest_count, dest_starts ? dest.data() : nullptr, dest_sizes,
                                                           source_count, source_starts ? source.data() : nullptr,
                                                           source_sizes, static_cast<D3D12_DESCRIPTOR_HEAP_TYPE>(type));
+    for (std::size_t i = 0; dest_starts && i < dest.size(); ++i) {
+        speak_slots(dest_starts[i], dest_sizes ? dest_sizes[i] : 1u);
+    }
     if (is_target_heap_type(type)) {
         // A copied render-target or depth view is a view where it lands: walk both lists of ranges in step.
         const unsigned step = static_cast<ID3D12Device*>(self->pc)->GetDescriptorHandleIncrementSize(
@@ -1729,7 +1774,8 @@ void run() {
             static const char* names[4] = {"resource heaps shaders do not see", "resource heaps shaders see",
                                            "sampler heaps shaders do not see", "sampler heaps shaders see"};
             char text[900];
-            int at = std::snprintf(text, sizeof(text), "[listen] %.1f s: %llu beats", now, beats);
+            int at = std::snprintf(text, sizeof(text), "[listen] %.1f s: %llu beats, %llu slots spoken into the program's "
+                                   "memory of heaps held twice", now, beats, g_spoken.exchange(0));
             for (int k = 0; k < 4; ++k) {
                 if (!counts[k].heaps) continue;
                 at += std::snprintf(text + at, sizeof(text) - at,
@@ -6257,6 +6303,7 @@ void __stdcall w_device_slot70(Wrap* self, const unsigned char* block_a, const u
     }
     const D3D12_CPU_DESCRIPTOR_HANDLE at{static_cast<SIZE_T>(handle_to_pc(destination, false))};
     static_cast<ID3D12Device*>(self->pc)->CreateShaderResourceView(resource, &view, at);
+    speak_slots(destination, 1);
     if (few(shown, 8)) {
         logf("device slot 70: a buffer view of the image's memory at 0x%llx (%llu bytes, format %u, first element "
              "%llu, %u elements) made on the PC device (no copy)\n",
