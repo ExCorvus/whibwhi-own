@@ -99,7 +99,68 @@ void want(const void* from, const char* format, ...);
 
 namespace flow {
 void note_order(int slot);
+double run_seconds();
 }
+
+// The rhythm of the program's other systems, looked at from outside (ExCorvus, 2026-11-28: "we should look at the
+// other boys, the watchdog, framepacer and all that"): once a second, on its own thread, how many pictures the
+// program presented, how many frame events it waited for and how long those waits took, how many command lists it
+// handed to its queues, and the longest stretch without a present - on the clock of the process, like the boot
+// tool's watchdog reports. A second in which nothing came is written too. Counts only; nothing answered differently.
+namespace rhythm {
+std::atomic<unsigned long long> presents{0}, waits{0}, waited_us{0}, submits{0}, lists{0};
+std::atomic<long long> last_present_us{-1}, longest_gap_us{0};
+
+long long now_us() {
+    return static_cast<long long>(flow::run_seconds() * 1e6);
+}
+
+void start() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::thread([] {
+            for (;;) {
+                Sleep(1000);
+                const long long now = now_us();
+                const long long last = last_present_us.load();
+                long long gap = longest_gap_us.exchange(0);
+                if (last >= 0 && now - last > gap) {
+                    gap = now - last;  // a present that has not come yet counts as a gap up to now
+                }
+                const unsigned long long p = presents.exchange(0), w = waits.exchange(0), wu = waited_us.exchange(0),
+                                         s = submits.exchange(0), l = lists.exchange(0);
+                logf("[rhythm] %.1f s of the process: %llu presents, the longest stretch without one %.0f ms; %llu frame "
+                     "waits, %.0f ms waited together; %llu submissions to the queues, %llu command lists\n",
+                     now / 1e6, p, gap / 1e3, w, wu / 1e3, s, l);
+            }
+        }).detach();
+    });
+}
+
+void note_present() {
+    start();
+    ++presents;
+    const long long now = now_us();
+    const long long last = last_present_us.exchange(now);
+    if (last >= 0) {
+        long long gap = now - last, seen = longest_gap_us.load();
+        while (gap > seen && !longest_gap_us.compare_exchange_weak(seen, gap)) {
+        }
+    }
+}
+
+void note_wait(long long us) {
+    start();
+    ++waits;
+    waited_us += static_cast<unsigned long long>(us > 0 ? us : 0);
+}
+
+void note_submit(unsigned count) {
+    start();
+    ++submits;
+    lists += count;
+}
+}  // namespace rhythm
 bool can_read(const void* address, std::size_t bytes);  // defined below, with the command-list checks
 
 // Is the compiled code handed to device slots 57 and 67 the same code as inside the containers this library
@@ -898,6 +959,7 @@ HRESULT __stdcall w_queue_timestamp_frequency(Wrap* self, unsigned long long* fr
 // Queue slot 10, ExecuteCommandLists(count, lists): the lists arrive as an array, so each entry is translated
 // here.
 void __stdcall w_queue_execute(Wrap* self, unsigned int count, void* const* lists) {
+    rhythm::note_submit(count);
     using Fn = void(__stdcall*)(void*, unsigned int, void* const*);
     void** pc_vt = reinterpret_cast<void***>(self->pc)[0];
     if (!lists || count == 0) {
@@ -2083,6 +2145,7 @@ HRESULT __stdcall w_queue_signal(Wrap* self, void* fence, unsigned long long val
 // the log. Any other number is refused.
 HRESULT __stdcall w_queue_submit(Wrap* self, unsigned int count, void* const* lists, unsigned long long token,
                                  unsigned int last) {
+    rhythm::note_submit(count);
     static std::atomic<int> shown{0}, refused{0}, closed_shown{0}, shown3{0};
     bool ok = (last == 0 || last == 3) && count >= 1 && count <= 256 && can_read(lists, count * sizeof(void*));
     for (unsigned int i = 0; ok && i < count; ++i) {
@@ -4897,6 +4960,10 @@ HRESULT __stdcall w_wait_frame_event(Wrap*, void* type_arg, void* timeout_arg, v
              type, timeout_ms, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(fence)), flags,
              token_in, frame, when - now);
     }
+    rhythm::note_wait(!(flags & 2u) && when > now
+                          ? (std::min)(when - now, timeout_ms == 0xFFFFFFFFu ? when - now
+                                                                            : static_cast<long long>(timeout_ms) * 1000ll)
+                          : 0);
     if (!(flags & 2u) && when > now) {
         if (timeout_ms != 0xFFFFFFFFu && when - now > static_cast<long long>(timeout_ms) * 1000ll) {
             sleep_until_us(now + static_cast<long long>(timeout_ms) * 1000ll);
@@ -6130,6 +6197,7 @@ void log_picture_numbers(Wrap* surface, const D3D12_RESOURCE_DESC& desc, unsigne
 
 HRESULT __stdcall w_presentx(Wrap* self, unsigned int plane_count, const unsigned char* planes,
                              const void* parameters) {
+    rhythm::note_present();
     static std::atomic<int> refused{0}, more_planes{0};
     const unsigned long long kPlaneBytes = 0x48;
     void* surface = nullptr;
