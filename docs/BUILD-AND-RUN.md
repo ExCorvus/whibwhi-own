@@ -72,7 +72,10 @@ powershell -ExecutionPolicy Bypass -File scripts\game_test.ps1 -Game <your game 
 It builds the weave, then runs every measurement in [measure/](../measure/README.md) on your copy (read-only; each
 checks results of FINDINGS.md and says `same` or `DIFFERS`; the output goes to `measure.txt` of the run; the C++
 one is compiled with the weave's compiler and run beside the weave's PC graphics library, so it needs Python with
-numpy and capstone and the fork's `d3d12_vk.dll` and `d3d12core.dll` in `weave\build`). Then it runs the real game
+numpy and capstone and the fork's `d3d12_vk.dll` and `d3d12core.dll` in `weave\build`). The measurements run only
+when something they read has changed: the game folder (names, sizes, times), the exe, a script in `measure/`, or the
+weave's PC graphics library. Otherwise the results of the run that last measured are taken over, and `measure.txt`
+names that run (kept in `measure-cache` beside the runs). Then it runs the real game
 from your copy inside the weave once (read-only; the folder is checked unchanged afterwards), and records what the
 game did:
 
