@@ -43,6 +43,10 @@ Not all shaders come the same way. Do not treat them all the same.
   them unchanged with "invalid shader bytecode" (step 0, 2026-11-28 19:04/19:07).
   FINDINGS 2026-11-26 "the builder's shaders call the console's own shader functions"; 2026-11-28 "the ray test
   is in the program's own compute shaders".
+- **Who hands them over:** the program's passes load through one effect loader (fn 0x1adcc20 -> fn 0x247b6c0).
+  Graphics programs go at load time to 57, compute programs to 67 then 62. Slot 86 comes at draw time when no base
+  pipeline exists. The builder library calls 62 itself. FINDINGS 2026-11-28 "how the program's passes hand over
+  their shaders".
 - **Order on each thread:** 57 then 86, 67 then 62. FINDINGS 2026-11-28 "the order of the program's pipeline
   requests".
 - **Plan:** the program's own shaders go unchanged to vkd3d-xbox, and dxil-spirv-xbox gets a door for them (not
