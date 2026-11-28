@@ -2732,3 +2732,26 @@ the audio part of the weave.
   program's own size and the screen's; the swap chain 3840 x 2160; rectangles drawn; the end as before (fault
   image+0x161b994, then the breakpoint image+0x344196). Brought to the front: Windows refused (the run started from
   a console in the background).
+## 2026-11-28 - the user: answered as Windows answers on an account with no Xbox user (game test 15:12, measured)
+
+- Measured with Windows' own runtime, outside the program (local probes, not in the repository): both user
+  interfaces the program asks for are handed out by Windows on every account, without a network connection. So
+  the weave's earlier answer "this interface does not exist" was one Windows never gives. On the account that runs
+  the weave they are not passed through: there, "add the default user" would be answered with that account's Xbox
+  user (ExCorvus: no signing in while testing). On a second local account without an Xbox user, with the program's
+  own configuration file present, Windows accepts "add the default user silently", its completion comes, and the
+  result is 0x89245106 with no user. Without that file the result is 0x80070002 (the identity is missing).
+- The program asks for the user once at start (fn 0x5bb5390 -> fn 0x1dbc550, option 1 = silently, only when it has
+  no user); the answer comes back through its own queue, which it pumps itself; the callback (fn 0x2219490) reads
+  the result and, with no user, lets the block go and notes that it has none: no sign-in window, no retry.
+- weave/xgameruntime.cpp: the user interfaces are the weave's own objects. "Add a user" is begun on the program's
+  own block with Windows' base object and completed with 0x89245106; the result is read back through Windows. Every
+  other method is logged once and answered "not implemented".
+- Run 15:12 (PASS): the program asks for the user interface, registers for user changes (method +0x108, not
+  measured, answered "not implemented"), adds the default user silently (begun: 0), and its own queue delivers the
+  completion: it reads the result 0x89245106, no user. It asks nothing more of the user. The program opened no
+  network connection (net watch: tcp 0, udp 0). Windows' own gaming services connected to Microsoft once at the
+  start (gamingservices and the Xbox app, 15:12:21-23), as on the probe account; whether the run caused that is not
+  measured.
+- Unchanged: the steady rhythm (90 presents a second from 59.6 s to 67.6 s), the rhythm stopping at about 69 s and
+  the fault at image+0x161b994. The user was not what the user interface element waits for.
