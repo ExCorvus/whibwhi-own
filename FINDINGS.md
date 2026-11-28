@@ -3191,3 +3191,15 @@ ExCorvus decided not to follow this further now; it is written down as a hint.
   start). A few slot 86 requests come through a draw chain (image+0x2479a8d <- 0xb5ac30 <- 0x19f51fc <- ...
   <- 0x23cf00a). So the passes hand their pipelines to jobs, and which part of the lighting asks has to be found
   through what the job carries, not through the stack.
+## 2026-11-28 - the FidelityFX import answered by Windows' own AMD library (game test 20:10, measured)
+
+- weave/host_libraries.cpp: the image imports amd_fidelityfx_loader_xbox.dll (ffxCreateContext,
+  ffxDestroyContext, ffxDispatch, ffxQuery). Windows on this PC has the PC's FidelityFX library from the AMD
+  driver, amd_fidelityfx_dx12.dll in System32, with the same exports (ffxConfigure, ffxCreateContext,
+  ffxDestroyContext, ffxDispatch, ffxQuery; version 1.0.1.39157, the active driver package also carries
+  amdxcffx64.dll 2.4.0.4541). The import is now answered by that one when it is there (ExCorvus: "direct swap").
+  This is the same pattern as GameInput (2026-11-27).
+- Run 20:10 (PASS): "[libraries] amd_fidelityfx_loader_xbox.dll: loaded from C:\Windows\SYSTEM32\
+  amd_fidelityfx_dx12.dll". The run ends at the same fault in the user interface (image+0x161b994), 83 s.
+  Whether the program calls the FidelityFX functions in this run is not written down: the calls go straight to
+  Windows' library.
