@@ -69,7 +69,22 @@ only; they are not proof that the weave works with the game (AGENTS.md rule 11).
 powershell -ExecutionPolicy Bypass -File scripts\game_test.ps1 -Game <your game folder> [-Seconds 60] [-Accept]
 ```
 
-It builds the weave, then runs every measurement in [measure/](../measure/README.md) on your copy (read-only; each
+It has three parts, each a script of its own (ExCorvus, 2026-11-28: the measurements and the program start
+separately):
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\measure_test.ps1 -Game <your game folder>
+powershell -ExecutionPolicy Bypass -File scripts\run_program.ps1 -Game <your game folder> [-Seconds 120]
+powershell -ExecutionPolicy Bypass -File scripts\game_test.ps1 -Game <your game folder> -Run last [-Accept]
+```
+
+`measure_test.ps1` measures your copy and starts nothing. `run_program.ps1` starts the program and nothing else,
+where you can see it; started by you, Windows treats the program as one you started and lets its window come to
+the front (measured 2026-11-28: started from a console in the background, Windows refused that). `game_test.ps1
+-Run` starts nothing: it judges the run folder (`last` = the newest). Without `-Run`, `game_test.ps1` does all
+three: it builds the weave, measures, starts `run_program.ps1` as a process of its own, and judges that run.
+
+In more detail: it builds the weave, then runs every measurement in [measure/](../measure/README.md) on your copy (read-only; each
 checks results of FINDINGS.md and says `same` or `DIFFERS`; the output goes to `measure.txt` of the run; the C++
 one is compiled with the weave's compiler and run beside the weave's PC graphics library, so it needs Python with
 numpy and capstone and the fork's `d3d12_vk.dll` and `d3d12core.dll` in `weave\build`). The measurements run only
