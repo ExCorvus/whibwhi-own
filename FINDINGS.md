@@ -2503,3 +2503,14 @@ the audio part of the weave.
   +0x04 is 3 (reading: maximum anisotropy, 3 = anisotropic filter); +0x40 is 1; +0x44..+0x50 are 0 or four times
   1.0, the 1.0 only with address mode 4 (border colour). So a PC sampler description can be read from all fields
   except the exact meaning of the values 1/2 at +0x04..+0x10 (point or linear for min, mag, mip).
+## 2026-11-28 - the order of the program's pipeline requests on each thread (game test 02:51, measured)
+
+- weave/d3d12_xs.cpp counts, per thread, which pipeline request follows which (device slots 57, 62, 67, 86), and
+  prints it with the whole picture of the pipeline flow. Answers unchanged.
+- At 32,768 requests to slots 62/86 (56.9 s): 86 then 86 32,667 times, 57 then 57 10,238 times, and not once 57 then
+  86 or 86 then 57. Compute: 67 then 62 42 times, 62 then 67 34, 62 then 62 52. First on a thread: 67 8 times, 86 5,
+  62 once.
+- So for compute the program asks slot 67 (a pipeline from its compiled code) first and slot 62 after the refusal,
+  as docs/exe-map/SHADER-PATH.md says. For graphics the two ways are separate: the requests through slot 57 (25,450
+  in this run) are not asked again through slot 86. Those pipelines are not asked for in any other way, so today
+  they are not made at all.
