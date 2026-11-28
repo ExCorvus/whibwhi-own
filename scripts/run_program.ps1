@@ -73,13 +73,13 @@ $p = Start-Process -FilePath (Join-Path $work 'boot_image.exe') -WorkingDirector
     -RedirectStandardError $log -RedirectStandardOutput (Join-Path $run 'run.out')
 Remove-Item Env:\WHIWHI_CALL_LEDGER, Env:\WHIWHI_WANTS_LEDGER
 if (-not $Hidden) {
-    $logWindow = Start-Process -FilePath 'powershell.exe' -PassThru -ArgumentList '-NoProfile', '-Command',
+    $logWindow = Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Minimized -ArgumentList '-NoProfile', '-Command',
         "`$host.UI.RawUI.WindowTitle = 'program log'; Get-Content -LiteralPath '$log' -Wait -Tail 50"
     # The console shows the program's window as the whole screen; Windows is asked for that from outside
     # (scripts\fullscreen_window.ps1). What it did is written to fullscreen.txt in the run's folder.
     Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass',
         '-File', "`"$(Join-Path $PSScriptRoot 'fullscreen_window.ps1')`"", '-ProcessId', "$($p.Id)",
-        '-Log', "`"$(Join-Path $run 'fullscreen.txt')`""
+        '-Log', "`"$(Join-Path $run 'fullscreen.txt')`"", '-ProgramLog', "`"$log`"", '-Away', "`"program log`""
 }
 try { $p.PriorityClass = 'Normal' } catch {}
 if (-not $p.WaitForExit(($Seconds + 60) * 1000)) { try { $p.Kill() } catch {}; $p.WaitForExit(15000) | Out-Null }
