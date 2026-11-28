@@ -16,7 +16,7 @@ Hans-Kristian Arntzen / contributors) and licensed under the **GNU Lesser Genera
 and license are at <https://github.com/HansKristian-Work/vkd3d-proton> (see its `LICENSE` and `COPYING.LESSER`).
 This project uses a fork of it, <https://github.com/ExCorvus/vkd3d-proton> (branch `whibwhi-own`), under the same
 licence, whose shader translator dxil-spirv (MIT, copyright its authors) comes from the fork
-<https://github.com/ExCorvus/dxil-spirv> (branch `whibwhi-own`). It is not vendored into this repository: build it separately (see `docs/BUILD-AND-RUN.md`) and place the built
+<https://github.com/ExCorvus/dxil-spirv-xbox> (branch `whibwhi-own`). It is not vendored into this repository: build it separately (see `docs/BUILD-AND-RUN.md`) and place the built
 `d3d12.dll` (as `d3d12_vk.dll`) and `d3d12core.dll` beside the weave executable. ExCorvus approved reusing it with
 these notices on 2026-11-24. The LGPL requires that users can relink/replace it — that holds here, since it is
 loaded by file name at run time and the system d3d12.dll is the fallback.
