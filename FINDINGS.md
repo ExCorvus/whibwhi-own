@@ -4,48 +4,34 @@ What has been measured about the game and about the shell. The **Current state**
 below it is the dated log, oldest entry first. A later entry overrides an earlier one. Addresses written as
 `fn 0x...` or `image+0x...` are offsets inside the game's executable.
 
-## Current state (2026-11-27, game test 23:13)
+## Current state (2026-11-28, game test 20:10)
 
-- **Where a run ends today (game test 23:13, PASS):** the program runs for about 60 s and then falls over at
-  image+0x161b994 (a read at 0x8) on its own window thread, while it builds its user interface: it creates a
-  `flash.display.Sprite` and hands it a value holder of its user-interface script system whose value (+0x20) has
-  not been given yet. Up to that moment the program reports progress to its watchdog every half second (the first
-  report at about 56 s), so it was running normally, not stuck. Right after it, another thread stops at the
-  program's own breakpoint image+0x344196 (not followed). Every file the program asks for is found and opened (file
-  trace 21:12). What should have given that value is not measured. Entry "the fault at about 70 s: in the program's
-  user interface, while it reports progress".
-- **Build:** `weave\build.cmd` builds the weave, the console libraries and the tools; 27 tests pass. They are a
-  build check on sample programs only (rule 11).
-- **The game test:** `scripts\game_test.ps1` runs the whole installation from the user's copy as it is started. It
-  first checks that its work folder holds exactly the build it is recorded for, runs every script in measure/,
-  counts every import call and judges the whole run against the baseline through the wants ledger (entries 15:42
-  and 19:37). Hard rules: the copy's folder unchanged, every measure/ script still holds.
-- **Loading:** the unmodified executable is placed at its preferred address; the installation's own libraries (the
-  ray-tracing builder, FidelityFX, Bink, libHttpClient) load from the copy.
-- **Windows answers where it has the same thing:** the runtime's start, its base object and every runtime interface
-  the program asks for go to Windows' own runtime (16:17 to 16:52); XNetworking and XUser are held (rule 3,
-  ExCorvus decides). The device's IDXGIDevice is answered from Windows' adapter and monitor (20:27). The import
-  GameInput.dll is answered by Windows' current GameInput 4.0 (GameInputRedist.dll, 23:13). The program's own frame
-  pacer sets the frame interval (33,333 us); the weave's own pacer was removed (12:42).
-- **Sound:** the sound chip (AcpHal), the stream channel (xapu, with libopus) and chad answer as read in the
-  executable. The program passes its sound start since 17:41, but no run has yet started a voice, opened a stream
-  or sent a chad page, so the sound round trip is not tested.
-- **Storage:** the weave's storage library reads with one event per reading thread (fix of 18:20); no read has
-  failed since.
-- **Graphics:** a real Direct3D 12 device on Vulkan through vkd3d-proton (forks ExCorvus/vkd3d-xbox and
-  ExCorvus/dxil-spirv-xbox, branch whibwhi-own) on the RX 9070 XT. Pipelines are made with the program's own root
-  signatures; rectangle and quad lists are made as triangle pipelines, and draws with them are still held (steps 2
-  and 3 not built). At 20:05, of 32,768 pipeline requests 2,052 were made (42 shaders); the largest refusal, 29,608
-  requests from 638 shaders, is a sampler taken from a table at a place computed at run time. None of the 714
-  shaders read holds the GPU's ray test. The program's own compute shaders (device slot 62) are not translated.
-- **What is on screen:** the program presents a 3840 x 2160 picture (format 28) into its own window. That picture is
-  a committed resource in the PC library's memory, not in the program's, so whether anything of the program's
-  picture is drawn in it is not measured.
-- **Network:** every function that could reach the network is refused; the network watch has seen no endpoint in
-  any game test.
-- **Older state:** the block that stood here until 2026-11-27 described boot b80 (the state of 2026-11-26) and is
-  replaced by this one. Answers that are less than the full work are in the entry "answers that say yes" and in the
-  newest entries; each is a place to look first when the program behaves wrongly.
+Look things up first in [docs/INDEX.md](docs/INDEX.md), the same state sorted by topic.
+
+- **Where a run ends (game test 20:10, PASS):** the program loads, runs its frame rhythm and then falls over at
+  image+0x161b994 in its user interface (`flash.display.Sprite` with an empty script value). This is a cause of
+  its own after loading. Its watchdog and frame pacer run normally up to that moment. A second stop, the program's
+  own breakpoint image+0x344196, follows a "no size" answer for a texture. Entries "the fault at about 70 s",
+  "second run with the sampler heap", "the watchdog's and the frame pacer's last 10 s".
+- **Build and test:** `weave\build.cmd` (27 tests, sample programs only, rule 11). `scripts\game_test.ps1` runs the
+  whole installation in three parts (measure only when changed, start the program, judge).
+- **Windows answers where it has the same thing:** the runtime and its interfaces, the user (as on an account with
+  no Xbox user), IDXGIDevice, GameInput (4.0), and FidelityFX (Windows' own AMD library from the driver). The
+  program's own frame pacer sets the frame interval. XNetworking stays held; the network stays refused.
+- **Graphics:** a Direct3D 12 device on Vulkan through vkd3d-xbox. The heaps the shaders see share one memory with
+  the program; the shell listens to the heaps and speaks the library's bytes back. Samplers go through Windows'
+  sampler heap. The rectangle list is drawn through a geometry shader.
+- **How the program hands over its GPU code:** one effect loader for all passes. It always prepares two things: its
+  finished code, lying in a region of its own memory (asked first, slots 57 graphics and 67 compute; the
+  installation's FidelityFX library names slot 67 "DeserializeComputePipelineStateX"), and a parcel on the asking
+  thread's stack (handed over only when the first way gives nothing, slots 62 and 86). The weave answers only the
+  parcels: graphics translated into its own PC form, compute refused (vkd3d refuses the program's own compute
+  shaders unchanged at the shader). So the program's own compute shaders, ray tests and lighting calculations
+  among them, do not run yet. Plan (not built): the finished code goes to the driver through Vulkan, the parcels
+  keep going through Direct3D (open hypothesis in docs/CODEWEB-THEORY.md).
+- **What is on screen:** the program presents its picture into its own window, which a script makes fullscreen
+  from outside. No frame has anything of the program's picture drawn yet.
+- **Older state:** the block of 2026-11-27 is replaced by this one; the dated entries below keep it.
 
 ## 2026-11-25 - the project restarts as its own shell
 
