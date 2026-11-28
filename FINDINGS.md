@@ -3092,3 +3092,22 @@ ExCorvus decided not to follow this further now; it is written down as a hint.
   shaders by name include bvh_skinning, indirect_light_probes, indirect_diffuse_lighting, sr_tracing and
   sr_denoising, the reflection passes, weathering and the cascades. The lighting is one path in the program. Which
   of the ways each pass's shaders take is not read yet.
+## 2026-11-28 - how the program's passes hand over their shaders: one effect loader, then by kind and by time (read in the exe, direct calls only)
+
+- The passes set up in fn 0xcba630 load their shaders by name through one function, fn 0x1adcc20 (the effect
+  loader). This is true of all the lighting passes (bvh_skinning, indirect_light_probes, indirect_diffuse_lighting,
+  sr_tracing and sr_denoising, tiled and deferred lighting, the cascades, subsurface scatter, the environment map).
+- From the loader there is one way, fn 0x247b530 -> fn 0x247b6c0, which splits by kind:
+  - Graphics programs at load time: via fn 0x1d65750 and the job fn 0x24772f0 to device slot 57 (base pipelines).
+  - Compute programs: via fn 0x247cfb0 and fn 0xf9f650 to fn 0x247fd30, which asks device slot 67 first
+    (fn 0x2480050) and then slot 62 (at 0x247fe66). This is the order measured in the runs.
+- The loader does not reach the slot 86 way by direct calls. Slot 86 comes at draw time (for example
+  unlit_draw -> fn 0x1d655d0 -> fn 0xb5a5d0 -> fn 0x2479760): a pipeline derived from a base through slot 55, or,
+  when there is no base, a whole stream through slot 86.
+- The builder library for the acceleration structures is a way of its own: it calls slot 62 itself, with PC
+  DXIL (2026-11-26).
+- So the ways split by who loads (the program's effect loader or the builder library), by kind (graphics or
+  compute) and by time (load time or draw time). The slot 62 and slot 86 ways the weave answers today are the
+  program's fallbacks, taken because slots 57 and 67 are refused.
+- Not read: inside fn 0x247b6c0, which programs of one effect go which way, and whether the ray-tracing and
+  global-illumination compute programs are told apart there. Calls through tables are not in this reading.
