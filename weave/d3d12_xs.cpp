@@ -1100,6 +1100,62 @@ void* xmem_function(const char* name) {
     return xmem ? reinterpret_cast<void*>(GetProcAddress(xmem, name)) : nullptr;
 }
 
+// One memory for each descriptor heap shaders reach (ExCorvus, 2026-11-28: "it needs to have a single memory,
+// ofc"; measured at 17:02: the program's memory and the PC heap held different things in the same slot). On the
+// Windows console the graphics library asks the memory library for a heap's memory, and the program's own routine
+// answers with the address it chose (see "descriptor heaps" above). vkd3d-xbox takes the same way when it is given
+// the memory library: vkd3d_xbox_set_descriptor_heap_memory (d3d12core.dll). Its heaps of types 0 and 1 are then
+// made on memory from XMemAlloc, called inside the creating call, and that memory is the heap: the CPU sees the
+// slots at the address the memory library gave, the GPU reads the heaps shaders see from it.
+namespace heap_memory {
+bool g_on = false;
+thread_local void* t_given = nullptr;
+thread_local unsigned long long t_given_bytes = 0;
+
+void* allocate(void*, std::uint64_t bytes, std::uint32_t type, std::uint32_t flags) {
+    const auto alloc = reinterpret_cast<void* (*)(unsigned long long, unsigned long long)>(xmem_function("XMemAlloc"));
+    void* at = alloc ? alloc(bytes, kDescriptorHeapAttributes) : nullptr;
+    t_given = at;
+    t_given_bytes = bytes;
+    static std::atomic<int> shown{0};
+    if (shown.fetch_add(1) < 8) {
+        logf("descriptor heap memory: the graphics library asked the memory library for %llu bytes (heap type %u, "
+             "flags 0x%x) and got 0x%llx\n",
+             static_cast<unsigned long long>(bytes), type, flags,
+             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(at)));
+    }
+    return at;
+}
+
+void release(void*, void* address) {
+    if (const auto free_memory = reinterpret_cast<void (*)(void*, unsigned long long)>(xmem_function("XMemFree"))) {
+        free_memory(address, kDescriptorHeapAttributes);
+    }
+}
+
+void attach(ID3D12Device* pc) {
+    char choice[8] = {};
+    if (GetEnvironmentVariableA("WHIWHI_ONE_HEAP_MEMORY", choice, sizeof(choice)) > 0 && choice[0] == '0') {
+        logf("descriptor heap memory: WHIWHI_ONE_HEAP_MEMORY=0 - not handed to the graphics library; each heap "
+             "shaders reach is held twice (the program's memory and the PC heap)\n");
+        return;
+    }
+    const HMODULE core = GetModuleHandleA("d3d12core.dll");
+    using Set = HRESULT(__stdcall*)(ID3D12Device*, void* (*)(void*, std::uint64_t, std::uint32_t, std::uint32_t),
+                                    void (*)(void*, void*), void*);
+    const auto set = core ? reinterpret_cast<Set>(GetProcAddress(core, "vkd3d_xbox_set_descriptor_heap_memory")) : nullptr;
+    if (!set) {
+        logf("descriptor heap memory: the graphics library has no way to take the memory library's memory - each "
+             "heap shaders reach is held twice (the program's memory and the PC heap)\n");
+        return;
+    }
+    const HRESULT hr = set(pc, &allocate, &release, nullptr);
+    g_on = hr == 0;
+    logf("descriptor heap memory: handed to the graphics library: 0x%lx - heaps of types 0 and 1 are %s\n",
+         static_cast<unsigned long>(hr), g_on ? "made on the memory library's memory (one memory)" : "held twice");
+}
+}  // namespace heap_memory
+
 void forget_descriptor_heap(Wrap* heap) {
     AcquireSRWLockExclusive(&g_heaps_lock);
     for (std::size_t i = 0; i < g_heaps.size(); ++i) {
@@ -1529,7 +1585,20 @@ void compare_heaps(double seconds) {
         }
         const unsigned step = r.type == 1 ? 16u : 32u;
         const auto* mine = reinterpret_cast<const unsigned char*>(r.title);
-        const auto* driver = reinterpret_cast<const unsigned char*>(r.pc_cpu);
+        // The PC library's handles of heaps shaders do not see carry marks in their low bits.
+        const auto* driver = reinterpret_cast<const unsigned char*>(r.pc_cpu & ~0x3Full);
+        if (reinterpret_cast<unsigned long long>(driver) == r.title) {
+            unsigned long long filled = 0;
+            static const unsigned char none[32] = {};
+            const unsigned long long slots_here = can_read(mine, r.bytes) ? r.bytes / step : 0;
+            for (unsigned long long i = 0; i < slots_here; ++i) {
+                filled += std::memcmp(mine + i * step, none, step) != 0;
+            }
+            logf("[heaps] %.0f s: heap type %u (%s), %llu slots of %u bytes: one memory (the program's and the "
+                 "driver's are the same), %llu slots filled\n",
+                 seconds, r.type, r.pc_gpu ? "shaders see it" : "shaders do not see it", r.bytes / step, step, filled);
+            continue;
+        }
         if (!can_read(mine, r.bytes) || !can_read(driver, r.bytes)) {
             logf("[heaps] %.0f s: heap type %u at 0x%llx (%llu bytes, %s): the %s memory cannot be read (driver's "
                  "start 0x%llx)\n",
@@ -5230,6 +5299,12 @@ HRESULT __stdcall w_device_slot14(Wrap* self, const D3D12_DESCRIPTOR_HEAP_DESC* 
     }
     ID3D12Device* device = static_cast<ID3D12Device*>(self->pc);
     ID3D12DescriptorHeap* heap = nullptr;
+    // Heaps shaders see only: those the GPU reads. The others keep vkd3d's own bookkeeping beside their slots
+    // (planar metadata), which the program's request for exactly the slots' size has no room for.
+    const bool one_memory = heap_memory::g_on && static_cast<unsigned>(desc->Type) <= 1u &&
+                            (desc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) != 0;
+    heap_memory::t_given = nullptr;
+    heap_memory::t_given_bytes = 0;
     const HRESULT hr = device->CreateDescriptorHeap(desc, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&heap));
     if (hr != 0 || !heap) {
         logf("device slot 14: the PC device could not create the descriptor heap (type %u, %u descriptors, flags "
@@ -5248,7 +5323,22 @@ HRESULT __stdcall w_device_slot14(Wrap* self, const D3D12_DESCRIPTOR_HEAP_DESC* 
     }
     Wrap* wrapped = wrap_kind(heap, kHeap);
     range.wrap = wrapped;
-    if (const auto allocate =
+    if (one_memory && heap_memory::t_given) {
+        // The heap is the memory the memory library gave inside the creating call; the PC library hands it back
+        // and gives it to the memory library again itself (heap_memory::release), so the wrap holds no address.
+        range.title = reinterpret_cast<unsigned long long>(heap_memory::t_given);
+        if ((range.pc_cpu & ~0x3Full) != range.title) {
+            logf("device slot 14: heap type %u: the memory library gave 0x%llx but the PC heap starts at 0x%llx\n",
+                 static_cast<unsigned>(desc->Type), range.title, range.pc_cpu);
+        }
+    } else if (one_memory) {
+        logf("device slot 14: heap type %u was not made on the memory library's memory (the graphics library asked "
+             "for none) - held twice\n",
+             static_cast<unsigned>(desc->Type));
+    }
+    if (range.title) {
+        // already the heap's own memory
+    } else if (const auto allocate =
             reinterpret_cast<void* (*)(unsigned long long, unsigned long long)>(xmem_function("XMemAlloc"))) {
         void* at = allocate(range.bytes, kDescriptorHeapAttributes);
         if (!at) {
@@ -7052,6 +7142,14 @@ HMODULE pc_d3d12() {
                     logf("vkd3d's pipeline cache: no place for it (LOCALAPPDATA not readable) - turned off\n");
                 }
             }
+            // vkd3d's heap robustness (on by default on the descriptor heap path) keeps a block of its own in front
+            // of the slots of the heap shaders see; the program reads its slots directly by place and its heaps start
+            // at the address the memory library gave (measured 2026-11-28, runs 17:37 and 17:40). Off, unless the
+            // user set VKD3D_CONFIG themselves.
+            if (GetEnvironmentVariableA("VKD3D_CONFIG", nullptr, 0) == 0) {
+                SetEnvironmentVariableA("VKD3D_CONFIG", "no_default_heap_robustness");
+                logf("vkd3d's configuration: no_default_heap_robustness (the slots of a heap start at its memory)\n");
+            }
             d3d12 = LoadLibraryExA(vk.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
             if (d3d12) {
                 logf("using the vkd3d-built d3d12.dll at %s (D3D12 on Vulkan)\n", vk.c_str());
@@ -7101,6 +7199,7 @@ long __stdcall D3D12XboxCreateDevice(IUnknown* adapter, const void* parameters, 
         logf("D3D12CreateDevice failed 0x%lx\n", static_cast<unsigned long>(hr));
         return hr ? static_cast<long>(hr) : 0x80004005L;
     }
+    heap_memory::attach(pc);
     // Creating methods, by their public D3D12 slot: (slot, position of the identifier, position of the place for
     // the result, kind of object).
     g_device = wrap_object(
