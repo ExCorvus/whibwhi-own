@@ -2302,7 +2302,7 @@ std::map<long, Second> seconds;
 long open_second = -1;
 unsigned long long total = 0;
 std::atomic<long> at_once{0}, most_at_once{0};
-std::atomic<unsigned long long> let_go{0}, translations{0}, translation_us{0}, device_us{0};
+std::atomic<unsigned long long> let_go{0}, translations{0}, translation_us{0}, device_us{0}, from_store{0};
 
 struct Timer {
     LARGE_INTEGER start{};
@@ -2330,10 +2330,10 @@ std::string whole_picture(double at) {
     std::string out;
     char text[400];
     std::snprintf(text, sizeof(text), "[pipeline flow] after %llu requests, at %.1f s of the run: %zu thread(s) asked, "
-                  "most at once %ld; pipelines the program let go: %llu; PC shaders written %llu, in %.2f s together; "
-                  "inside the PC device %.2f s together\n",
+                  "most at once %ld; pipelines the program let go: %llu; PC shaders written %llu, in %.2f s together, "
+                  "taken from the shader store %llu times; inside the PC device %.2f s together\n",
                   total, at, threads.size(), most_at_once.load(), let_go.load(), translations.load(),
-                  translation_us.load() / 1e6, device_us.load() / 1e6);
+                  translation_us.load() / 1e6, from_store.load(), device_us.load() / 1e6);
     out += text;
     for (int i = 0; i < 2; ++i) {
         const Slot& s = slots[i];
@@ -2607,14 +2607,127 @@ whiwhi::weave::PcShader translate_shader_container(const std::uint8_t* container
 // Shaders already written, kept in memory for the whole run: the game names the same containers in many pipeline
 // requests, so each one is written once. Found by a hash of the bytes and the stage, taken only when the stored
 // bytes match exactly. Refusals are kept as well.
+// An entry loaded from the shader store has no copy of the program's bytes (they stay in the installation and in
+// the program's memory only); it is matched by the bytes' length, the stage and a second hash of the bytes.
 struct TranslatedEntry {
     std::vector<std::uint8_t> original;
     whiwhi::weave::PcStage stage;
     std::shared_ptr<const whiwhi::weave::PcShader> shader;
+    std::uint32_t bytes = 0;
+    unsigned long long check = 0;
 };
 SRWLOCK g_translated_lock = SRWLOCK_INIT;
 std::unordered_multimap<unsigned long long, TranslatedEntry> g_translated;
 std::atomic<unsigned long long> g_translated_made{0}, g_translated_reused{0};
+
+unsigned long long translated_check(const std::uint8_t* container, std::uint32_t bytes) {
+    unsigned long long check = 0xcbf29ce484222325ull ^ 0x9e3779b97f4a7c15ull;
+    for (std::uint32_t i = 0; i < bytes; ++i) {
+        check = (check ^ container[i]) * 0x100000001b3ull;
+        check ^= check >> 29;
+    }
+    return check;
+}
+
+// ---- the shader store (ExCorvus, 2026-11-28: "we need to pretranslate shaders. it is the CURRENT PROBLEM") --
+// The time the shaders take to be written falls on time the program's own clock already counts. So every PC shader
+// this library writes (and every refusal, with its reason) is kept in a file on this PC, and the file is loaded
+// before the program's entry thread starts (whiwhi_d3d12_load_shader_store, called by the boot tool). The file is
+// named by a hash of this library's own file, so a new build of the translator starts a new store and never takes
+// shaders an older build wrote. What is kept: per shader the hash, length and stage of the program's bytes (not the
+// bytes), the PC container written for it, its bindings, or the reason it was refused. It stays on this PC, in
+// %LOCALAPPDATA%\whiwhi\shader-store; nothing of it belongs in the repository.
+namespace store {
+
+SRWLOCK lock = SRWLOCK_INIT;
+std::FILE* file = nullptr;
+std::string path;
+bool tried = false;
+constexpr std::uint32_t kRecord = 0x31535357u;  // "WSS1"
+
+std::string library_hash() {
+    HMODULE self = nullptr;
+    char name[MAX_PATH] = {};
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<const char*>(&library_hash), &self) ||
+        !GetModuleFileNameA(self, name, sizeof(name))) {
+        return std::string();
+    }
+    std::FILE* f = std::fopen(name, "rb");
+    if (!f) {
+        return std::string();
+    }
+    unsigned long long h = 1469598103934665603ull;
+    std::vector<unsigned char> chunk(1 << 16);
+    for (std::size_t n; (n = std::fread(chunk.data(), 1, chunk.size(), f)) > 0;) {
+        for (std::size_t i = 0; i < n; ++i) {
+            h = (h ^ chunk[i]) * 1099511628211ull;
+        }
+    }
+    std::fclose(f);
+    char text[24];
+    std::snprintf(text, sizeof(text), "%016llx", h);
+    return text;
+}
+
+// Called with the lock held exclusively.
+bool open_path() {
+    if (tried) {
+        return !path.empty();
+    }
+    tried = true;
+    char base[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", base, sizeof(base));
+    const std::string hash = library_hash();
+    if (n == 0 || n >= sizeof(base) || hash.empty()) {
+        logf("[shader store] no place for it (LOCALAPPDATA or this library's file not readable) - not kept\n");
+        return false;
+    }
+    std::string folder = std::string(base) + "\\whiwhi";
+    CreateDirectoryA(folder.c_str(), nullptr);
+    folder += "\\shader-store";
+    CreateDirectoryA(folder.c_str(), nullptr);
+    path = folder + "\\" + hash + ".bin";
+    return true;
+}
+
+void put_u32(std::vector<std::uint8_t>& out, std::uint32_t v) {
+    out.insert(out.end(), reinterpret_cast<const std::uint8_t*>(&v), reinterpret_cast<const std::uint8_t*>(&v) + 4);
+}
+void put_u64(std::vector<std::uint8_t>& out, unsigned long long v) {
+    out.insert(out.end(), reinterpret_cast<const std::uint8_t*>(&v), reinterpret_cast<const std::uint8_t*>(&v) + 8);
+}
+
+void keep(unsigned long long key, unsigned long long check, std::uint32_t bytes, whiwhi::weave::PcStage stage,
+          const whiwhi::weave::PcShader& shader) {
+    std::vector<std::uint8_t> record;
+    put_u32(record, kRecord);
+    put_u64(record, key);
+    put_u64(record, check);
+    put_u32(record, bytes);
+    put_u32(record, static_cast<std::uint32_t>(stage));
+    put_u32(record, shader.ok ? 1u : 0u);
+    put_u32(record, static_cast<std::uint32_t>(shader.reason.size()));
+    record.insert(record.end(), shader.reason.begin(), shader.reason.end());
+    put_u32(record, static_cast<std::uint32_t>(shader.container.size()));
+    record.insert(record.end(), shader.container.begin(), shader.container.end());
+    put_u32(record, static_cast<std::uint32_t>(shader.bindings.size()));
+    for (const auto& b : shader.bindings) {
+        const auto* p = reinterpret_cast<const std::uint8_t*>(&b);
+        record.insert(record.end(), p, p + sizeof(b));
+    }
+    AcquireSRWLockExclusive(&lock);
+    if (!file && open_path()) {
+        file = std::fopen(path.c_str(), "ab");
+    }
+    if (file) {
+        std::fwrite(record.data(), 1, record.size(), file);
+        std::fflush(file);
+    }
+    ReleaseSRWLockExclusive(&lock);
+}
+
+}  // namespace store
 
 std::shared_ptr<const whiwhi::weave::PcShader> translated_shader(const std::uint8_t* container, std::uint32_t bytes,
                                                                  whiwhi::weave::PcStage stage) {
@@ -2622,16 +2735,34 @@ std::shared_ptr<const whiwhi::weave::PcShader> translated_shader(const std::uint
     for (std::uint32_t i = 0; i < bytes; ++i) {
         key = (key ^ container[i]) * 1099511628211ull;
     }
+    unsigned long long check = 0;
+    bool checked = false;
     const auto same = [&](const TranslatedEntry& entry) {
-        return entry.stage == stage && entry.original.size() == bytes &&
-               std::memcmp(entry.original.data(), container, bytes) == 0;
+        if (entry.stage != stage) {
+            return false;
+        }
+        if (entry.original.empty()) {
+            if (entry.bytes != bytes) {
+                return false;
+            }
+            if (!checked) {
+                check = translated_check(container, bytes);
+                checked = true;
+            }
+            return entry.check == check;
+        }
+        return entry.original.size() == bytes && std::memcmp(entry.original.data(), container, bytes) == 0;
     };
     AcquireSRWLockShared(&g_translated_lock);
     for (auto [at, end] = g_translated.equal_range(key); at != end; ++at) {
         if (same(at->second)) {
             auto shader = at->second.shader;
+            const bool from_store = at->second.original.empty();
             ReleaseSRWLockShared(&g_translated_lock);
             ++g_translated_reused;
+            if (from_store) {
+                ++flow::from_store;
+            }
             return shader;
         }
     }
@@ -2650,10 +2781,89 @@ std::shared_ptr<const whiwhi::weave::PcShader> translated_shader(const std::uint
             return made;
         }
     }
-    g_translated.emplace(key, TranslatedEntry{std::vector<std::uint8_t>(container, container + bytes), stage, made});
+    g_translated.emplace(key, TranslatedEntry{std::vector<std::uint8_t>(container, container + bytes), stage, made,
+                                              bytes, 0});
     ReleaseSRWLockExclusive(&g_translated_lock);
     ++g_translated_made;
+    store::keep(key, checked ? check : translated_check(container, bytes), bytes, stage, *made);
     return made;
+}
+
+unsigned long long load_shader_store() {
+    using whiwhi::weave::PcBinding;
+    using whiwhi::weave::PcShader;
+    using whiwhi::weave::PcStage;
+    LARGE_INTEGER start;
+    QueryPerformanceCounter(&start);
+    std::vector<std::uint8_t> data;
+    std::string path;
+    AcquireSRWLockExclusive(&store::lock);
+    if (store::open_path()) {
+        path = store::path;
+        if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+            std::fseek(f, 0, SEEK_END);
+            const long size = std::ftell(f);
+            std::fseek(f, 0, SEEK_SET);
+            if (size > 0) {
+                data.resize(static_cast<std::size_t>(size));
+                data.resize(std::fread(data.data(), 1, data.size(), f));
+            }
+            std::fclose(f);
+        }
+    }
+    ReleaseSRWLockExclusive(&store::lock);
+    if (path.empty()) {
+        return 0;
+    }
+    std::size_t at = 0;
+    const auto take = [&](void* out, std::size_t n) {
+        if (at + n > data.size()) {
+            return false;
+        }
+        std::memcpy(out, data.data() + at, n);
+        at += n;
+        return true;
+    };
+    unsigned long long loaded = 0, refusals = 0;
+    bool broken = false;
+    AcquireSRWLockExclusive(&g_translated_lock);
+    while (at < data.size()) {
+        std::uint32_t mark = 0, bytes = 0, stage = 0, ok = 0, length = 0, count = 0;
+        unsigned long long key = 0, check = 0;
+        auto shader = std::make_shared<PcShader>();
+        if (!take(&mark, 4) || mark != store::kRecord || !take(&key, 8) || !take(&check, 8) || !take(&bytes, 4) ||
+            !take(&stage, 4) || !take(&ok, 4) || !take(&length, 4) || at + length > data.size()) {
+            broken = true;
+            break;
+        }
+        shader->ok = ok != 0;
+        shader->reason.assign(reinterpret_cast<const char*>(data.data() + at), length);
+        at += length;
+        if (!take(&length, 4) || at + length > data.size()) {
+            broken = true;
+            break;
+        }
+        shader->container.assign(data.begin() + static_cast<std::ptrdiff_t>(at),
+                                 data.begin() + static_cast<std::ptrdiff_t>(at + length));
+        at += length;
+        if (!take(&count, 4) || at + static_cast<std::size_t>(count) * sizeof(PcBinding) > data.size()) {
+            broken = true;
+            break;
+        }
+        shader->bindings.resize(count);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            take(&shader->bindings[i], sizeof(PcBinding));
+        }
+        g_translated.emplace(key, TranslatedEntry{{}, static_cast<PcStage>(stage), shader, bytes, check});
+        ++loaded;
+        refusals += shader->ok ? 0 : 1;
+    }
+    ReleaseSRWLockExclusive(&g_translated_lock);
+    logf("[shader store] loaded %llu written shaders (%llu of them refusals, kept with their reason) from %s in "
+         "%.2f s, before the program starts%s\n",
+         loaded, refusals, path.c_str(), flow::microseconds_since(start) / 1e6,
+         broken ? "; the file ends in a record that is not whole - read up to it" : "");
+    return loaded;
 }
 
 
@@ -5740,6 +5950,10 @@ void log_memory_kinds() {
              std::get<2>(item.first) & ~0xFFul, std::get<3>(item.first), item.second.regions, item.second.bytes,
              item.second.mapped_pages);
     }
+}
+
+unsigned long long __stdcall whiwhi_d3d12_load_shader_store(void) {
+    return load_shader_store();
 }
 
 unsigned long long __stdcall whiwhi_d3d12_report_image_writes(void) {
